@@ -86,7 +86,8 @@ Brain are treated as local state, not imported-task conflicts.
 
 | Переменная | Описание | Default |
 |---|---|---|
-| `BRAIN_PATH` | Путь к brain vault | `~/brain` |
+| `BRAIN_PATH` | Путь к слою данных (wiki, tasks) | `~/brain` |
+| `BRAIN_SYSTEM_PATH` | Путь к системным ассетам (roles, teams, doctrine, skills) | тот же, что `BRAIN_PATH` |
 | `BRAIN_WEBHOOK_URL` | URL для webhook событий | — (отключён) |
 | `BRAIN_WEBHOOK_TIMEOUT_SEC` | Таймаут webhook (сек) | `3` |
 | `BRAIN_WATCH_POLL_SEC` | Интервал опроса в watch-режиме (сек) | `5` |

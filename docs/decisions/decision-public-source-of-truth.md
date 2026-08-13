@@ -2,7 +2,7 @@
 title: Decision — Публичный репозиторий как источник системного кода, приватное дерево как слой данных
 type: decision
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-13
 curation: agent
 protected: false
 source_policy: advisory
@@ -247,8 +247,9 @@ CLA нет, inbound=outbound, Apache-2.0 — как записано в CONTRIBU
    Смягчение — хуки на commit и на push плюс периодический прогон по всей
    истории; отсутствие файла паттернов трактуется как отказ.
 3. **Публичный репозиторий становится доступен агентам на запись.**
-   Смягчение — branch protection на `main`, сужение автокоммита, ветки
-   `agent/*`.
+   Смягчение — branch protection на `master` (после Pro или после
+   публикации чистой истории), сужение автокоммита, ветки `agent/*`.
+   На приватном Free protection и rulesets отвечают 403 — см. ниже.
 4. **Переписывание истории публичного репозитория.** Дёшево сегодня,
    невозможно после первого форка или ссылки на SHA из issue. Проверить
    отсутствие форков непосредственно перед операцией.
@@ -298,6 +299,26 @@ CLA нет, inbound=outbound, Apache-2.0 — как записано в CONTRIBU
 Ранее заведённая `t-2026-08-10-wiki-opt-in-glob` (opt-in публикации по
 frontmatter) остаётся промежуточной мерой на время миграции и снимается
 вместе с `brain-publish` в пункте 8.
+
+## GitHub Free: что нельзя включить, пока репозиторий приватный
+
+`t-2026-08-10-repo-protection-github-pr`, 2026-08-13. Репозиторий
+`Blqd/brain` остаётся `PRIVATE`, `forkCount=0`, default branch — `master`
+(не `main`). Публичным его не делаем.
+
+Сделано: squash-merge выключен; merge-commit и rebase включены; метки
+`defect` / `proposal` / `contract-change` и русские близнецы
+`дефект` / `предложение` / `контракт`; CODEOWNERS; шаблон PR с правилом
+«ADR вперёд кода».
+
+Нельзя на private Free (HTTP 403, «Upgrade to GitHub Pro or make this
+repository public»): прямой push в `master` отклоняется; PR без зелёного
+CI не мержится. Отложено до GitHub Pro или до публикации после чистой
+истории. Локальный коммит `56a6bbf` в `~/brain` несёт 403-комментарий
+в CODEOWNERS/PR template и ссылки `config.yml` на `master`; на
+`Blqd/brain` он не пушился (история GitHub у агента split-history).
+Если агент истории пересоздаст репозиторий — заново выставить
+merge-настройки, метки и залить `.github/` из этого коммита.
 
 Связанные страницы: [[decision-runtime-core-boundaries]], [[decisions-log]],
 [[security-handoffs]], [[about-brain]].
