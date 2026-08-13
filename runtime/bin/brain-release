@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""brain-release — release gating and safe tag creation for Brain.
+
+Commands:
+  check       Run preflight checks before tagging a release
+  tag <vN>    Create a release tag after check passes (requires explicit confirm)
+
+Exit codes:
+  0  Success (check passed / tag created)
+  1  Gate failed or user declined
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _brain_path() -> Path:
+    return Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+
+
+def _repo_dir() -> Path:
+    return Path(os.environ.get("BRAIN_REPO_DIR", os.getcwd()))
+
+
+def _run(cmd: list[str], cwd: str | None = None,
+         timeout: int = 60) -> tuple[int, str, str]:
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       cwd=cwd, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _smoke_failure_excerpt(text: str) -> str:
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "<no output>"
+    priority = [
+        ln for ln in lines
+        if ("FAILED" in ln or "ERROR" in ln or "Results:" in ln or "[case:" in ln)
+    ]
+    if priority:
+        return "\n".join(priority[-10:])
+    return "\n".join(lines[-10:])
+
+
+_DEFAULT_VERSION_REGEX = r"^v\d+(\.\d+)*$"
+
+
+def _load_config() -> dict:
+    """Load release config from BRAIN_RELEASE_CONFIG (JSON file).
+
+    Schema:
+      {
+        "version_regex": "^v\\d+(\\.\\d+)*$",   # optional override
+        "extra_gates": [                          # optional custom gates
+          {"name": "my-check", "cmd": ["bash", "scripts/my.sh"],
+           "expect_in_stdout": "OK", "timeout": 60}
+        ]
+      }
+    """
+    cfg_path = os.environ.get("BRAIN_RELEASE_CONFIG", "")
+    if not cfg_path:
+        return {}
+    try:
+        return json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"WARN: BRAIN_RELEASE_CONFIG load failed ({e}); using defaults",
+              file=sys.stderr)
+        return {}
+
+
+# ── check ─────────────────────────────────────────────────────────────────────
+
+def cmd_check(args: argparse.Namespace, print_header: bool = True) -> bool:
+    """Run all preflight gates. Returns True if all pass."""
+    brain = _brain_path()
+    repo = _repo_dir()
+    failures: list[dict] = []
+    passed: list[dict] = []
+
+    def ok(name: str, detail: str = "") -> None:
+        passed.append({"gate": name, "detail": detail})
+        if not getattr(args, "json", False):
+            suffix = f" — {detail}" if detail else ""
+            print(f"  [OK]  {name}{suffix}")
+
+    def fail(name: str, detail: str) -> None:
+        failures.append({"gate": name, "detail": detail})
+        if not getattr(args, "json", False):
+            print(f"  [FAIL] {name}: {detail}")
+
+    if print_header and not getattr(args, "json", False):
+        print("brain-release check")
+        print(f"  BRAIN_PATH = {brain}")
+        print(f"  repo       = {repo}")
+        print()
+
+    # Gate 1: active=0
+    try:
+        rc, out, _ = _run(["brain-status"])
+        if rc != 0:
+            fail("active=0", "brain-status returned non-zero")
+        else:
+            # Parse active count
+            for line in out.splitlines():
+                if line.strip().startswith("Tasks:") and "active=" in line:
+                    m = re.search(r"active=(\d+)", line)
+                    if m:
+                        count = int(m.group(1))
+                        if count == 0:
+                            ok("active=0", "no open tasks")
+                        else:
+                            fail("active=0", f"active={count} tasks remain — close them first")
+                        break
+            else:
+                ok("active=0", "tasks line not found — assuming clean")
+    except Exception as e:
+        fail("active=0", str(e)[:100])
+
+    # Gate 2: brain-lint
+    try:
+        rc, out, err = _run(["brain-lint"])
+        if rc == 0:
+            ok("brain-lint")
+        else:
+            fail("brain-lint", (err or out).strip()[:200])
+    except Exception as e:
+        fail("brain-lint", str(e)[:100])
+
+    # Gate 3: brain-validate
+    try:
+        rc, out, err = _run(["brain-validate"])
+        if rc == 0:
+            ok("brain-validate")
+        else:
+            fail("brain-validate", (err or out).strip()[:200])
+    except Exception as e:
+        fail("brain-validate", str(e)[:100])
+
+    # Gate 4: smoke suite
+    smoke = Path(repo) / "tests" / "smoke.sh"
+    if smoke.exists():
+        try:
+            rc, out, err = _run(["bash", str(smoke)], cwd=str(repo), timeout=300)
+            if rc == 0 and "ALL TESTS PASSED" in out:
+                ok("tests/smoke.sh", "ALL TESTS PASSED")
+            else:
+                excerpt = _smoke_failure_excerpt(out + "\n" + err)
+                fail("tests/smoke.sh", f"exit={rc}\n{excerpt}")
+        except subprocess.TimeoutExpired:
+            fail("tests/smoke.sh", "timeout after 300s")
+        except Exception as e:
+            fail("tests/smoke.sh", str(e)[:100])
+    else:
+        fail("tests/smoke.sh", f"not found at {smoke}")
+
+    # Gate 5: index health
+    try:
+        rc, out, _ = _run(["brain-status"])
+        if "health=ok" in out:
+            ok("index health=ok")
+        elif "health=stale" in out:
+            fail("index health", "stale — run brain-index rebuild")
+        else:
+            ok("index health", "unknown — proceeding")
+    except Exception as e:
+        fail("index health", str(e)[:100])
+
+    # Extra gates from BRAIN_RELEASE_CONFIG
+    for gate in _load_config().get("extra_gates", []) or []:
+        name = gate.get("name", "extra")
+        cmd = gate.get("cmd") or []
+        if not isinstance(cmd, list) or not cmd:
+            fail(name, "config: cmd must be a non-empty list")
+            continue
+        timeout = int(gate.get("timeout", 60))
+        expect = gate.get("expect_in_stdout", "")
+        try:
+            rc, out, err = _run(cmd, cwd=str(repo), timeout=timeout)
+            if rc == 0 and (not expect or expect in out):
+                ok(name)
+            else:
+                fail(name, f"exit={rc}" + (f"; missing '{expect}'" if expect and expect not in out else ""))
+        except Exception as e:
+            fail(name, str(e)[:100])
+
+    if getattr(args, "json", False):
+        result = {
+            "ok": len(failures) == 0,
+            "brain_path": str(brain),
+            "repo": str(repo),
+            "passed": passed,
+            "failed": failures,
+            "total": len(passed) + len(failures),
+            "passed_count": len(passed),
+            "failed_count": len(failures),
+        }
+        print(json.dumps(result, indent=2))
+    else:
+        print()
+        total = len(passed) + len(failures)
+        print(f"Results: {len(passed)}/{total} gates passed")
+        if failures:
+            print(f"Blocked by: {', '.join(f['gate'] for f in failures)}")
+            print()
+            print("Fix the above issues before tagging a release.")
+            return False
+        print("All release gates passed. Ready to tag.")
+    return True
+
+
+# ── tag ───────────────────────────────────────────────────────────────────────
+
+def cmd_tag(args: argparse.Namespace) -> int:
+    version = args.version
+    pattern = _load_config().get("version_regex", _DEFAULT_VERSION_REGEX)
+    try:
+        tag_re = re.compile(pattern)
+    except re.error as e:
+        print(f"ERROR: invalid version_regex in config ({e}); using default",
+              file=sys.stderr)
+        tag_re = re.compile(_DEFAULT_VERSION_REGEX)
+    if not tag_re.match(version):
+        print(f"ERROR: version must match {pattern}, got: {version}",
+              file=sys.stderr)
+        return 1
+
+    repo = str(_repo_dir())
+    message = args.message or f"Brain {version} baseline"
+
+    # Run check first
+    print(f"=== brain-release check (required before tag {version}) ===")
+    print()
+    ok = cmd_check(args, print_header=True)
+    if not ok:
+        print(f"\nTag {version} NOT created — fix gates above first.")
+        return 1
+
+    print()
+
+    # Check tag doesn't already exist
+    rc, out, _ = _run(["git", "-C", repo, "tag", "-l", version])
+    if version in out.split():
+        print(f"ERROR: tag {version} already exists.", file=sys.stderr)
+        return 1
+
+    # Require explicit confirmation (unless --yes)
+    if not args.yes:
+        try:
+            answer = input(f"Create tag '{version}' with message '{message}'? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer != "y":
+            print("Aborted.")
+            return 1
+
+    # Create tag
+    rc, out, err = _run(["git", "-C", repo, "tag", "-a", version, "-m", message])
+    if rc == 0:
+        print(f"Tag created: {version}")
+        # Verify
+        rc2, out2, _ = _run(["git", "-C", repo, "tag", "-n", "--list", version])
+        if out2.strip():
+            print(f"  {out2.strip()}")
+        return 0
+    else:
+        print(f"ERROR: git tag failed: {err.strip()}", file=sys.stderr)
+        return 1
+
+
+# ── arg parser ────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="brain-release",
+        description="Release gating and safe tag creation for Brain.",
+    )
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
+
+    cp = sub.add_parser("check", help="Run all preflight gates")
+    cp.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    tp = sub.add_parser("tag", help="Create a release tag (runs check first)")
+    tp.add_argument("version", help="Tag name, e.g. v6")
+    tp.add_argument("-m", "--message", default="", help="Tag annotation message")
+    tp.add_argument("--yes", action="store_true",
+                    help="Skip interactive confirmation (for CI)")
+
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.cmd is None:
+        parser.print_help()
+        sys.exit(0)
+    elif args.cmd == "check":
+        ok = cmd_check(args)
+        sys.exit(0 if ok else 1)
+    elif args.cmd == "tag":
+        sys.exit(cmd_tag(args))
+
+
+if __name__ == "__main__":
+    main()

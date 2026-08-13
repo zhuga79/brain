@@ -1,0 +1,784 @@
+#!/usr/bin/env python3
+"""Create and manage Brain orchestrator handoff artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import errno
+import json
+import os
+import pty
+import re
+import selectors
+import subprocess
+import sys
+import termios
+import tty
+from pathlib import Path
+from typing import Any
+
+
+LIMIT_RE = re.compile(
+    r"(429|too many requests|resource_exhausted|quota|rate[- ]?limit|rate limited|"
+    r"capacity exhausted|model_capacity_exhausted|no capacity|"
+    r"usage limit|credits|purchase more credits|"
+    r"context length|context window|token limit|max tokens|limit exceeded)",
+    re.IGNORECASE,
+)
+try:
+    import brain_provider  # type: ignore
+except Exception:  # pragma: no cover - fallback for partial installs
+    brain_provider = None  # type: ignore
+
+try:
+    from brain_handoff_detector import detect_limit, detect_handoff  # type: ignore
+except Exception:
+    def detect_limit(text: str) -> dict | None:
+        return None
+
+    def detect_handoff(text: str) -> dict | None:
+        return None
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def read_text(path: Path, default: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+
+
+def read_tail_text(path: Path, max_bytes: int = 65536) -> str:
+    with path.open("rb") as f:
+        try:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes), os.SEEK_SET)
+        except OSError:
+            f.seek(0)
+        return f.read(max_bytes).decode("utf-8", errors="replace")
+
+
+def run_text(args: list[str], brain: Path) -> str:
+    env = os.environ.copy()
+    env["BRAIN_PATH"] = str(brain)
+    try:
+        res = subprocess.run(args, env=env, check=False, capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return f"(failed to run {' '.join(args)}: {exc})"
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+    if res.returncode != 0 and err:
+        return f"{out}\n{err}".strip()
+    return out
+
+
+def run_command_pty(command: list[str], brain: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["BRAIN_PATH"] = str(brain)
+    master_fd, slave_fd = pty.openpty()
+    old_tty = None
+    stdout_parts: list[str] = []
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
+        )
+    except FileNotFoundError as exc:
+        os.close(master_fd)
+        os.close(slave_fd)
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+    finally:
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+
+    selector = selectors.DefaultSelector()
+    selector.register(master_fd, selectors.EVENT_READ, "child")
+    stdin_registered = False
+    try:
+        stdin_fd = sys.stdin.fileno()
+        selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
+        stdin_registered = True
+        if sys.stdin.isatty():
+            old_tty = termios.tcgetattr(stdin_fd)
+            tty.setcbreak(stdin_fd)
+    except (OSError, ValueError):
+        stdin_fd = -1
+
+    child_open = True
+    try:
+        while child_open:
+            for key, _events in selector.select(timeout=0.1):
+                if key.data == "child":
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        data = b""
+                    if not data:
+                        selector.unregister(master_fd)
+                        child_open = False
+                        continue
+                    stdout_parts.append(data.decode("utf-8", errors="replace"))
+                    os.write(sys.stdout.fileno(), data)
+                elif key.data == "stdin":
+                    try:
+                        data = os.read(stdin_fd, 4096)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        if stdin_registered:
+                            selector.unregister(stdin_fd)
+                            stdin_registered = False
+                        continue
+                    os.write(master_fd, data)
+            if proc.poll() is not None and not child_open:
+                break
+        rc = proc.wait()
+    finally:
+        if old_tty is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_tty)
+        try:
+            selector.close()
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+    return subprocess.CompletedProcess(command, rc, "".join(stdout_parts), "")
+
+
+def task_is_active(brain: Path, task: str) -> bool:
+    if not task:
+        return False
+    try:
+        return task in (brain / "tasks" / "active.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def parse_next_task(brain: Path, role: str = "") -> str:
+    cmd = ["brain-task", "next"]
+    if role:
+        cmd += ["--role", role]
+    out = run_text(cmd, brain)
+    match = re.search(r"\b(t-[0-9a-z._-]+)\b", out)
+    return match.group(1) if match else ""
+
+
+def provider_summary(brain: Path) -> list[str]:
+    if brain_provider is None:
+        return ["provider matrix unavailable"]
+    try:
+        status = brain_provider.collect_provider_status(brain)
+    except Exception as exc:
+        return [f"provider matrix unavailable: {exc}"]
+    lines: list[str] = []
+    for role, info in sorted(status.get("roles", {}).items()):
+        preferred = info.get("preferred") or {}
+        unavailable = info.get("unavailable") or []
+        if preferred:
+            pref = f"{preferred.get('provider')}/{preferred.get('model')} ({preferred.get('status')})"
+        else:
+            pref = "none"
+        lines.append(f"- {role}: {pref}; unavailable={len(unavailable)}")
+    return lines or ["provider matrix empty"]
+
+
+def write_log(brain: Path, reason: str, agent: str, task: str, out_path: Path) -> None:
+    log = brain / "wiki" / "log.md"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"## [{utc_now()}] orchestrator-handoff | {task or '-'} | {agent} | {reason}:{out_path}\n")
+    except OSError:
+        pass
+
+
+def _rotate_journals(handoff_dir: Path) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = (now - dt.timedelta(days=30)).strftime("%Y-%m-%d")
+    for p in handoff_dir.glob("journal-*.ndjson"):
+        match = re.match(r"journal-(\d{4}-\d{2}-\d{2})\.ndjson$", p.name)
+        if match:
+            date_str = match.group(1)
+            if date_str < cutoff:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
+def _code_block(text: str, heading: str) -> str:
+    m = re.search(rf"^## {re.escape(heading)}\s*```(?:[a-zA-Z0-9_-]+)?\s*(.*?)^```", text, re.M | re.S)
+    return m.group(1).strip() if m else ""
+
+
+def _field(text: str, name: str) -> str:
+    m = re.search(rf"^{re.escape(name)}:\s*(.*)$", text, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def parse_handoff(path: Path) -> dict[str, Any]:
+    artifact: dict[str, Any] = {
+        "exists": False,
+        "path": str(path),
+        "generated": "",
+        "reason": "",
+        "from_agent": "",
+        "to_role": "",
+        "task": "",
+        "next_task": "",
+        "brain": "",
+        "status_text": "",
+        "provider_summary": [],
+        "commands": [],
+        "active_queue_excerpt": "",
+        "trigger_excerpt": "",
+    }
+    if not path.exists():
+        return artifact
+    text = path.read_text(encoding="utf-8", errors="replace")
+    providers = []
+    provider_block = re.search(r"^## Provider Matrix\s*(.*?)(?=^## |\Z)", text, re.M | re.S)
+    if provider_block:
+        providers = [line.strip() for line in provider_block.group(1).splitlines() if line.strip()]
+    artifact.update({
+        "exists": True,
+        "generated": _field(text, "generated"),
+        "reason": _field(text, "reason"),
+        "from_agent": _field(text, "from_agent"),
+        "to_role": _field(text, "to_role"),
+        "task": _field(text, "task"),
+        "next_task": _field(text, "next_task"),
+        "brain": _field(text, "brain"),
+        "status_text": _code_block(text, "Current Status"),
+        "provider_summary": providers,
+        "commands": [line.strip() for line in _code_block(text, "Next Commands").splitlines() if line.strip()],
+        "active_queue_excerpt": _code_block(text, "Active Queue Snapshot"),
+        "trigger_excerpt": _code_block(text, "Trigger Output Excerpt")[:1200],
+    })
+    return artifact
+
+
+def build_handoff(args: argparse.Namespace, output_excerpt: str = "") -> tuple[Path, str, dict[str, Any]]:
+    brain = brain_path(args.brain)
+    ts = utc_now()
+    out = Path(args.out).expanduser() if args.out else brain / "handoff" / "ORCHESTRATOR_HANDOFF.md"
+    # A limit handoff usually happens while the current task is already taken
+    # and therefore absent from `brain-task next`. Continue the current task by
+    # default; only switch to another task when --next-task is explicit.
+    next_task = args.next_task or args.task or parse_next_task(brain, args.to_role or "")
+    status = run_text(["brain-status"], brain)
+    active = read_text(brain / "tasks" / "active.md", "(missing active.md)")
+    providers = "\n".join(provider_summary(brain))
+    from_agent = getattr(args, "from_agent", None) or getattr(args, "agent", None) or "unknown"
+    to_role = args.to_role or "orchestrator"
+    reason = args.reason or "manual"
+
+    here = Path(__file__).resolve().parent
+    schema_path = here.parent / "schemas" / "handoff.json"
+    if not schema_path.exists():
+        schema_path = Path.home() / ".local" / "share" / "brain" / "schemas" / "handoff.json"
+    if schema_path.exists():
+        try:
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema_data = json.load(f)
+            enum_values = schema_data.get("properties", {}).get("reason", {}).get("enum", [])
+            if enum_values and reason not in enum_values:
+                print(f"error: unknown handoff reason '{reason}'. allowed values: {', '.join(enum_values)}", file=sys.stderr)
+                sys.exit(1)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"warning: failed to validate handoff reason against schema: {e}", file=sys.stderr)
+
+    next_commands = [
+        f"export BRAIN_PATH={brain}",
+        "brain-status",
+        "brain-task list",
+    ]
+    if next_task:
+        next_agent = f"<next-{to_role}-agent-id>"
+        next_commands.extend(
+            [
+                f"brain-task take {next_task} --as {next_agent}",
+                f"brain-run --role {to_role} --task {next_task} --agent-id {next_agent} | <next-cli>",
+            ]
+        )
+
+    excerpt = ""
+    if output_excerpt:
+        clean = output_excerpt.strip()
+        if len(clean) > 4000:
+            clean = clean[-4000:]
+        excerpt = f"\n## Trigger Output Excerpt\n\n```text\n{clean}\n```\n"
+
+    artifact = {
+        "exists": True,
+        "path": str(out),
+        "generated": ts,
+        "reason": reason,
+        "from_agent": from_agent,
+        "to_role": to_role,
+        "task": args.task or "",
+        "next_task": next_task or "",
+        "brain": str(brain),
+        "status_text": status,
+        "provider_summary": provider_summary(brain),
+        "commands": next_commands,
+        "active_queue_excerpt": active.strip(),
+        "trigger_excerpt": output_excerpt.strip()[-1200:] if output_excerpt else "",
+    }
+    if getattr(args, "fallback_reason", None):
+        artifact["fallback_reason"] = args.fallback_reason
+    if getattr(args, "provider_from", None):
+        try:
+            artifact["provider_from"] = json.loads(args.provider_from)
+        except Exception:
+            pass
+    if getattr(args, "provider_to", None):
+        try:
+            artifact["provider_to"] = json.loads(args.provider_to)
+        except Exception:
+            pass
+
+
+    # Build body markdown
+    body_parts = [
+        "# Brain Orchestrator Handoff",
+        "",
+        f"generated: {ts}",
+        f"reason: {reason}",
+        f"from_agent: {from_agent}",
+        f"to_role: {to_role}",
+        f"task: {args.task or ''}",
+        f"next_task: {next_task or ''}",
+        f"brain: {brain}"
+    ]
+    if getattr(args, "fallback_reason", None):
+        body_parts.append(f"fallback_reason: {args.fallback_reason}")
+    if getattr(args, "provider_from", None):
+        body_parts.append(f"provider_from: {args.provider_from}")
+    if getattr(args, "provider_to", None):
+        body_parts.append(f"provider_to: {args.provider_to}")
+
+    body_parts.extend([
+        "",
+        "## Current Status",
+        "",
+        "```text",
+        status,
+        "```",
+        "",
+        "## Provider Matrix",
+        "",
+        providers,
+        "",
+        "## Next Commands",
+        "",
+        "```bash",
+        "\n".join(next_commands),
+        "```",
+        "",
+        "## Active Queue Snapshot",
+        "",
+        "```markdown",
+        active.strip(),
+        "```"
+    ])
+    
+    if excerpt:
+        body_parts.append(excerpt)
+        
+    body_parts.extend([
+        "",
+        "## Notes",
+        "",
+        "- This file is local Brain state and may contain task titles or excerpts from CLI output.",
+        "- It is intended for handing orchestration to another local CLI when the current provider hits quota, rate, or context limits.",
+        "- The next orchestrator must still follow the lock protocol before changing task state.",
+        ""
+    ])
+    body = "\n".join(body_parts)
+    return out, body, artifact
+
+
+def json_payload(artifact: dict[str, Any], ok: bool = True) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "schema_version": 1,
+        "artifact": artifact,
+    }
+
+
+def _write_handoff_files(args: argparse.Namespace, out: Path, body: str, artifact: dict[str, Any]) -> None:
+    brain = brain_path(args.brain)
+    handoff_dir = brain / "handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    _rotate_journals(handoff_dir)
+
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    journal_path = handoff_dir / f"journal-{today}.ndjson"
+
+    payload = json_payload(artifact)
+    with journal_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body, encoding="utf-8")
+
+    write_log(brain, args.reason or "manual", getattr(args, "from_agent", None) or getattr(args, "agent", None) or "unknown", args.task or "", out)
+
+
+def create_handoff(args: argparse.Namespace, output_excerpt: str = "") -> Path:
+    out, body, artifact = build_handoff(args, output_excerpt=output_excerpt)
+    _write_handoff_files(args, out, body, artifact)
+    return out
+
+
+def create_handoff_with_artifact(args: argparse.Namespace, output_excerpt: str = "") -> tuple[Path, dict[str, Any]]:
+    out, body, artifact = build_handoff(args, output_excerpt=output_excerpt)
+    _write_handoff_files(args, out, body, artifact)
+    return out, artifact
+
+
+def _iter_journal(brain: Path, reverse: bool = False):
+    handoff_dir = brain / "handoff"
+    if not handoff_dir.exists():
+        return
+    files = sorted(handoff_dir.glob("journal-*.ndjson"), reverse=reverse)
+    for p in files:
+        if not p.is_file():
+            continue
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+            if reverse:
+                lines = reversed(lines)
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    pass
+        except OSError:
+            pass
+
+def _match_filters(art: dict[str, Any], args: argparse.Namespace) -> bool:
+    if getattr(args, "task", None) and art.get("task") != args.task:
+        return False
+    if getattr(args, "agent", None) and art.get("from_agent") != args.agent:
+        return False
+    if getattr(args, "reason", None) and art.get("reason") != args.reason:
+        return False
+    return True
+
+def format_artifact_as_markdown(artifact: dict[str, Any]) -> str:
+    lines = [
+        "# Brain Orchestrator Handoff\n",
+        f"generated: {artifact.get('generated', '')}",
+        f"reason: {artifact.get('reason', '')}",
+        f"from_agent: {artifact.get('from_agent', '')}",
+        f"to_role: {artifact.get('to_role', '')}",
+        f"task: {artifact.get('task', '')}",
+        f"next_task: {artifact.get('next_task', '')}",
+        f"brain: {artifact.get('brain', '')}\n",
+        "## Current Status\n",
+        "```text\n" + artifact.get("status_text", "") + "\n```\n",
+        "## Provider Matrix\n\n" + "\n".join(artifact.get("provider_summary", [])) + "\n",
+        "## Next Commands\n\n```bash\n" + "\n".join(artifact.get("commands", [])) + "\n```\n",
+        "## Active Queue Snapshot\n\n```markdown\n" + artifact.get("active_queue_excerpt", "") + "\n```",
+    ]
+    trigger = artifact.get("trigger_excerpt", "")
+    if trigger:
+        lines.append(f"\n## Trigger Output Excerpt\n\n```text\n{trigger}\n```")
+    lines.append("\n## Notes\n\n- This file is local Brain state and may contain task titles or excerpts from CLI output.")
+    lines.append("- It is intended for handing orchestration to another local CLI when the current provider hits quota, rate, or context limits.")
+    lines.append("- The next orchestrator must still follow the lock protocol before changing task state.\n")
+    return "\n".join(lines)
+
+def cmd_list(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    found = False
+    for item in _iter_journal(brain, reverse=False):
+        art = item.get("artifact", {})
+        if not _match_filters(art, args):
+            continue
+        found = True
+        if args.json:
+            print(json.dumps(item, ensure_ascii=False))
+        else:
+            ts = art.get("generated", "")
+            task = art.get("task", "") or "-"
+            f_ag = art.get("from_agent", "")
+            t_ro = art.get("to_role", "")
+            reason = art.get("reason", "")
+            print(f"{ts} | {task} | {f_ag} -> {t_ro} | {reason}")
+    if not found and not args.json:
+        print("no handoffs found", file=sys.stderr)
+    return 0
+
+def cmd_tail(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    results = []
+    for item in _iter_journal(brain, reverse=True):
+        art = item.get("artifact", {})
+        if not _match_filters(art, args):
+            continue
+        results.append(item)
+        if len(results) >= args.n:
+            break
+    
+    found = False
+    for item in reversed(results):
+        found = True
+        art = item.get("artifact", {})
+        if args.json:
+            print(json.dumps(item, ensure_ascii=False))
+        else:
+            ts = art.get("generated", "")
+            task = art.get("task", "") or "-"
+            f_ag = art.get("from_agent", "")
+            t_ro = art.get("to_role", "")
+            reason = art.get("reason", "")
+            print(f"{ts} | {task} | {f_ag} -> {t_ro} | {reason}")
+    if not found and not args.json:
+        print("no handoffs found", file=sys.stderr)
+    return 0
+
+def cmd_create(args: argparse.Namespace) -> int:
+    excerpt = getattr(args, "excerpt", "")
+    if getattr(args, "excerpt_file", ""):
+        excerpt_path = Path(args.excerpt_file).expanduser()
+        if not excerpt_path.exists() or not excerpt_path.is_file():
+            print(f"excerpt file not found: {excerpt_path}", file=sys.stderr)
+            return 1
+        file_excerpt = read_tail_text(excerpt_path)
+        excerpt = "\n".join(part for part in (excerpt, file_excerpt) if part).strip()
+
+    if getattr(args, "from_task_output", ""):
+        out_path = Path(args.from_task_output).expanduser()
+        if out_path.exists():
+            text = out_path.read_text(encoding="utf-8", errors="replace")
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    args.task = args.task or data.get("task_id") or data.get("task") or ""
+                    args.from_agent = args.from_agent or data.get("agent_id") or data.get("agent") or ""
+                    excerpt = excerpt or data.get("result") or data.get("message") or text
+            except Exception:
+                # Fallback for Markdown or plain text
+                m_task = re.search(r"\b(?:task|task_id|task-id)[:=]\s*([^\s]+)", text, re.IGNORECASE)
+                if m_task and not args.task:
+                    args.task = m_task.group(1)
+                m_agent = re.search(r"\b(?:agent|agent_id|agent-id)[:=]\s*([^\s]+)", text, re.IGNORECASE)
+                if m_agent and not args.from_agent:
+                    args.from_agent = m_agent.group(1)
+                excerpt = excerpt or text
+
+            limit_info = detect_handoff(text)
+            if limit_info and "reason" in limit_info:
+                args.reason = limit_info["reason"]
+
+    out, artifact = create_handoff_with_artifact(args, output_excerpt=excerpt)
+    if args.json:
+        print(json.dumps(json_payload(artifact), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff: {out}")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    path_val = getattr(args, "id_or_path", "")
+    if not path_val:
+        path = brain / "handoff" / "ORCHESTRATOR_HANDOFF.md"
+        if not path.exists():
+            print("handoff not found: ORCHESTRATOR_HANDOFF.md", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(json_payload(parse_handoff(path)), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        print(path.read_text(encoding="utf-8", errors="replace"))
+        return 0
+
+    path = Path(path_val).expanduser()
+    if path.exists() and path.is_file():
+        if args.json:
+            print(json.dumps(json_payload(parse_handoff(path)), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        print(path.read_text(encoding="utf-8", errors="replace"))
+        return 0
+
+    # Search in journal
+    for item in _iter_journal(brain, reverse=True):
+        art = item.get("artifact", {})
+        if art.get("generated", "").startswith(path_val):
+            if args.json:
+                print(json.dumps(item, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0
+            print(format_artifact_as_markdown(art))
+            return 0
+
+    print(f"handoff not found: {path_val}", file=sys.stderr)
+    return 1
+
+
+def cmd_auto_from_clipboard(args: argparse.Namespace) -> int:
+    import shutil
+    import tempfile
+    
+    text = ""
+    try:
+        if shutil.which("xclip"):
+            text = subprocess.run(["xclip", "-selection", "clipboard", "-o"], capture_output=True, text=True).stdout
+        elif shutil.which("xsel"):
+            text = subprocess.run(["xsel", "--clipboard", "--output"], capture_output=True, text=True).stdout
+        elif shutil.which("pbpaste"):
+            text = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+        else:
+            print("No clipboard utility found (xclip, xsel, pbpaste)", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Failed to read clipboard: {e}", file=sys.stderr)
+        return 1
+
+    if not text:
+        print("Clipboard is empty", file=sys.stderr)
+        return 1
+        
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+        f.write(text)
+        tmp_name = f.name
+        
+    args.from_task_output = tmp_name
+    res = cmd_create(args)
+    try:
+        Path(tmp_name).unlink()
+    except OSError:
+        pass
+    return res
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("brain-handoff run: command required after --", file=sys.stderr)
+        return 2
+
+    if args.pty:
+        res = run_command_pty(command, brain_path(args.brain))
+        stdout = res.stdout or ""
+        stderr = res.stderr or ""
+    else:
+        try:
+            res = subprocess.run(command, check=False, capture_output=True, text=True)
+            stdout = res.stdout or ""
+            stderr = res.stderr or ""
+        except FileNotFoundError as exc:
+            stdout = ""
+            stderr = str(exc)
+            res = subprocess.CompletedProcess(command, 127, stdout, stderr)
+
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+
+    combined = f"{stdout}\n{stderr}"
+    limit_detected = bool(LIMIT_RE.search(combined))
+    if limit_detected and (res.returncode != 0 or task_is_active(brain_path(args.brain), args.task)):
+        args.reason = args.reason or "limit-exhausted"
+        out = create_handoff(args, output_excerpt=combined)
+        print(f"brain-handoff: limit detected; wrote {out}", file=sys.stderr)
+    return int(res.returncode)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Create Brain orchestrator handoff artifacts.")
+    parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    create = sub.add_parser("create", help="Create a handoff artifact.")
+    create.add_argument("--reason", default="manual", help="Handoff reason, e.g. limit-exhausted.")
+    create.add_argument("--fallback-reason", default="", help="Reason for fallback.")
+    create.add_argument("--provider-from", default="", help="JSON string for provider_from.")
+    create.add_argument("--provider-to", default="", help="JSON string for provider_to.")
+    create.add_argument("--from", dest="from_agent", default="", help="Current orchestrator agent id.")
+    create.add_argument("--to-role", default="orchestrator", help="Target role for continuation.")
+    create.add_argument("--task", default="", help="Current task id.")
+    create.add_argument("--next-task", default="", help="Explicit next task id.")
+    create.add_argument("--out", default="", help="Output path. Default: $BRAIN/handoff/ORCHESTRATOR_HANDOFF.md")
+    create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    create.add_argument("--excerpt", default="", help="Trigger output excerpt.")
+    create.add_argument("--excerpt-file", default="", help="Read trigger output excerpt from a file.")
+    create.add_argument("--from-task-output", default="", help="Extract fields from a task output dump (JSON or text).")
+    create.set_defaults(func=cmd_create)
+
+    show = sub.add_parser("show", help="Print the current handoff artifact.")
+    show.add_argument("id_or_path", nargs="?", default="", help="Optional handoff ID or path.")
+    show.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    show.set_defaults(func=cmd_show)
+
+    lst = sub.add_parser("list", help="List handoffs from the journal.")
+    lst.add_argument("--task", default="", help="Filter by task.")
+    lst.add_argument("--agent", default="", help="Filter by from_agent.")
+    lst.add_argument("--reason", default="", help="Filter by reason.")
+    lst.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    lst.set_defaults(func=cmd_list)
+
+    tail = sub.add_parser("tail", help="Show the last N handoffs from the journal.")
+    tail.add_argument("-n", type=int, default=5, help="Number of handoffs to show.")
+    tail.add_argument("--task", default="", help="Filter by task.")
+    tail.add_argument("--agent", default="", help="Filter by from_agent.")
+    tail.add_argument("--reason", default="", help="Filter by reason.")
+    tail.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    tail.set_defaults(func=cmd_tail)
+
+    clip = sub.add_parser("auto-from-clipboard", help="Create a handoff from clipboard contents.")
+    clip.add_argument("--reason", default="", help="Handoff reason.")
+    clip.add_argument("--from", dest="from_agent", default="", help="Current orchestrator agent id.")
+    clip.add_argument("--to-role", default="orchestrator", help="Target role for continuation.")
+    clip.add_argument("--task", default="", help="Current task id.")
+    clip.add_argument("--next-task", default="", help="Explicit next task id.")
+    clip.add_argument("--out", default="", help="Output path.")
+    clip.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    clip.add_argument("--excerpt", default="", help="Trigger output excerpt.")
+    clip.set_defaults(func=cmd_auto_from_clipboard)
+
+    run = sub.add_parser("run", help="Run a command and create handoff on quota/context-limit failure.")
+    run.add_argument("--reason", default="", help="Override handoff reason.")
+    run.add_argument("--agent", default="", help="Current agent id.")
+    run.add_argument("--from", dest="from_agent", default="", help="Current orchestrator agent id.")
+    run.add_argument("--to-role", default="orchestrator", help="Target role for continuation.")
+    run.add_argument("--task", default="", help="Current task id.")
+    run.add_argument("--next-task", default="", help="Explicit next task id.")
+    run.add_argument("--out", default="", help="Output path.")
+    run.add_argument("--pty", action="store_true", help="Run command through a PTY with live output and stdin passthrough.")
+    run.add_argument("command", nargs=argparse.REMAINDER, help="Command to run after --.")
+    run.set_defaults(func=cmd_run)
+
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

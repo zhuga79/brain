@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Brain federation CLI — thin dispatcher to brain_federation package."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from brain_federation.core import brain_path  # noqa: E402
+from brain_federation.checks import (  # noqa: E402
+    check_duplicates,
+    check_cross_file_conflicts,
+)
+from brain_federation.core import (  # noqa: E402
+    parse_task_file,
+    result,
+    emit,
+    exit_code,
+    Finding,
+)
+from brain_federation.preflight import cmd_preflight  # noqa: E402
+from brain_federation.plan import (  # noqa: E402
+    cmd_plan,
+    cmd_import_tasks,
+    cmd_write_wiki_proposals,
+)
+from brain_federation.sync import cmd_sync, cmd_merge_tasks  # noqa: E402
+
+
+def cmd_support(args: argparse.Namespace) -> int:
+    findings: list[Finding] = []
+    data = result("support", None, None, findings)
+    data["commands"] = [
+        "brain-federation support [--json]",
+        "brain-federation preflight [--repo <path>] [--brain <path>] [--json]",
+        "brain-federation tasks-check --active <path> [--done <path>] [--json]",
+        "brain-federation plan --repo <path> [--brain <path>] [--json] [--out <plan.json>]",
+        "brain-federation import-tasks --plan <plan.json> --as <agent-id> [--yes] [--json]",
+        "brain-federation write-wiki-proposals --plan <plan.json> --as <agent-id> [--yes] [--json]",
+        "brain-federation sync [--repo <path>] [--json]",
+        "brain-federation merge-tasks --base <path> --local <path> --remote <path> [--out <path>]",
+    ]
+    data["read_only"] = True
+    data["blocking_codes"] = [
+        "runtime-file-included",
+        "raw-rewrite",
+        "protected-wiki-edit",
+        "human-curated-wiki-edit",
+        "task-duplicate-id",
+        "task-field-conflict",
+        "task-imported-in-progress",
+        "task-done-open-conflict",
+        "done-duplicate-id",
+    ]
+    emit(data, args.json)
+    return 0
+
+
+def cmd_tasks_check(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+    active_path = _Path(args.active).expanduser()
+    done_path = _Path(args.done).expanduser() if args.done else None
+    brain = brain_path(args.brain)
+    try:
+        active, findings = parse_task_file(active_path, "active")
+        done = []
+        if done_path:
+            done, done_findings = parse_task_file(done_path, "done")
+            findings.extend(done_findings)
+    except FileNotFoundError as exc:
+        print(f"brain-federation tasks-check: unreadable path: {exc}", file=sys.stderr)
+        return 2
+    findings.extend(check_duplicates(active, "task-duplicate-id"))
+    if done_path:
+        findings.extend(check_duplicates(done, "done-duplicate-id"))
+        findings.extend(check_cross_file_conflicts(active, done))
+    data = result("tasks-check", None, brain, findings)
+    emit(data, args.json)
+    return exit_code(findings)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="brain-federation",
+        description="Read-only dry-run checks for Brain vault federation.",
+    )
+    parser.add_argument("--brain", default=None, help="Brain path (default: $BRAIN_PATH or ~/brain)")
+    sub = parser.add_subparsers(dest="cmd")
+
+    support = sub.add_parser("support", help="Show supported federation checks")
+    support.add_argument("--json", action="store_true")
+    support.set_defaults(func=cmd_support)
+
+    preflight = sub.add_parser("preflight", help="Check a git working tree before federation merge")
+    preflight.add_argument("--repo", default=None, help="Repository path (default: current directory)")
+    preflight.add_argument("--brain", default=None, help="Brain path (default: $BRAIN_PATH or ~/brain)")
+    preflight.add_argument("--json", action="store_true")
+    preflight.set_defaults(func=cmd_preflight)
+
+    plan = sub.add_parser("plan", help="Generate a read-only federation import plan")
+    plan.add_argument("--repo", default=None, help="Repository path (default: current directory)")
+    plan.add_argument("--brain", default=None, help="Brain path (default: $BRAIN_PATH or ~/brain)")
+    plan.add_argument("--json", action="store_true")
+    plan.add_argument("--out", default="", help="Write plan JSON to this exact file")
+    plan.set_defaults(func=cmd_plan)
+
+    import_tasks = sub.add_parser("import-tasks", help="Import open tasks from a federation plan")
+    import_tasks.add_argument("--plan", required=True, help="Plan JSON produced by brain-federation plan")
+    import_tasks.add_argument("--as", dest="agent", required=True, help="Agent id for audit log entries")
+    import_tasks.add_argument("--yes", action="store_true", help="Apply the import; default is dry-run")
+    import_tasks.add_argument("--allow-stale", action="store_true", help="Override stale source fingerprints")
+    import_tasks.add_argument("--allow-drift", action="store_true", help="Override repo-side drift fingerprints")
+    import_tasks.add_argument("--json", action="store_true")
+    import_tasks.set_defaults(func=cmd_import_tasks)
+
+    wiki_proposals = sub.add_parser("write-wiki-proposals", help="Write proposal artifacts for planned wiki changes")
+    wiki_proposals.add_argument("--plan", required=True, help="Plan JSON produced by brain-federation plan")
+    wiki_proposals.add_argument("--as", dest="agent", required=True, help="Agent id for audit log entries")
+    wiki_proposals.add_argument("--yes", action="store_true", help="Write proposal artifacts; default is dry-run")
+    wiki_proposals.add_argument("--allow-stale", action="store_true", help="Override stale source fingerprints")
+    wiki_proposals.add_argument("--allow-drift", action="store_true", help="Override repo-side drift fingerprints")
+    wiki_proposals.add_argument("--json", action="store_true")
+    wiki_proposals.set_defaults(func=cmd_write_wiki_proposals)
+
+    tasks = sub.add_parser("tasks-check", help="Check proposed active/done task files")
+    tasks.add_argument("--active", required=True, help="Path to active.md-like task file")
+    tasks.add_argument("--done", default=None, help="Optional path to done.md-like task file")
+    tasks.add_argument("--brain", default=None, help="Brain path (default: $BRAIN_PATH or ~/brain)")
+    tasks.add_argument("--json", action="store_true")
+    tasks.set_defaults(func=cmd_tasks_check)
+
+    sync = sub.add_parser("sync", help="Pull (rebase) and push the federation repository")
+    sync.add_argument("--repo", default=None, help="Repository path (default: current directory)")
+    sync.add_argument("--json", action="store_true")
+    sync.set_defaults(func=cmd_sync)
+
+    merge = sub.add_parser("merge-tasks", help="Merge two task files using a common ancestor")
+    merge.add_argument("--base", required=True, help="Path to base task file")
+    merge.add_argument("--local", required=True, help="Path to local task file")
+    merge.add_argument("--remote", required=True, help="Path to remote task file")
+    merge.add_argument("--out", default="", help="Path to write merged output")
+    merge.set_defaults(func=cmd_merge_tasks)
+
+    args = parser.parse_args()
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

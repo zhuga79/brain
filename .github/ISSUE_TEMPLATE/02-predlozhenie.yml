@@ -1,0 +1,43 @@
+name: Предложение
+description: Изменение поведения, новая возможность, уточнение контракта
+title: "[предложение] "
+labels: ["предложение", "обсуждение"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Brain — рабочий инструмент одного человека, выложенный публично.
+        Приживается то, что чинит конкретный дефект или закрывает дыру
+        в контракте. Крупные переделки под другой рабочий процесс — вряд ли.
+
+        Прочитайте `MEMORY.md` (конституция системы) и
+        `wiki/decisions-log.md` — возможно, решение уже принято и обосновано.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Задача
+      description: Что не получается сделать сейчас. Опишите проблему, а не решение.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Что предлагаете
+    validations:
+      required: true
+
+  - type: textarea
+    id: contract
+    attributes:
+      label: Затрагивает ли контракт
+      description: |
+        Формат задачи (`tasks/SCHEMA.md`), протокол блокировок, схема wiki,
+        ролевая модель. Если да — напишите, что именно меняется.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Что рассматривали ещё
+      description: И почему не подошло.

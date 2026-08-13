@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# brain-mcp — run the Brain MCP server.
+# Usage: brain-mcp                        # stdio transport (default)
+#        brain-mcp --http [--port 8766]   # SSE/HTTP transport
+set -e
+
+MCP_DIR="${BRAIN_MCP_DIR:-$HOME/.local/share/brain-mcp}"
+exec "$MCP_DIR/.venv/bin/python" "$MCP_DIR/server.py" "$@"

@@ -1,0 +1,1021 @@
+#!/usr/bin/env python3
+"""Run a primary CLI command and optionally continue with a fallback on limits."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import pty
+import signal
+import struct
+from datetime import datetime, timezone
+
+import re
+import selectors
+import shlex
+import shutil
+import subprocess
+import time
+import sys
+import tempfile
+import termios
+import tty
+from pathlib import Path
+import brain_provider
+import brain_task_parser
+from brain_app import queue
+from brain_sandbox_guard import assert_not_sandbox_agent_launch, SandboxLaunchError
+from brain_workspace import find_nearest_workspace
+
+LIMIT_RE = re.compile(
+    r"(429|too many requests|resource_exhausted|quota|rate[- ]?limit|rate limited|"
+    r"capacity exhausted|model_capacity_exhausted|no capacity|"
+    r"usage limit|credits|purchase more credits|"
+    r"context length|context window|token limit|max tokens|limit exceeded)",
+    re.IGNORECASE,
+)
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def default_log_path(brain: Path, task: str, agent: str) -> Path:
+    return brain / ".brain" / "orchestrator" / "logs" / f"{task}.{agent}.log"
+
+
+def append_log(log_path: Path | None, data: str | bytes) -> None:
+    if not log_path:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(data, bytes):
+        chunk = data
+    else:
+        chunk = data.encode("utf-8", errors="replace")
+    with log_path.open("ab") as f:
+        f.write(chunk)
+
+
+def cap_log(log_path: Path | None) -> None:
+    if not log_path or not log_path.exists():
+        return
+    max_bytes = int(os.environ.get("BRAIN_ORCHESTRATOR_LOG_MAX_BYTES", "1048576"))
+    try:
+        size = log_path.stat().st_size
+        if size <= max_bytes:
+            return
+        data = log_path.read_bytes()[-max_bytes:]
+        log_path.write_bytes(b"[...log truncated to last bytes...]\n" + data)
+    except OSError:
+        return
+
+
+def write_run_manifest(
+    brain: Path,
+    *,
+    task: str,
+    role: str,
+    agent: str,
+    prompt_path: Path | None,
+    log_path: Path | None,
+    workspace_path: Path | None = None,
+) -> None:
+    run_dir = brain / ".brain" / "orchestrator"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated": utc_now(),
+        "task": task,
+        "role": role,
+        "agent": agent,
+        "prompt": str(prompt_path) if prompt_path else "",
+        "log": str(log_path) if log_path else "",
+        "workspace": str(workspace_path) if workspace_path else "",
+    }
+    (run_dir / "latest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def terminal_command(script: Path, title: str) -> list[str]:
+    configured = os.environ.get("BRAIN_ORCHESTRATOR_TERMINAL", "").strip()
+    candidates = [configured] if configured else ["x-terminal-emulator", "gnome-terminal", "xterm"]
+    for name in candidates:
+        if not name:
+            continue
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        base = Path(exe).name
+        if base == "gnome-terminal":
+            return [exe, f"--title={title}", "--", "bash", str(script)]
+        return [exe, "-T", title, "-e", "bash", str(script)]
+    return []
+
+
+def _wmctrl_windows() -> set:
+    try:
+        res = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, timeout=3)
+        return {ln.split()[0] for ln in res.stdout.splitlines() if ln.split()}
+    except Exception:
+        return set()
+
+
+def _monitors() -> list:
+    mons = []
+    try:
+        res = subprocess.run(["xrandr", "--listmonitors"], capture_output=True, text=True, timeout=3)
+    except Exception:
+        return mons
+    for line in res.stdout.splitlines():
+        m = re.search(r"^\s*\d+:\s+(\+?\*?\S+)\s+(\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)", line)
+        if not m:
+            continue
+        name = m.group(1)
+        mons.append({
+            "name": name.lstrip("+*"),
+            "primary": "*" in name,
+            "w": int(m.group(2)), "h": int(m.group(3)),
+            "x": int(m.group(4)), "y": int(m.group(5)),
+        })
+    return mons
+
+
+def _target_monitor():
+    pref = os.environ.get("BRAIN_ORCHESTRATOR_MONITOR", "").strip()
+    mons = _monitors()
+    if pref:
+        for mm in mons:
+            if mm["name"] == pref:
+                return mm
+    non = [mm for mm in mons if not mm["primary"]]
+    return non[0] if non else None
+
+
+def _next_tile_geom(mon: dict):
+    slot_file = Path.home() / ".cache" / "brain-orchestrator" / "tile-slot"
+    try:
+        slot_file.parent.mkdir(parents=True, exist_ok=True)
+        n = int(slot_file.read_text().strip())
+    except Exception:
+        n = 0
+    cols = rows = 2
+    cell = n % (cols * rows)
+    try:
+        slot_file.write_text(str(n + 1))
+    except Exception:
+        pass
+    cw, ch = mon["w"] // cols, mon["h"] // rows
+    cx = mon["x"] + (cell % cols) * cw
+    cy = mon["y"] + (cell // cols) * ch
+    return cx, cy, max(cw - 20, 200), max(ch - 60, 150)
+
+
+def _tile_new_window(before: set) -> None:
+    if os.environ.get("BRAIN_ORCHESTRATOR_TILE", "0") != "1":
+        return
+    if not shutil.which("wmctrl"):
+        return
+    mon = _target_monitor()
+    if not mon:
+        return
+    deadline = time.time() + 5
+    new = set()
+    while time.time() < deadline:
+        new = _wmctrl_windows() - before
+        if new:
+            break
+        time.sleep(0.25)
+    if not new:
+        return
+    wid = sorted(new)[-1]
+    x, y, w, h = _next_tile_geom(mon)
+    try:
+        subprocess.run(["wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz"], timeout=3)
+        subprocess.run(["wmctrl", "-i", "-r", wid, "-e", f"0,{x},{y},{w},{h}"], timeout=3)
+    except Exception:
+        pass
+
+
+def open_interactive_terminal(task: str, brain, primary_shell: str) -> bool:
+    """Open a visible terminal running the agent CLI directly in its own tty
+    (no run --pty wrapper), so the interactive TUI and manual input work and the
+    caller is not blocked. Returns True if a terminal was spawned."""
+    if os.environ.get("BRAIN_ORCHESTRATOR_VISIBLE_CHILD") == "1":
+        return False
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    cwd = Path.cwd()
+    title = f"Brain: {task}"
+    # The agent owns this terminal's tty directly (no pty wrapper), so the shell
+    # reset is the only thing standing between a crashed TUI and a prompt that
+    # echoes mouse-tracking escapes as garbage.
+    keep = f"{TERM_MODE_RESET_SH}\necho; read -r -p 'Готово. Enter чтобы закрыть...' _ || true"
+    script_body = (
+        "#!/usr/bin/env bash\n"
+        "set +e\n"
+        f"export BRAIN_PATH={shlex.quote(str(brain))}\n"
+        # See agent_env(): an inherited child-session marker silently disables
+        # transcript saving in the spawned agent.
+        "unset CLAUDE_CODE_CHILD_SESSION\n"
+        "export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1\n"
+        f"cd {shlex.quote(str(cwd))}\n"
+        f"printf '\\033]0;{title}\\007'\n"
+        f"bash -lc {shlex.quote(primary_shell)}\n"
+        f"{keep}\n"
+    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="brain-interactive-", suffix=".sh", delete=False) as f:
+        f.write(script_body)
+        script = Path(f.name)
+    script.chmod(0o700)
+    term_cmd = terminal_command(script, title)
+    if not term_cmd:
+        return False
+    before = _wmctrl_windows()
+    subprocess.Popen(term_cmd, start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"brain-orchestrator: opened interactive terminal for task {task}")
+    _tile_new_window(before)
+    return True
+
+
+def launch_visible_window(args: argparse.Namespace) -> int | None:
+    if args.no_visible or args.dry_run:
+        return None
+    if os.environ.get("BRAIN_ORCHESTRATOR_VISIBLE_CHILD") == "1":
+        return None
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        print("brain-orchestrator: no DISPLAY/WAYLAND_DISPLAY; running inline", file=sys.stderr)
+        return None
+
+    argv = list(getattr(args, "visible_argv", None) or sys.argv[1:])
+    if "run" in argv and "--pty" not in argv:
+        argv.insert(argv.index("run") + 1, "--pty")
+    cmd = [str(Path(__file__).resolve()), *argv]
+    quoted = " ".join(shlex.quote(p) for p in cmd)
+    cwd = Path.cwd()
+    title = f"Brain orchestrator: {args.task}"
+    script_body = f"""#!/usr/bin/env bash
+set +e
+export BRAIN_ORCHESTRATOR_VISIBLE_CHILD=1
+export BRAIN_PATH={shlex.quote(str(brain_path(args.brain)))}
+cd {shlex.quote(str(cwd))}
+printf '\\033]0;{title}\\007'
+echo "Brain visible orchestrator"
+echo "Workspace: {cwd}"
+echo "Task: {args.task}"
+echo
+{quoted}
+rc=$?
+{TERM_MODE_RESET_SH}
+echo
+echo "Brain orchestrator exited rc=$rc"
+if [ "${{BRAIN_ORCHESTRATOR_KEEP_OPEN:-1}}" != "0" ]; then
+  read -r -p "Press Enter to close..." _brain_orchestrator_close || true
+fi
+exit "$rc"
+"""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="brain-orchestrator-visible-", suffix=".sh", delete=False) as f:
+        f.write(script_body)
+        script = Path(f.name)
+    script.chmod(0o700)
+
+    term_cmd = terminal_command(script, title)
+    if not term_cmd:
+        print("brain-orchestrator: no supported terminal emulator found; running inline", file=sys.stderr)
+        return None
+    _before_win = _wmctrl_windows()
+    proc = subprocess.Popen(term_cmd, start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"brain-orchestrator: opened visible terminal for task {args.task}")
+    _tile_new_window(_before_win)
+    if args.wait_visible:
+        return int(proc.wait())
+    return 0
+
+
+def agent_env(brain: Path) -> dict:
+    """Environment for a spawned agent CLI.
+
+    The orchestrator is often started from inside an agent session, which
+    exports CLAUDE_CODE_CHILD_SESSION. Inherited, that marker makes the child
+    treat itself as a nested session and stop saving its transcript — so a run
+    cannot be resumed or reviewed afterwards. Each agent launched here is a
+    session in its own right, so drop the marker and ask for persistence.
+    """
+    env = os.environ.copy()
+    env["BRAIN_PATH"] = str(brain)
+    env.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    env.setdefault("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1")
+    return env
+
+
+def run_command(command: list[str], brain: Path, log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = agent_env(brain)
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    while selector.get_map():
+        for key, _events in selector.select():
+            chunk = key.fileobj.readline()
+            if chunk == "":
+                selector.unregister(key.fileobj)
+                continue
+            if key.data == "stdout":
+                stdout_parts.append(chunk)
+                append_log(log_path, chunk)
+                print(chunk, end="", flush=True)
+            else:
+                stderr_parts.append(chunk)
+                append_log(log_path, chunk)
+                print(chunk, end="", file=sys.stderr, flush=True)
+    rc = proc.wait()
+    return subprocess.CompletedProcess(command, rc, "".join(stdout_parts), "".join(stderr_parts))
+
+
+# A TUI agent (claude, codex, gemini) switches the terminal into modes that turn
+# mouse movement, focus changes and pastes into escape sequences on stdin. If the
+# agent exits abnormally — crash, quota error, kill — it never switches them back,
+# and the next reader (the shell prompt in the visible-terminal script) receives
+# those sequences as literal characters. Disable them explicitly after the child.
+# 1049 alt screen · 1000/1002/1003 mouse tracking · 1005/1006/1015 mouse encodings
+# 1004 focus reporting · 2004 bracketed paste · 2031 theme notifications
+_TERM_MODE_RESET = (
+    "\033[?1049l"
+    "\033[?1003l\033[?1002l\033[?1000l"
+    "\033[?1015l\033[?1006l\033[?1005l"
+    "\033[?1004l\033[?2004l\033[?2031l"
+    "\033[?25h\033[0m"
+)
+
+# Same reset for the generated wrapper scripts, where the orchestrator process
+# itself may have died before reaching its own cleanup. `stty sane` additionally
+# restores the line discipline if the pty wrapper left the tty in cbreak mode.
+TERM_MODE_RESET_SH = (
+    r"printf '\033[?1049l\033[?1003l\033[?1002l\033[?1000l"
+    r"\033[?1015l\033[?1006l\033[?1005l"
+    r"\033[?1004l\033[?2004l\033[?2031l\033[?25h\033[0m'"
+    "\nstty sane 2>/dev/null || true"
+)
+
+
+def reset_terminal_modes() -> None:
+    """Turn off input-reporting modes a child TUI may have left enabled."""
+    try:
+        if sys.stdout.isatty():
+            os.write(sys.stdout.fileno(), _TERM_MODE_RESET.encode())
+    except (OSError, ValueError):
+        pass
+
+
+def sync_pty_winsize(master_fd: int) -> None:
+    """Copy the real terminal's size onto the pty.
+
+    A fresh pty reports 0x0, so a child TUI lays its interface out against a
+    zero-width screen and paints garbage.
+    """
+    for stream in (sys.stdout, sys.stdin, sys.stderr):
+        try:
+            if stream.isatty():
+                packed = fcntl.ioctl(stream.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, packed)
+                return
+        except (OSError, ValueError, AttributeError):
+            continue
+    try:
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    except OSError:
+        pass
+
+
+def prepare_pty(master_fd: int, slave_fd: int) -> None:
+    """Make the pty safe to forward bytes into, before the child starts.
+
+    openpty() hands back a terminal with ECHO and ICANON enabled. Everything this
+    wrapper writes into the master is then echoed back by the line discipline,
+    read again as if the child had printed it, and painted on the real screen.
+    Once a TUI agent turns on mouse tracking the real terminal starts emitting a
+    report for every pointer movement, and each of those escapes comes straight
+    back as literal characters.
+
+    Nothing downstream switches echo off: the agent is spawned as
+    `cat prompt | agent`, so its stdin is a pipe and it never owns — nor puts
+    into raw mode — this tty.
+    """
+    try:
+        attrs = termios.tcgetattr(slave_fd)
+    except termios.error:
+        attrs = None
+    if attrs is not None:
+        attrs[0] &= ~(termios.ICRNL | termios.IXON)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
+        try:
+            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+        except termios.error:
+            pass
+    sync_pty_winsize(master_fd)
+
+
+def run_command_pty(command: list[str], brain: Path, log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = agent_env(brain)
+    master_fd, slave_fd = pty.openpty()
+    prepare_pty(master_fd, slave_fd)
+    old_tty = None
+    prev_winch = None
+    stdout_parts: list[str] = []
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
+        )
+    except FileNotFoundError as exc:
+        os.close(master_fd)
+        os.close(slave_fd)
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+    finally:
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+
+    selector = selectors.DefaultSelector()
+    selector.register(master_fd, selectors.EVENT_READ, "child")
+    stdin_registered = False
+    try:
+        stdin_fd = sys.stdin.fileno()
+        selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
+        stdin_registered = True
+        if sys.stdin.isatty():
+            old_tty = termios.tcgetattr(stdin_fd)
+            tty.setcbreak(stdin_fd)
+    except (OSError, ValueError):
+        stdin_fd = -1
+
+    try:
+        prev_winch = signal.signal(signal.SIGWINCH, lambda *_: sync_pty_winsize(master_fd))
+    except (ValueError, OSError, AttributeError):
+        prev_winch = None
+
+    child_open = True
+    try:
+        while child_open:
+            for key, _events in selector.select(timeout=0.1):
+                if key.data == "child":
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        data = b""
+                    if not data:
+                        selector.unregister(master_fd)
+                        child_open = False
+                        continue
+                    stdout_parts.append(data.decode("utf-8", errors="replace"))
+                    append_log(log_path, data)
+                    os.write(sys.stdout.fileno(), data)
+                elif key.data == "stdin":
+                    try:
+                        data = os.read(stdin_fd, 4096)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        if stdin_registered:
+                            selector.unregister(stdin_fd)
+                            stdin_registered = False
+                        continue
+                    os.write(master_fd, data)
+            if proc.poll() is not None and not child_open:
+                break
+        rc = proc.wait()
+    finally:
+        if prev_winch is not None:
+            try:
+                signal.signal(signal.SIGWINCH, prev_winch)
+            except (ValueError, OSError):
+                pass
+        if old_tty is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_tty)
+        reset_terminal_modes()
+        try:
+            selector.close()
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+    return subprocess.CompletedProcess(command, rc, "".join(stdout_parts), "")
+
+
+def task_is_active(brain: Path, task: str) -> bool:
+    """Задача всё ещё в очереди — значит, лимит оборвал работу, а не завершил её.
+
+    Поиск идёт по блоку задачи, а не подстрокой: идентификатор встречается и в
+    `depends_on:` соседних задач, и такая задача считалась «ещё активной» даже
+    после закрытия — fallback запускался впустую.
+    """
+    if not task:
+        return False
+    return bool(brain_task_parser.find_block(queue.active_text(brain), task))
+
+
+def get_candidate_by_command(matrix, cmd):
+    all_candidates = []
+    for role_cands in matrix.get("roles", {}).values():
+        all_candidates.extend(role_cands)
+    cmd_str = " ".join(cmd)
+    
+    for c in all_candidates:
+        if c.get("command") == cmd_str:
+            return c
+    for c in all_candidates:
+        if c.get("command") and cmd_str.startswith(c.get("command")):
+            return c
+    executable = cmd[0] if cmd else ""
+    for c in all_candidates:
+        c_exec = c.get("command", "").split()[0] if c.get("command") else ""
+        if c_exec == executable:
+            return c
+    return {"provider": executable, "model": "unknown", "rank": 0}
+
+def create_fallback_handoff(args: argparse.Namespace, brain: Path, combined_output: str, primary: list[str], fallback: list[str]) -> bool:
+    matrix = brain_provider.load_provider_matrix(brain)
+    c_from = get_candidate_by_command(matrix, primary)
+    c_to = get_candidate_by_command(matrix, fallback)
+    
+    # detect reason
+    fallback_reason = "quota_exceeded"
+    lower_out = combined_output.lower()
+    if "rate limit" in lower_out or "too many requests" in lower_out or "429" in lower_out:
+        fallback_reason = "rate_limit"
+    elif "manual" in lower_out or "override" in lower_out:
+        fallback_reason = "manual_override"
+    elif "context length" in lower_out or "context window" in lower_out or "token limit" in lower_out:
+        fallback_reason = "context_limit"
+        
+    excerpt_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="brain-orchestrator-excerpt-", suffix=".txt", delete=False) as f:
+            f.write(combined_output[-65536:])
+            excerpt_path = f.name
+        cmd = [
+            "brain-handoff",
+            "create",
+            "--reason",
+            "fallback",
+            "--from",
+            args.agent,
+            "--to-role",
+            args.to_role,
+            "--task",
+            args.task,
+            "--fallback-reason",
+            fallback_reason,
+            "--provider-from",
+            json.dumps(c_from),
+            "--provider-to",
+            json.dumps(c_to),
+            "--excerpt-file",
+            excerpt_path,
+        ]
+        if getattr(args, "next_task", None):
+            cmd += ["--next-task", args.next_task]
+        env = os.environ.copy()
+        env["BRAIN_PATH"] = str(brain)
+        res = subprocess.run(cmd, env=env, check=False, capture_output=True, text=True)
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout or "").strip()
+            print(f"create_fallback_handoff failed with code {res.returncode}: {detail[-1000:]}", file=sys.stderr)
+            return False
+        return True
+    except OSError as exc:
+        print(f"create_fallback_handoff failed: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if excerpt_path:
+            try:
+                Path(excerpt_path).unlink()
+            except OSError:
+                pass
+
+def create_limit_handoff(args: argparse.Namespace, brain: Path) -> None:
+    cmd = [
+        "brain-handoff",
+        "create",
+        "--reason",
+        "limit-exhausted",
+        "--from",
+        args.agent,
+        "--to-role",
+        args.to_role,
+        "--task",
+        args.task,
+    ]
+    if args.next_task:
+        cmd += ["--next-task", args.next_task]
+    env = os.environ.copy()
+    env["BRAIN_PATH"] = str(brain)
+    subprocess.run(cmd, env=env, check=False, capture_output=True, text=True)
+
+
+def split_command(value: str) -> list[str]:
+    try:
+        return shlex.split(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid command: {exc}") from exc
+
+
+def _valid_runtime_override(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z0-9_.:/-]+$", value or ""))
+
+
+def _apply_runtime_overrides_to_args(command: list[str], model: str = "", effort: str = "") -> list[str]:
+    if model and not _valid_runtime_override(model):
+        raise RuntimeError(f"invalid model override: {model}")
+    if effort and not _valid_runtime_override(effort):
+        raise RuntimeError(f"invalid effort override: {effort}")
+    if not (model or effort):
+        return command
+    out = list(command)
+    executable = Path(out[0]).name if out else ""
+    model_flag = "-m" if executable == "gemini" else "--model"
+    if model:
+        replaced = False
+        for idx, value in enumerate(out[:-1]):
+            if value in ("-m", "--model"):
+                out[idx + 1] = model
+                replaced = True
+                break
+        if not replaced:
+            out.extend([model_flag, model])
+    if effort:
+        replaced = False
+        for idx, value in enumerate(out[:-1]):
+            if value == "--effort":
+                out[idx + 1] = effort
+                replaced = True
+                break
+        if not replaced:
+            out.extend(["--effort", effort])
+    return out
+
+
+def apply_runtime_overrides(command: str, model: str = "", effort: str = "") -> str:
+    if not (model or effort):
+        return command
+    return " ".join(shlex.quote(part) for part in _apply_runtime_overrides_to_args(split_command(command), model, effort))
+
+
+def _run_text(cmd: list[str], brain: Path, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["BRAIN_PATH"] = str(brain)
+    return subprocess.run(cmd, env=env, cwd=cwd, check=False, capture_output=True, text=True)
+
+
+def next_task_for_role(brain: Path, role: str) -> str:
+    cmd = ["brain-task", "next", "--json"]
+    if role:
+        cmd += ["--role", role]
+    res = _run_text(cmd, brain)
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "brain-task next failed").strip())
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"brain-task next returned invalid JSON: {exc}") from exc
+    task = data.get("task") or data.get("next") or data
+    if isinstance(task, dict):
+        task_id = str(task.get("id") or "")
+    else:
+        task_id = ""
+    if not task_id:
+        raise RuntimeError("no available task")
+    return task_id
+
+
+def mapped_cli_for_role(brain: Path, role: str, task: str = "") -> str:
+    """Команда запуска роли — через общий резолвер.
+
+    Раньше здесь был shell-out в `bash -lc source .cli-mapping.sh`, хотя
+    brain_provider уже импортирован: тот файл знал одну команду на роль, без
+    рангов и здоровья, поэтому запуск шёл на провайдера с исчерпанной квотой
+    и падал вместо перехода к следующему кандидату.
+    """
+    if not re.match(r"^[a-z0-9_-]+$", role):
+        raise RuntimeError(f"invalid role: {role}")
+    result = brain_provider.resolve_for_role(brain, role, task=task)
+    for warning in result.get("warnings") or []:
+        print(f"brain-orchestrator: WARN {warning}", file=sys.stderr)
+    return result["command"] or os.environ.get("CLI_DEFAULT", "claude")
+
+
+def write_prompt_file(brain: Path, role: str, task: str, agent: str, workspace_path: Path | None = None) -> Path:
+    prompt_dir = brain / ".brain" / "orchestrator" / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = prompt_path_for(brain, task, agent)
+    cmd = ["brain-run", "--role", role, "--task", task, "--agent-id", agent]
+    if workspace_path is not None:
+        cmd.extend(["--workspace", str(workspace_path)])
+    res = _run_text(cmd, brain)
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "brain-run failed").strip())
+    prompt = res.stdout
+    prompt_path.write_text(prompt, encoding="utf-8")
+    return prompt_path
+
+
+def prompt_path_for(brain: Path, task: str, agent: str) -> Path:
+    return brain / ".brain" / "orchestrator" / "prompts" / f"{task}.{agent}.prompt.md"
+
+
+def build_prompt_shell(command: str, prompt_path: Path, interactive: bool = False) -> str:
+    prompt_q = shlex.quote(str(prompt_path))
+    if "{prompt}" in command:
+        return command.replace("{prompt}", prompt_q)
+    if interactive:
+        # Load the task prompt as the opening message, then keep the CLI session
+        # open so the operator can type. Per-CLI interactive invocation.
+        if re.search(r"(^|[ \t])gemini($|[ \t])", command):
+            return f'prompt=$(cat {prompt_q}); {command} -i "$prompt"'
+        return f'prompt=$(cat {prompt_q}); {command} "$prompt"'
+    if re.search(r"(^|[ \t])gemini($|[ \t])", command):
+        return f"prompt=$(cat {prompt_q}); {command} -p \"$prompt\" --output-format text"
+    return f"cat {prompt_q} | {command}"
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        assert_not_sandbox_agent_launch(dry_run=args.dry_run, action="brain-orchestrator run")
+    except SandboxLaunchError as exc:
+        print(f"brain-orchestrator: {exc}", file=sys.stderr)
+        return 2
+
+    visible_rc = launch_visible_window(args)
+    if visible_rc is not None:
+        return visible_rc
+
+    brain = brain_path(args.brain)
+    primary = list(args.command or [])
+    if primary and primary[0] == "--":
+        primary = primary[1:]
+    if not primary:
+        print("brain-orchestrator run: primary command required after --", file=sys.stderr)
+        return 2
+    try:
+        primary = _apply_runtime_overrides_to_args(primary, args.model, args.effort)
+    except RuntimeError as exc:
+        print(f"brain-orchestrator run: {exc}", file=sys.stderr)
+        return 2
+    fallback = split_command(args.fallback) if args.fallback else []
+    log_path = Path(args.log_file).expanduser() if getattr(args, "log_file", "") else None
+
+    if args.pty:
+        run_cmd = primary
+    else:
+        run_cmd = [
+            "brain-handoff",
+            "run",
+            "--task",
+            args.task,
+            "--agent",
+            args.agent,
+            "--to-role",
+            args.to_role,
+        ]
+        if args.next_task:
+            run_cmd += ["--next-task", args.next_task]
+        run_cmd += ["--", *primary]
+
+    if args.dry_run:
+        if args.pty:
+            print("DRY-RUN: would run primary through orchestrator PTY:")
+        else:
+            print("DRY-RUN: would run primary under brain-handoff:")
+        print("  " + " ".join(shlex.quote(p) for p in run_cmd))
+        if fallback:
+            print("DRY-RUN: would run fallback on detected limit:")
+            print("  " + " ".join(shlex.quote(p) for p in fallback))
+        else:
+            print("DRY-RUN: no fallback command configured")
+        if log_path:
+            print(f"DRY-RUN: would write log: {log_path}")
+        return 0
+
+    runner = run_command_pty if args.pty else run_command
+    append_log(log_path, f"## {utc_now()} primary: {' '.join(shlex.quote(p) for p in run_cmd)}\n")
+    primary_res = runner(run_cmd, brain, log_path)
+    cap_log(log_path)
+    combined = f"{primary_res.stdout or ''}\n{primary_res.stderr or ''}"
+    limit_detected = bool(LIMIT_RE.search(combined))
+
+    if primary_res.returncode == 0:
+        if limit_detected and task_is_active(brain, args.task):
+            if args.pty and not fallback:
+                create_limit_handoff(args, brain)
+            if fallback:
+                handoff_ok = create_fallback_handoff(args, brain, combined, primary, fallback)
+                if not handoff_ok:
+                    print("brain-orchestrator: fallback handoff creation failed; running fallback command anyway", file=sys.stderr)
+                print("brain-orchestrator: limit output detected while task remains active; running fallback command", file=sys.stderr)
+                append_log(log_path, f"\n## {utc_now()} fallback: {' '.join(shlex.quote(p) for p in fallback)}\n")
+                fallback_res = runner(fallback, brain, log_path)
+                cap_log(log_path)
+                if fallback_res.returncode == 0:
+                    print("brain-orchestrator: fallback command succeeded", file=sys.stderr)
+                else:
+                    print(f"brain-orchestrator: fallback command failed rc={fallback_res.returncode}", file=sys.stderr)
+                if fallback_res.returncode == 0 and not handoff_ok:
+                    return 1
+                return int(fallback_res.returncode)
+            print("brain-orchestrator: limit output detected while task remains active; no fallback configured", file=sys.stderr)
+        return 0
+    if not limit_detected:
+        print("brain-orchestrator: no limit pattern detected; fallback skipped", file=sys.stderr)
+        return int(primary_res.returncode)
+    if not fallback:
+        print("brain-orchestrator: limit detected but no fallback command configured", file=sys.stderr)
+        return int(primary_res.returncode)
+
+    handoff_ok = create_fallback_handoff(args, brain, combined, primary, fallback)
+    if not handoff_ok:
+        print("brain-orchestrator: fallback handoff creation failed; running fallback command anyway", file=sys.stderr)
+    print("brain-orchestrator: limit detected; running fallback command", file=sys.stderr)
+    append_log(log_path, f"\n## {utc_now()} fallback: {' '.join(shlex.quote(p) for p in fallback)}\n")
+    fallback_res = runner(fallback, brain, log_path)
+    cap_log(log_path)
+    if fallback_res.returncode == 0:
+        print("brain-orchestrator: fallback command succeeded", file=sys.stderr)
+    else:
+        print(f"brain-orchestrator: fallback command failed rc={fallback_res.returncode}", file=sys.stderr)
+    if fallback_res.returncode == 0 and not handoff_ok:
+        return 1
+    return int(fallback_res.returncode)
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    try:
+        assert_not_sandbox_agent_launch(dry_run=args.dry_run, action="brain-orchestrator console")
+    except SandboxLaunchError as exc:
+        print(f"brain-orchestrator: {exc}", file=sys.stderr)
+        return 2
+
+    brain = brain_path(args.brain)
+    role = args.role
+    try:
+        workspace_path = None
+        workspace_brain = None
+        if args.workspace:
+            workspace_path = find_nearest_workspace(Path(args.workspace))
+            if workspace_path is None:
+                raise RuntimeError(f"no BRAIN.md workspace found for {args.workspace}")
+            workspace_brain = workspace_path / "BRAIN.md"
+        task = args.task or next_task_for_role(brain, role)
+        agent = args.agent or f"operator-{role}-{os.getpid()}"
+        log_path = Path(args.log_file).expanduser() if args.log_file else default_log_path(brain, task, agent)
+        prompt_path = prompt_path_for(brain, task, agent)
+        primary_cli = args.primary or os.environ.get("BRAIN_ORCHESTRATOR_PRIMARY", "") or mapped_cli_for_role(brain, role, task)
+        fallback_cli = args.fallback or os.environ.get("BRAIN_ORCHESTRATOR_FALLBACK", "")
+        primary_cli = apply_runtime_overrides(primary_cli, args.model, args.effort)
+        primary_shell = build_prompt_shell(primary_cli, prompt_path, interactive=getattr(args, 'interactive', False))
+        fallback_shell = build_prompt_shell(fallback_cli, prompt_path, interactive=getattr(args, 'interactive', False)) if fallback_cli else ""
+    except RuntimeError as exc:
+        print(f"brain-orchestrator console: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print("DRY-RUN: operator console plan")
+        print(f"  task       : {task}")
+        print(f"  role       : {role}")
+        print(f"  agent      : {agent}")
+        print(f"  prompt     : {prompt_path}")
+        print(f"  log        : {log_path}")
+        if workspace_path is not None:
+            print(f"  workspace  : {workspace_path}")
+            print(f"  BRAIN.md   : {workspace_brain}")
+        print("  primary    : " + primary_shell)
+        print("  fallback   : " + (fallback_shell or "<none>"))
+        print("  run command: brain-orchestrator run --pty --task "
+              f"{shlex.quote(task)} --agent {shlex.quote(agent)} --to-role {shlex.quote(role)} -- bash -lc ...")
+        return 0
+
+    try:
+        prompt_path = write_prompt_file(brain, role, task, agent, workspace_path=workspace_path)
+        write_run_manifest(
+            brain,
+            task=task,
+            role=role,
+            agent=agent,
+            prompt_path=prompt_path,
+            log_path=log_path,
+            workspace_path=workspace_path,
+        )
+    except RuntimeError as exc:
+        print(f"brain-orchestrator console: {exc}", file=sys.stderr)
+        return 1
+
+    run_args = argparse.Namespace(
+        brain=str(brain),
+        task=task,
+        agent=agent,
+        to_role=role,
+        next_task=args.next_task,
+        fallback=f"bash -lc {shlex.quote(fallback_shell)}" if fallback_shell else "",
+        pty=True,
+        no_visible=args.no_visible,
+        wait_visible=args.wait_visible,
+        dry_run=False,
+        log_file=str(log_path),
+        model=args.model,
+        effort=args.effort,
+        command=["bash", "-lc", primary_shell],
+    )
+    run_args.visible_argv = [
+        "run",
+        "--pty",
+        "--task",
+        task,
+        "--agent",
+        agent,
+        "--to-role",
+        role,
+        "--log-file",
+        str(log_path),
+    ]
+    if args.next_task:
+        run_args.visible_argv += ["--next-task", args.next_task]
+    if fallback_shell:
+        run_args.visible_argv += ["--fallback", f"bash -lc {shlex.quote(fallback_shell)}"]
+    run_args.visible_argv += ["--", "bash", "-lc", primary_shell]
+    if getattr(args, 'interactive', False):
+        if open_interactive_terminal(task, brain, primary_shell):
+            return 0
+        # no display/terminal -> fall back to inline run
+    return cmd_run(run_args)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="brain-orchestrator",
+        description="Run Brain CLI orchestration with explicit fallback on quota/context limits.",
+    )
+    parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    run = sub.add_parser("run", help="Run primary command and fallback only on limit failures.")
+    run.add_argument("--task", required=True, help="Current task id.")
+    run.add_argument("--agent", required=True, help="Current orchestrator agent id.")
+    run.add_argument("--to-role", default="developer", help="Target role for handoff continuation.")
+    run.add_argument("--next-task", default="", help="Explicit next task id for handoff artifact.")
+    run.add_argument("--fallback", default="", help="Fallback command string, e.g. 'claude -p prompt.md'.")
+    run.add_argument("--log-file", default="", help="Append primary/fallback output to this log file.")
+    run.add_argument("--pty", action="store_true", help="Run primary/fallback through a PTY with live output and stdin passthrough.")
+    run.add_argument("--no-visible", action="store_true", help="Do not open a separate visible terminal window.")
+    run.add_argument("--wait-visible", action="store_true", help="Wait for the visible terminal process and return its exit code.")
+    run.add_argument("--dry-run", action="store_true", help="Print planned primary/fallback commands only.")
+    run.add_argument("--model", default="", help="Runtime model override for known agent CLIs.")
+    run.add_argument("--effort", default="", help="Runtime effort override for known agent CLIs.")
+    run.add_argument("command", nargs=argparse.REMAINDER, help="Primary command after --.")
+    run.set_defaults(func=cmd_run)
+
+    console = sub.add_parser("console", help="Launch an operator console for the next/current Brain task.")
+    console.add_argument("--task", default="", help="Task id. Defaults to brain-task next for --role.")
+    console.add_argument("--role", default="developer", help="Role to run. Defaults to developer.")
+    console.add_argument("--agent", default="", help="Agent id. Defaults to operator-<role>-<pid>.")
+    console.add_argument("--next-task", default="", help="Explicit next task id for handoff artifact.")
+    console.add_argument("--interactive", action="store_true", help="Open the agent in interactive mode (manual input) instead of one-shot.")
+    console.add_argument("--primary", default="", help="Primary CLI command. Use {prompt} for prompt file path.")
+    console.add_argument("--fallback", default="", help="Fallback CLI command. Use {prompt} for prompt file path.")
+    console.add_argument("--log-file", default="", help="Log file path. Defaults to $BRAIN_PATH/.brain/orchestrator/logs/<task>.<agent>.log.")
+    console.add_argument("--workspace", default="", help="Folder-native workspace path. Nearest parent BRAIN.md is injected into context.")
+    console.add_argument("--no-visible", action="store_true", help="Run inline instead of opening a visible terminal.")
+    console.add_argument("--wait-visible", action="store_true", help="Wait for visible terminal exit code.")
+    console.add_argument("--dry-run", action="store_true", help="Print operator console plan only.")
+    console.add_argument("--model", default="", help="Runtime model override for known agent CLIs.")
+    console.add_argument("--effort", default="", help="Runtime effort override for known agent CLIs.")
+    console.set_defaults(func=cmd_console)
+
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

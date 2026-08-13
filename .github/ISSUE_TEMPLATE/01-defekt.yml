@@ -1,0 +1,63 @@
+name: Дефект
+description: Что-то работает не так, как описано
+title: "[дефект] "
+labels: ["дефект"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не прикладывайте содержимое `.secrets`, токены и пути с личными данными.
+
+  - type: input
+    id: component
+    attributes:
+      label: Где
+      description: CLI, модуль или подсистема.
+      placeholder: brain-task next / brain_task_parser
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Воспроизведение
+      description: Команды по шагам. Без них дефект почти невозможно подтвердить.
+      placeholder: |
+        1. brain-task add "..." --role developer
+        2. brain-task next --role developer
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидали
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что получили
+      description: Вывод целиком, если он не огромен.
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Окружение
+      description: ОС, версия Python, какой агентный CLI используете.
+      placeholder: |
+        Ubuntu 24.04, Python 3.12, claude + opencode
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Подтверждение
+      options:
+        - label: В отчёте нет токенов, секретов и персональных данных
+          required: true

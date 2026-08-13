@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# brain-link — attach the shared Brain memory file to the current project.
+set -e
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+
+[ ! -f "$BRAIN/MEMORY.md" ] && { echo "Нет $BRAIN/MEMORY.md — сначала запусти setup-brain-v2.sh"; exit 1; }
+
+for name in CLAUDE.md AGENTS.md GEMINI.md .cursorrules; do
+  if [ ! -e "$name" ] || [ -L "$name" ]; then
+    ln -sf "$BRAIN/MEMORY.md" "$name"
+    echo "  ✓ ./$name → $BRAIN/MEMORY.md"
+  else
+    echo "  ! ./$name exists (not a symlink) — skip"
+  fi
+done

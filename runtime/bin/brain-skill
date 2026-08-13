@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Manage Brain Skills (knowledge, mcp, uiux)."""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+try:
+    from brain_skill_parser import parse_skill_file
+    from brain_wiki.frontmatter import format_frontmatter
+except ImportError as e:
+    print(f"Error importing brain libraries: {e}", file=sys.stderr)
+    sys.exit(1)
+
+def get_skills_dir() -> Path:
+    brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+    return brain_path / "skills"
+
+def find_skill_file(name: str) -> Path | None:
+    d = get_skills_dir()
+    if not d.exists():
+        return None
+    for f in d.rglob("*.md"):
+        data = parse_skill_file(f)
+        if data.get("name") == name:
+            return f
+    return None
+
+def cmd_list(args: argparse.Namespace) -> int:
+    d = get_skills_dir()
+    if not d.exists():
+        print("No skills directory found.")
+        return 0
+        
+    skills = []
+    for f in d.rglob("*.md"):
+        data = parse_skill_file(f)
+        if "name" in data:
+            skills.append(data)
+            
+    if not skills:
+        print("No skills found.")
+        return 0
+        
+    print(f"{'NAME':<30} {'TYPE':<15} {'APPLIES_TO':<30} {'CLIENTS'}")
+    print("-" * 90)
+    for s in sorted(skills, key=lambda x: x.get("name", "")):
+        applies = ", ".join(s.get("applies_to", []))
+        clients = ", ".join(s.get("supported_clients", []))
+        name = s.get("name", "unknown")
+        if len(name) > 28:
+            name = name[:25] + "..."
+        stype = s.get("type", "unknown")
+        print(f"{name:<30} {stype:<15} {applies:<30} {clients}")
+        
+    return 0
+
+def cmd_mount(args: argparse.Namespace) -> int:
+    f = find_skill_file(args.skill)
+    if not f:
+        print(f"Skill '{args.skill}' not found.", file=sys.stderr)
+        return 1
+        
+    data = parse_skill_file(f)
+    applies = data.get("applies_to", [])
+    if not isinstance(applies, list):
+        applies = [applies] if applies else []
+        
+    if args.to_role in applies:
+        print(f"Skill '{args.skill}' is already mounted to role '{args.to_role}'.")
+        return 0
+        
+    applies.append(args.to_role)
+    data["applies_to"] = applies
+    
+    body = data.pop("_content", "")
+    data.pop("_filepath", None)
+    
+    new_content = format_frontmatter(data, body)
+    f.write_text(new_content, encoding="utf-8")
+    print(f"Mounted skill '{args.skill}' to role '{args.to_role}'.")
+    return 0
+
+def cmd_unmount(args: argparse.Namespace) -> int:
+    f = find_skill_file(args.skill)
+    if not f:
+        print(f"Skill '{args.skill}' not found.", file=sys.stderr)
+        return 1
+        
+    data = parse_skill_file(f)
+    applies = data.get("applies_to", [])
+    if not isinstance(applies, list):
+        applies = [applies] if applies else []
+        
+    if args.from_role not in applies:
+        print(f"Skill '{args.skill}' is not mounted to role '{args.from_role}'.")
+        return 0
+        
+    applies.remove(args.from_role)
+    data["applies_to"] = applies
+    
+    body = data.pop("_content", "")
+    data.pop("_filepath", None)
+    
+    new_content = format_frontmatter(data, body)
+    f.write_text(new_content, encoding="utf-8")
+    print(f"Unmounted skill '{args.skill}' from role '{args.from_role}'.")
+    return 0
+
+def cmd_ingest_book(args: argparse.Namespace) -> int:
+    source_path = Path(args.path)
+    if not source_path.exists():
+        print(f"File not found: {source_path}", file=sys.stderr)
+        return 1
+        
+    book_name = source_path.stem.lower().replace(' ', '-')
+    brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+    
+    # Create glossary in wiki/
+    wiki_dir = brain_path / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    glossary_path = wiki_dir / f"concept-{book_name}-glossary.md"
+    glossary_frontmatter = {
+        "title": f"Glossary: {source_path.stem}",
+        "type": "concept",
+        "tags": ["glossary", "book-ingest"],
+        "curation": "agent"
+    }
+    glossary_content = format_frontmatter(glossary_frontmatter, f"Auto-generated glossary from {source_path.name}.\n\n(LLM to fill terms here)")
+    glossary_path.write_text(glossary_content, encoding="utf-8")
+    print(f"Created glossary: {glossary_path}")
+    
+    # Create skills/
+    skills_dir = brain_path / "skills" / book_name
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skills_dir / "SKILL.md"
+    skill_frontmatter = {
+        "name": f"{book_name}-principles",
+        "type": "knowledge",
+        "applies_to": [args.to_role],
+        "supported_clients": ["all"]
+    }
+    skill_content = format_frontmatter(skill_frontmatter, f"Knowledge extracted from {source_path.name}.\n\n(LLM to fill principles here)")
+    skill_path.write_text(skill_content, encoding="utf-8")
+    print(f"Created knowledge skill: {skill_path}")
+    
+    return 0
+
+def main():
+    parser = argparse.ArgumentParser(description="Brain Skill Manager")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    
+    p_list = sub.add_parser("list", help="List all skills")
+    p_list.set_defaults(func=cmd_list)
+    
+    p_mount = sub.add_parser("mount", help="Mount a skill to a role")
+    p_mount.add_argument("skill", help="Name of the skill")
+    p_mount.add_argument("--to-role", required=True, help="Role to mount to")
+    p_mount.set_defaults(func=cmd_mount)
+    
+    p_unmount = sub.add_parser("unmount", help="Unmount a skill from a role")
+    p_unmount.add_argument("skill", help="Name of the skill")
+    p_unmount.add_argument("--from-role", required=True, help="Role to unmount from")
+    p_unmount.set_defaults(func=cmd_unmount)
+    
+    # Placeholder for ingest-book (s7)
+    p_ingest = sub.add_parser("ingest-book", help="Ingest a book into skills")
+    p_ingest.add_argument("path", help="Path to document")
+    p_ingest.add_argument("--to-role", required=True, help="Role to mount generated skills to")
+    p_ingest.set_defaults(func=cmd_ingest_book)
+    
+    args = parser.parse_args()
+    sys.exit(args.func(args))
+
+if __name__ == "__main__":
+    main()

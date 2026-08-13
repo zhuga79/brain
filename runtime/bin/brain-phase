@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Manage Brain phase lifecycle — init and close."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+import brain_tasks
+
+
+def _brain_path() -> Path:
+    return Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+
+
+def _repo_dir() -> Path:
+    return Path(os.environ.get("BRAIN_REPO_DIR", os.getcwd()))
+
+
+def _run(cmd: list[str], cwd: str | None = None,
+         timeout: int = 120) -> tuple[int, str, str]:
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       cwd=cwd, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def today_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _load_tasks(path: Path) -> list[dict]:
+    """Load tasks from a markdown file using the shared brain_tasks parser."""
+    return brain_tasks.parse_tasks(path.read_text(encoding="utf-8"))
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    phase_num = args.phase
+    title = args.title or f"Phase {phase_num}"
+    date_str = today_utc()
+
+    try:
+        rc, stdout, _ = _run(["git", "describe", "--tags", "--abbrev=0"], cwd=str(_repo_dir()), timeout=10)
+        baseline_tag = stdout.strip() or "v0"
+    except Exception:
+        baseline_tag = "v0"
+
+    try:
+        rc, stdout, _ = _run(["git", "rev-parse", "--short", "HEAD"], cwd=str(_repo_dir()), timeout=10)
+        baseline_hash = stdout.strip() or "0000000"
+    except Exception:
+        baseline_hash = "0000000"
+
+    handoff_dir = _repo_dir() / "handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_file = handoff_dir / f"{date_str}-phase{phase_num}-prd.md"
+    tickets_file = handoff_dir / f"{date_str}-phase{phase_num}-tickets.md"
+
+    if prd_file.exists():
+        print(f"WARN: {prd_file} already exists — skipping", file=sys.stderr)
+    else:
+        prd_content = f"""# Brain Phase {phase_num} PRD — {title}
+
+Date: {date_str}
+Baseline: `{baseline_tag}` at `{baseline_hash}`
+Status: draft
+
+## Context
+TODO: Explain the background and why this phase is needed now.
+
+## Goals
+- G1. TODO
+
+## Non-goals
+- TODO
+
+## Scope
+### Area 1
+- T1 `phase{phase_num}-task1` — TODO
+- T2 `phase{phase_num}-task2` — TODO
+
+### Closeout
+- `phase{phase_num}-closeout` — release-notes, smoke, tag.
+
+## Acceptance
+- TODO: Phase-level acceptance criteria.
+
+## Risks
+- R1. TODO
+
+## References
+- TODO
+"""
+        prd_file.write_text(prd_content, encoding="utf-8")
+        print(f"Generated PRD: {prd_file}")
+
+    if tickets_file.exists():
+        print(f"WARN: {tickets_file} already exists — skipping", file=sys.stderr)
+    else:
+        tickets_content = f"""# Brain Phase {phase_num} — Tickets
+
+Date: {date_str}
+Parent PRD: `{prd_file.name}`
+Baseline: `{baseline_tag}` at `{baseline_hash}`
+
+## P0
+
+- [ ] [P0] t-{date_str}-phase{phase_num}-baseline — Sync handoff and baseline
+      role: linter   mode: solo
+      Record baseline commit, release gate result and Phase {phase_num} start order.
+      acceptance: Baseline recorded.
+      ref: {prd_file.name}
+
+## P1
+
+- [ ] [P1] t-{date_str}-phase{phase_num}-feature1 — TODO: Feature 1
+      role: developer   mode: solo
+      TODO: Task description.
+      acceptance: Feature 1 implemented and passes tests.
+
+## P2
+
+- [ ] [P2] t-{date_str}-phase{phase_num}-closeout — Phase {phase_num} closeout
+      role: developer   mode: solo
+      Release-notes, smoke, tag.
+      acceptance: smoke is green, tag created, done.md updated.
+"""
+        tickets_file.write_text(tickets_content, encoding="utf-8")
+        print(f"Generated Tickets: {tickets_file}")
+
+    return 0
+
+
+def cmd_close(args: argparse.Namespace) -> int:
+    phase_num = args.phase
+    date_str = today_utc()
+    repo = _repo_dir()
+    brain = _brain_path()
+
+    # 1. Collect what was done this phase
+    active_file = brain / "tasks" / "active.md"
+    done_file = brain / "tasks" / "done.md"
+
+    # Load phase tasks from tickets file
+    tickets_file = None
+    for f in sorted(repo.glob(f"handoff/*-phase{phase_num}-tickets.md"), reverse=True):
+        tickets_file = f
+        break
+
+    phase_tasks = []
+    if tickets_file:
+        phase_tasks = _load_tasks(tickets_file)
+        print(f"Phase {phase_num} tickets ({len(phase_tasks)} total):")
+        for t in phase_tasks:
+            print(f"  [{t['state']}] {t['priority']} {t['id']} — {t['title']}")
+    print()
+
+    # 2. Generate release notes
+    done_tasks = _load_tasks(done_file)
+    phase_done = [t for t in done_tasks if f"phase{phase_num}" in t["id"]]
+    done_today = [t for t in done_tasks if date_str in t["id"]]
+
+    notes = []
+    notes.append(f"# Brain Phase {phase_num} — Release Notes ({date_str})")
+    notes.append("")
+    if phase_done:
+        notes.append(f"## Tasks completed in Phase {phase_num}:")
+        for t in phase_done:
+            notes.append(f"- [{t['priority']}] {t['id']}: {t['title']}")
+    elif done_today:
+        notes.append(f"## Tasks completed ({date_str}):")
+        for t in done_today:
+            notes.append(f"- [{t['priority']}] {t['id']}: {t['title']}")
+    notes.append("")
+
+    notes_path = brain / "wiki" / "_views" / f"release-notes-phase{phase_num}.md"
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    notes_path.write_text("\n".join(notes) + "\n", encoding="utf-8")
+    print(f"Release notes: {notes_path}")
+
+    # 3. Run smoke tests
+    print()
+    print("=== Running smoke tests ===")
+    smoke_path = repo / "tests" / "smoke.sh"
+    if smoke_path.exists():
+        try:
+            rc, out, err = _run(["bash", str(smoke_path)], cwd=str(repo), timeout=300)
+            print(out)
+            if err:
+                print(err, file=sys.stderr)
+            if rc != 0 or "ALL TESTS PASSED" not in out:
+                print("ERROR: smoke tests failed", file=sys.stderr)
+                return 1
+            print("Smoke tests: PASSED")
+        except subprocess.TimeoutExpired:
+            print("ERROR: smoke tests timed out", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"ERROR: smoke tests failed: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"WARN: smoke.sh not found at {smoke_path}")
+        if not args.force:
+            print("Use --force to proceed without smoke tests")
+            return 1
+
+    # 4. Tag via brain-release
+    tag = args.tag or f"v{phase_num}"
+    print(f"\n=== Creating tag {tag} ===")
+
+    rc, out, err = _run(
+        ["brain-release", "tag", tag, "-m", f"Brain Phase {phase_num} closeout", "--yes"],
+        cwd=str(repo), timeout=300,
+    )
+    print(out)
+    if err:
+        print(err, file=sys.stderr)
+    if rc != 0:
+        print(f"WARN: brain-release tag {tag} had issues (rc={rc})", file=sys.stderr)
+        print("This is expected if other active tasks exist. Create the tag manually:")
+        print(f"  git tag -a {tag} -m \"Brain Phase {phase_num} closeout\"")
+        if not args.force:
+            return rc
+
+    # 5. Update done.md (record closeout)
+    closeout_task_id = f"t-{date_str}-phase{phase_num}-closeout"
+    print(f"\nPhase {phase_num} closeout complete.")
+    print(f"  Release notes: {notes_path}")
+    print(f"  Tag: {tag}")
+    print()
+    print(f"Next: brain-task complete {closeout_task_id} --as <agent>")
+
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Brain phase lifecycle management.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Commands:\n"
+            "  init <N> [title]   Initialize PRD and tickets for phase N\n"
+            "  close <N>          Close phase N: release notes, smoke, tag\n\n"
+            "Examples:\n"
+            "  brain-phase init 15 \"Knowledge Graph v2\"\n"
+            "  brain-phase close 14\n"
+        ),
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="Initialize PRD and tickets for a phase")
+    p_init.add_argument("phase", type=int, help="Phase number")
+    p_init.add_argument("title", nargs="?", default="", help="Phase title")
+    p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+
+    p_close = sub.add_parser("close", help="Close a phase")
+    p_close.add_argument("phase", type=int, help="Phase number")
+    p_close.add_argument("--tag", default="", help="Tag to create (default: v<phase>)")
+    p_close.add_argument("--force", action="store_true", help="Skip smoke tests if missing")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        return cmd_init(args)
+    elif args.command == "close":
+        return cmd_close(args)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

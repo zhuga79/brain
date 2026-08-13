@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# brain-publish — assemble a clean, publishable copy of the Brain SYSTEM code,
+# excluding all project/client data (cases, tasks, journals, dashboards).
+#
+# Safety model:
+#   * Only git-tracked files are considered (untracked scratch/data ignored).
+#   * ALLOWLIST of system dirs/files/globs — nothing else is copied.
+#   * DENYLIST + PII pattern live OUTSIDE this script, in a local secrets file
+#     (gitignored) so client names never appear in published code.
+#   * Hard PII verification at the end: any match aborts before commit.
+#
+# Local secrets file (first found):
+#   $BRAIN_PUBLISH_SECRETS, .publish-secrets.local, ~/.config/brain/publish-secrets
+# It must define bash arrays DENY=(...) and a variable PII_PATTERN='...'.
+#
+# Usage: brain-publish <target-dir> [--commit]
+set -euo pipefail
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TARGET="${1:-}"
+COMMIT="${2:-}"
+if [ -z "$TARGET" ]; then
+    echo "usage: brain-publish <target-dir> [--commit]" >&2
+    exit 2
+fi
+TARGET="$(readlink -f "$TARGET")"
+if [ "$TARGET" = "$SRC" ]; then
+    echo "brain-publish: target must differ from source repo" >&2
+    exit 2
+fi
+
+# --- load local secrets (denylist + PII pattern) ---
+DENY=()
+PII_PATTERN=""
+for cand in "${BRAIN_PUBLISH_SECRETS:-}" \
+            "$SRC/.publish-secrets.local" \
+            "$HOME/.config/brain/publish-secrets"; do
+    [ -n "$cand" ] && [ -f "$cand" ] || continue
+    # shellcheck disable=SC1090
+    . "$cand"
+    SECRETS_SRC="$cand"
+    break
+done
+if [ -z "${PII_PATTERN:-}" ]; then
+    echo "brain-publish: no PII_PATTERN found — create a local secrets file first" >&2
+    echo "  (see header; expected DENY=() and PII_PATTERN='...')" >&2
+    exit 2
+fi
+
+# --- allowlist: whole directories that are system code/documentation ---
+ALLOW_DIRS=( runtime tests roles doctrine skills spec docs .github )
+# --- allowlist: individual root files ---
+ALLOW_FILES=(
+    README.md CONTRIBUTING.md SECURITY.md LICENSE
+    pyproject.toml .gitignore AGENTS.md GEMINI.md brain-spec.md MEMORY.md
+    setup-brain-v2.sh install-brain-mcp.sh install-hooks.sh
+    install-obsidian-skills.sh add-teams-brain.sh add-power-features-brain.sh
+    add-pm-finance-brain.sh add-design-negotiator-brain.sh
+    patch-brain-run-doctrine.sh refine-tax-boundaries.sh
+)
+# --- allowlist: curated subsets (system pages only; denylist filters data) ---
+ALLOW_GLOBS=(
+    "teams/*.md" "prd/*.md"
+    "wiki/*.md" "wiki/*.json"
+    "wiki/_views/*.base" "wiki/_views/*.canvas" "wiki/_views/*.md"
+    "wiki/proposals/*.md"
+    "raw/smoke-e2e-2026-05-03.md" "tasks/SCHEMA.md" "config/routing.json"
+)
+
+cd "$SRC"
+# set of git-tracked files for O(1) membership
+declare -A TRACKED=()
+while IFS= read -r p; do TRACKED["$p"]=1; done < <(git ls-files)
+
+# Семейства страниц, которые заводятся под конкретную работу с клиентами и
+# потому не могут попадать в публичный срез. Денилист по именам fail-open:
+# каждая новая страница утекает, пока её не впишут вручную. Шаблоны закрывают
+# семейство целиком. Конкретные имена — в локальном файле секретов (DENY).
+DENY_GLOBS=(
+    "wiki/projects-*"
+    "wiki/review-cycle-*"
+    # Индекс циклов ревью ссылается на сами отчёты; без них остаются битые
+    # wikilink'и, и brain-validate в публичном срезе краснеет.
+    "wiki/review-cycles.md"
+    "wiki/proposals/*"
+)
+is_denied() {
+    local p="$1" d g
+    for d in "${DENY[@]}"; do [ "$p" = "$d" ] && return 0; done
+    for g in "${DENY_GLOBS[@]}" "${DENY_PATTERNS[@]:-}"; do
+        [ -n "$g" ] || continue
+        # shellcheck disable=SC2053
+        [[ "$p" == $g ]] && return 0
+    done
+    return 1
+}
+
+# Пересобираем дерево с нуля, но сохраняем .git цели: публичный репозиторий
+# живёт с историей, issue и PR ссылаются на коммиты. Стирание .git при каждой
+# пересборке ломало бы эти ссылки.
+GIT_KEEP=""
+if [ -d "$TARGET/.git" ]; then
+    GIT_KEEP="$(mktemp -d)"
+    mv "$TARGET/.git" "$GIT_KEEP/.git"
+fi
+rm -rf "$TARGET"; mkdir -p "$TARGET"
+if [ -n "$GIT_KEEP" ]; then
+    mv "$GIT_KEEP/.git" "$TARGET/.git"
+    rmdir "$GIT_KEEP"
+fi
+
+# Страница wiki публикуется, только если помечена явно. Прежняя схема —
+# шаблон wiki/*.md с вычитанием денилиста — была fail-open: каждая новая
+# страница уезжала наружу, пока кто-то не вспомнит её исключить. Так и утекли
+# страницы с именами клиентских дел.
+SKIPPED_UNMARKED=0
+is_public_page() {
+    local rel="$1"
+    case "$rel" in
+        wiki/*.md) ;;
+        *) return 0 ;;                      # правило только для страниц wiki
+    esac
+    case "$rel" in
+        wiki/_views/*) return 0 ;;          # сгенерированные представления
+    esac
+    if head -20 "$rel" 2>/dev/null | grep -qE '^visibility:[[:space:]]*public[[:space:]]*$'; then
+        return 0
+    fi
+    SKIPPED_UNMARKED=$((SKIPPED_UNMARKED + 1))
+    return 1
+}
+
+copy_one() {
+    local rel="$1"
+    [ -n "${TRACKED[$rel]:-}" ] || return 0   # git-tracked only
+    is_denied "$rel" && return 0
+    is_public_page "$rel" || return 0
+    [ -f "$rel" ] || return 0
+    mkdir -p "$TARGET/$(dirname "$rel")"
+    cp -p "$rel" "$TARGET/$rel"
+}
+
+for d in "${ALLOW_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r -d '' f; do
+        rel="${f#./}"
+        case "$rel" in *__pycache__*|*.pyc) continue;; esac
+        copy_one "$rel"
+    done < <(find "./$d" -type f -print0)
+done
+for f in "${ALLOW_FILES[@]}"; do copy_one "$f"; done
+shopt -s nullglob
+for g in "${ALLOW_GLOBS[@]}"; do for f in $g; do copy_one "$f"; done; done
+shopt -u nullglob
+
+# --- strip links to pages that were not published ---
+# Индекс и другие страницы-оглавления перечисляют wikilink'и построчно. Сами
+# приватные страницы в срез не попадают, но их ИМЕНА попадали — а имена вроде
+# judicial-practice-art1595 или projects-<фамилии> раскрывают суть дела не хуже
+# содержимого. Убираем строки, ссылающиеся на неопубликованное.
+python3 - "$TARGET" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+wiki = target / "wiki"
+if not wiki.is_dir():
+    sys.exit(0)
+
+published = {p.stem for p in wiki.rglob("*.md")}
+link_re = re.compile(r"\[\[([^\]|#]+)")
+removed_total = 0
+
+for page in wiki.rglob("*.md"):
+    lines = page.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept, removed = [], 0
+    for line in lines:
+        names = [n.strip() for n in link_re.findall(line)]
+        # Строку убираем, только если она целиком про ссылки и ВСЕ они ведут
+        # на неопубликованное: иначе можно выкинуть осмысленный текст.
+        if names and all(n not in published for n in names) and line.lstrip().startswith(("-", "*", "|")):
+            removed += 1
+            continue
+        kept.append(line)
+    if removed:
+        page.write_text("".join(kept), encoding="utf-8")
+        removed_total += removed
+        print(f"brain-publish: {page.relative_to(target)} — убрано ссылок на приватные страницы: {removed}")
+
+if removed_total:
+    print(f"brain-publish: всего убрано строк со ссылками на неопубликованное: {removed_total}")
+PY
+
+# --- hard PII verification ---
+HITS="$(grep -rlEI "$PII_PATTERN" "$TARGET" 2>/dev/null || true)"
+if [ -n "$HITS" ]; then
+    echo "ABORT: PII detected in publish tree:" >&2
+    echo "$HITS" >&2
+    exit 1
+fi
+
+if [ "$SKIPPED_UNMARKED" -gt 0 ]; then
+    echo "brain-publish: страниц wiki пропущено без пометки visibility: public — $SKIPPED_UNMARKED"
+fi
+
+FILES="$(find "$TARGET" -type f | wc -l | tr -d ' ')"
+echo "brain-publish: assembled $FILES files in $TARGET (PII check clean, secrets: ${SECRETS_SRC:-none})"
+
+if [ "$COMMIT" = "--commit" ]; then
+    cd "$TARGET"
+    git init -q
+    git add -A
+    if git diff --cached --quiet; then
+        echo "brain-publish: no changes since last snapshot, nothing committed"
+    else
+        git -c user.name="Brain" -c user.email="brain@localhost" \
+            commit -q -m "Brain system — public snapshot $(date +%Y-%m-%d)"
+        echo "brain-publish: committed clean snapshot in $TARGET"
+    fi
+fi

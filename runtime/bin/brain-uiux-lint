@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# brain-uiux-lint [<html-file>] [--json] [--strict]
+# Advisory UI anti-pattern lint (zero-dep Python port of impeccable subset).
+# Default target: $BRAIN/wiki/_views/brain-dashboard.html
+# Advisory by default (exit 0); --strict exits 1 when findings remain.
+# See doctrine/design-review-workflow.md, handoff/2026-06-29-uiux-detector-poc.md
+set -euo pipefail
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+
+file=""; json=0; strict=0
+for a in "$@"; do
+  case "$a" in
+    --json) json=1;;
+    --strict) strict=1;;
+    -h|--help) echo "usage: brain-uiux-lint [<html>] [--json] [--strict]"; exit 0;;
+    *) file="$a";;
+  esac
+done
+file="${file:-$BRAIN/wiki/_views/brain-dashboard.html}"
+[ -f "$file" ] || { echo "brain-uiux-lint: no such file: $file" >&2; exit 2; }
+
+python3 - "$file" "$json" "$strict" <<'PY'
+import sys, json as J
+import brain_uiux_lint as L
+path, jsonmode, strict = sys.argv[1], sys.argv[2] == "1", sys.argv[3] == "1"
+import os
+baseline = L.load_baseline(os.path.join(os.path.dirname(path), "uiux-lint-baseline.json"))
+findings = L.lint_html(open(path, encoding="utf-8", errors="replace").read(), baseline=baseline)
+if jsonmode:
+    print(J.dumps({"file": path, "count": len(findings), "findings": findings},
+                  ensure_ascii=False, indent=2))
+else:
+    if not findings:
+        print(f"✓ brain-uiux-lint: clean ({path})")
+    else:
+        print(f"⚠ brain-uiux-lint: {len(findings)} finding(s) in {path}")
+        from collections import Counter
+        for rule, n in Counter(f["rule"] for f in findings).most_common():
+            print(f"  {n:3}  {rule}")
+        for f in findings:
+            sel = f.get("selector", "")
+            print(f"    [{f['rule']}] {f.get('detail','')}" + (f"  ← {sel}" if sel else ""))
+sys.exit(1 if (findings and strict) else 0)
+PY

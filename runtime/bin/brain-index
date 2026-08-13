@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Manage Brain machine indexes."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    import brain_index
+except ImportError as exc:
+    print(f"ERROR: cannot import brain_index: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+def emit(data: object, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Brain machine index CLI.")
+    parser.add_argument("--brain", default=os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_rebuild = sub.add_parser("rebuild", help="Rebuild all machine indexes")
+    p_rebuild.add_argument("--with-obsidian", action="store_true", help="Also export Obsidian .base/.canvas views")
+    p_rebuild.add_argument("--json", action="store_true")
+
+    p_status = sub.add_parser("status", help="Show index status")
+    p_status.add_argument("--json", action="store_true")
+
+    p_page = sub.add_parser("page", help="Show indexed page record")
+    p_page.add_argument("slug")
+    p_page.add_argument("--json", action="store_true")
+
+    p_backlinks = sub.add_parser("backlinks", help="Show backlinks for a wiki page")
+    p_backlinks.add_argument("slug")
+    p_backlinks.add_argument("--json", action="store_true")
+
+    p_sources = sub.add_parser("sources", help="Show source map, optionally for one raw source")
+    p_sources.add_argument("slug", nargs="?", default="")
+    p_sources.add_argument("--json", action="store_true")
+
+    p_stale = sub.add_parser("stale", help="Check whether machine index is stale")
+    p_stale.add_argument("--json", action="store_true")
+
+    p_export = sub.add_parser("export-obsidian", help="Generate Obsidian .base/.canvas views")
+    p_export.add_argument("--json", action="store_true")
+
+    args = parser.parse_args()
+    brain = brain_index.brain_wiki.brain_path(args.brain)
+
+    if args.command == "rebuild":
+        manifest = brain_index.rebuild_index(brain, with_obsidian=args.with_obsidian)
+        if args.json:
+            emit(manifest, True)
+        else:
+            print(
+                "OK: rebuilt index "
+                f"pages={manifest['page_count']} raw={manifest['raw_count']} "
+                f"links={manifest['link_count']} search_docs={manifest['search_docs']}"
+            )
+        return 0
+
+    if args.command == "status":
+        status = brain_index.index_status(brain)
+        if args.json:
+            emit(status, True)
+        else:
+            print(f"status: {status.get('status')} health: {status.get('health')}")
+            if status.get("generated_at"):
+                print(f"generated_at: {status['generated_at']}")
+                print(f"pages: {status.get('page_count', 0)}")
+                print(f"raw: {status.get('raw_count', 0)}")
+                print(f"links: {status.get('link_count', 0)}")
+                print(f"search_docs: {status.get('search_docs', 0)}")
+            if status.get("stale_files"):
+                print("stale_files:")
+                for path in status["stale_files"]:
+                    print(f"- {path}")
+        return 0 if status.get("status") != "missing" else 1
+
+    if args.command == "page":
+        page = brain_index.get_page(brain, args.slug)
+        if not page:
+            print(f"ERROR: page not indexed: {args.slug}", file=sys.stderr)
+            return 1
+        if args.json:
+            emit(page, True)
+        else:
+            print(f"{page['slug']} [{page['type']}] {page['title']}")
+            print(f"path: {page['path']}")
+            print(f"sources: {', '.join(page['sources']) if page['sources'] else '-'}")
+            print(f"links: {', '.join(page['links']) if page['links'] else '-'}")
+        return 0
+
+    if args.command == "backlinks":
+        backlinks = brain_index.get_backlinks(brain, args.slug)
+        if args.json:
+            emit({"slug": args.slug, "backlinks": backlinks}, True)
+        else:
+            print(f"backlinks: {args.slug}")
+            for slug in backlinks:
+                print(f"- {slug}")
+        return 0
+
+    if args.command == "sources":
+        source_map = brain_index.get_source_map(brain, args.slug)
+        if args.json:
+            emit(source_map, True)
+        else:
+            print(json.dumps(source_map, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "stale":
+        status = brain_index.stale_status(brain)
+        if args.json:
+            emit(status, True)
+        else:
+            print(f"status: {status['status']}")
+            if status.get("stale_files"):
+                for path in status["stale_files"]:
+                    print(f"- {path}")
+        return 0 if not status.get("stale") else 1
+
+    if args.command == "export-obsidian":
+        result = brain_index.export_obsidian(brain)
+        if args.json:
+            emit(result, True)
+        else:
+            print("OK: exported Obsidian views")
+            for name, path in result.items():
+                print(f"{name}: {path}")
+        return 0
+
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

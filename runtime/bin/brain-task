@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# brain-task — задачи с учётом ролей, локов, deps; авто-коммит в git
+set -eu -o pipefail
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+
+# Helper: run a brain Python module with the correct PYTHONPATH
+_LIBPATH="$(dirname "${BASH_SOURCE[0]}")/../lib"
+_py() {
+  PYTHONPATH="${_LIBPATH}:${HOME}/.local/lib/brain:${HOME}/.local/share/brain/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -m "$@"
+}
+_BIN_DIR="$(dirname "${BASH_SOURCE[0]}")"
+
+usage() {
+  cat <<'USAGE'
+brain-task — управление очередью задач
+
+  brain-task                          показать active.md
+  brain-task next [--role R] [--json] [--headless-only] верхняя АВАИЛАБЛЬНАЯ задача
+  brain-task list [--role R] [--mode council|solo|prd] [--json]
+  brain-task show <id> [--json]       подробности задачи
+  brain-task deps <id>                граф зависимостей задачи
+  brain-task add "<text>" [--role R] [--mode M] [--prio P0|P1|P2|P3]
+  brain-task take <id> --as <agent-id>     лок + пометить [~]
+  brain-task release <id> --as <agent-id>  снять лок + вернуть [ ]
+  brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
+  brain-task block <id> "reason"      пометить [!] с причиной
+  brain-task log [N]                  последние N (default 30) записей лога
+  brain-task webhook-replay           переотправить все записи из dead-letter.jsonl
+USAGE
+}
+
+
+# Security: validate task-id format to prevent sed/regex injection.
+# Task IDs must follow the slug convention: t-YYYY-MM-DD-<slug> or simple slugs.
+# Одна проверка на всю систему — из brain-common. Своя копия здесь
+# расходилась бы с той, что применяют brain-launch и brain-council: у
+# brain-task она была строже на точку, и одинаковый id принимался в одном
+# месте и отвергался в другом.
+_validate_id() {
+  validate_id "идентификатор задачи" "$1" || exit 2
+}
+
+cmd="${1:-show}"; shift || true
+
+case "$cmd" in
+  ""|show)
+    id=""
+    json_out=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --json) json_out=true; shift;;
+        *) id="$1"; shift;;
+      esac
+    done
+
+    if [ -z "$id" ]; then
+      if $json_out; then
+        echo '{"error": "id required"}'
+        exit 1
+      else
+        cat "$A"; exit 0
+      fi
+    fi
+
+    args=(--brain "$BRAIN" show "$id")
+    if $json_out; then args+=(--json); fi
+    _py brain_app.queue "${args[@]}"
+    ;;
+
+  next)
+    role=""
+    json_out=false
+    surface=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --role) role="$2"; shift 2;;
+        --json) json_out=true; shift;;
+        --headless-only) surface="headless"; shift;;
+        --surface) surface="$2"; shift 2;;
+        --client)
+          echo "brain-task --client снят: задачи заказчика живут в TASKS.md папки дела" >&2
+          exit 2
+          ;;
+        *) shift;;
+      esac
+    done
+    args=(--brain "$BRAIN" next --role "$role" --surface "$surface")
+    if $json_out; then args+=(--json); fi
+    _py brain_app.queue "${args[@]}"
+    ;;
+
+  list)
+    role=""; mode=""; json_out=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --role) role="$2"; shift 2;;
+        --mode) mode="$2"; shift 2;;
+        --client)
+          echo "brain-task --client снят: задачи заказчика живут в TASKS.md папки дела" >&2
+          exit 2
+          ;;
+        --json) json_out=true; shift;;
+        *) shift;;
+      esac
+    done
+    args=(--brain "$BRAIN" list --role "$role" --mode "$mode")
+    if $json_out; then args+=(--json); fi
+    _py brain_app.queue "${args[@]}"
+    ;;
+
+  deps)
+    id="${1:-}"
+    [ -z "$id" ] && { echo "id required"; exit 1; }
+    _validate_id "$id"
+    _py brain_app.queue --brain "$BRAIN" deps "$id"
+    ;;
+
+  add)
+    text="${1:-}"; shift || true
+    [ -z "$text" ] && { echo 'brain-task add "text" [--role R] [--mode M] [--prio P]'; exit 1; }
+    role="developer"; mode="solo"; prio="P2"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --role) role="$2"; shift 2;;
+        --mode) mode="$2"; shift 2;;
+        --prio) prio="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    # Выдача идентификатора и сборка блока — часть контракта очереди, поэтому
+    # живут в brain_app.queue: свои копии здесь и в MCP расходились в правилах
+    # слага и в проверке занятости id.
+    id="$(_py brain_app.queue --brain "$BRAIN" add "$text" --role "$role" --mode "$mode" --prio "$prio")"
+    log_op "task-add" "$id" "" "role=$role mode=$mode prio=$prio"
+    git_commit "task-add: $id"
+    _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
+    echo "added: $id"
+    ;;
+
+  take)
+    id="${1:-}"; shift || true
+    agent=""
+    [ "${1:-}" = "--as" ] && { agent="$2"; shift 2; }
+    [ -z "$id" ] && { echo "id required"; exit 1; }
+    _validate_id "$id"
+    [ -z "$agent" ] && { echo "--as <agent-id> required"; exit 1; }
+    if ! brain-lock acquire "$id" --as "$agent" >/dev/null; then
+      brain-lock status "$id"; exit 1
+    fi
+    if ! _py brain_core.taskfile take "$A" "$id" "$agent"
+    then
+      brain-lock release "$id" --as "$agent" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    log_op "task-start" "$id" "$agent" ""
+    git_commit "task-start: $id by $agent"
+    _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
+    echo "took: $id"
+    ;;
+
+  release)
+    id="${1:-}"; shift || true
+    agent=""
+    [ "${1:-}" = "--as" ] && { agent="$2"; shift 2; }
+    [ -z "$id" ] && { echo "id required"; exit 1; }
+    _validate_id "$id"
+    if [ -z "$agent" ]; then
+      echo "укажи исполнителя: brain-task release $id --as <agent-id>" >&2
+      echo "  без него команда сняла бы и чужой лок" >&2
+      exit 2
+    fi
+    brain-lock release "$id" --as "$agent" >/dev/null || true
+    _py brain_core.taskfile release "$A" "$id" || true
+    log_op "task-release" "$id" "${agent:-}" ""
+    git_commit "task-release: $id"
+    _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
+    echo "released: $id"
+    ;;
+
+  complete)
+    id="${1:-}"; shift || true
+    agent=""; model=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --as) agent="$2"; shift 2;;
+        --model) model="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    [ -z "$id" ] && { echo "id required"; exit 1; }
+    _validate_id "$id"
+    # Закрытие без --as снимало лок кем угодно: brain-lock release без
+    # владельца сносил любой лок, в том числе чужой. Для многоагентной работы
+    # это значит, что закрыть чужую задачу можно случайно, одной командой.
+    if [ -z "$agent" ]; then
+      echo "укажи исполнителя: brain-task complete $id --as <agent-id>" >&2
+      echo "  без него нельзя отличить закрытие своей задачи от чужой" >&2
+      exit 2
+    fi
+    # Mandatory model signature: every closed task records the real model+version.
+    model="${model:-${BRAIN_AGENT_MODEL:-}}"
+    if [ -z "$model" ]; then
+      if [ "${BRAIN_REQUIRE_MODEL:-0}" = "1" ]; then
+        echo "model signature required: pass --model <provider-model-version> or set BRAIN_AGENT_MODEL" >&2
+        exit 1
+      fi
+      echo "WARN: closing $id without a model signature (pass --model or set BRAIN_AGENT_MODEL)" >&2
+      model="unsigned"
+    fi
+    _py brain_core.taskfile complete "$A" "$D" "$id" "${agent:-unknown}" "$model" || exit 1
+    brain-lock release "$id" ${agent:+--as "$agent"} >/dev/null 2>&1 || true
+    log_op "task-done" "$id" "${agent:-}" "model=$model"
+    git_commit "task-done: $id by ${agent:-unknown} [${model}]"
+    _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
+    echo "completed: $id (model: $model)"
+    # Webhook delivery (safe-fail: errors only warn, never break complete)
+    if [ -n "${BRAIN_WEBHOOK_URL:-}" ]; then
+      _py brain_webhook deliver "$id" "${agent:-}" "$BRAIN"
+    fi
+    ;;
+
+  block)
+    id="${1:-}"; reason="${2:-}"
+    [ -z "$id" ] || [ -z "$reason" ] && { echo 'brain-task block <id> "reason"'; exit 1; }
+    _validate_id "$id"
+    # Идентификатор экранируется через re.escape в модуле: sed здесь был бы
+    # уязвим к метасимволам в id, даже при валидации выше.
+    _py brain_core.taskfile block "$A" "$id" || exit 1
+    log_op "task-block" "$id" "" "$reason"
+    git_commit "task-block: $id ($reason)"
+    _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
+    echo "blocked: $id ($reason)"
+    ;;
+
+  log)
+    n="${1:-30}"
+    grep -E '^## \[' "$LOG" | tail -n "$n"
+    ;;
+
+  webhook-replay)
+    DL="$BRAIN/.webhooks/dead-letter.jsonl"
+    if [ ! -f "$DL" ] || [ ! -s "$DL" ]; then
+      echo "dead-letter queue is empty"; exit 0
+    fi
+    [ -z "${BRAIN_WEBHOOK_URL:-}" ] && { echo "BRAIN_WEBHOOK_URL not set"; exit 1; }
+    BRAIN_WEBHOOK_URL="${BRAIN_WEBHOOK_URL}" _py brain_webhook replay "$DL"
+    ;;
+
+  -h|--help|help) usage;;
+  *) usage; exit 1;;
+esac

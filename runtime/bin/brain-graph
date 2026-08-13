@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Query the Brain Knowledge Graph."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    import brain_index
+except ImportError as exc:
+    print(f"ERROR: cannot import brain_index: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_graph(brain: Path) -> dict:
+    path = brain_index.index_dir(brain) / "graph.json"
+    if not path.exists():
+        print("ERROR: graph.json not found. Run 'brain-index rebuild' first.", file=sys.stderr)
+        sys.exit(1)
+    return brain_index.load_json(path, {"nodes": [], "edges": []})
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    brain = brain_index.brain_wiki.brain_path(getattr(args, "brain", None))
+    graph = load_graph(brain)
+    node_id = args.node.strip()
+
+    incoming = [e for e in graph["edges"] if e["to"] == node_id]
+    outgoing = [e for e in graph["edges"] if e["from"] == node_id]
+
+    node_info = next((n for n in graph["nodes"] if n["id"] == node_id), None)
+
+    print(f"Node: {node_id}")
+    if node_info:
+        print(f"  Type: {node_info['type']}")
+        print(f"  Title: {node_info['title']}")
+    print(f"  Incoming edges: {len(incoming)}")
+    print(f"  Outgoing edges: {len(outgoing)}")
+    print()
+
+    if outgoing:
+        print("Outgoing:")
+        for e in outgoing:
+            kind = e.get("type", "relates_to")
+            print(f"  {node_id} --[{kind}]--> {e['to']}")
+    if incoming:
+        print("Incoming:")
+        for e in incoming:
+            kind = e.get("type", "relates_to")
+            print(f"  {e['from']} --[{kind}]--> {node_id}")
+
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    brain = brain_index.brain_wiki.brain_path(getattr(args, "brain", None))
+    graph = load_graph(brain)
+
+    from collections import Counter
+    node_types = Counter(n["type"] for n in graph["nodes"])
+    edge_types = Counter(e.get("type", "relates_to") for e in graph["edges"])
+
+    print("Knowledge Graph Statistics")
+    print(f"  Total nodes: {len(graph['nodes'])}")
+    print(f"  Total edges: {len(graph['edges'])}")
+    print()
+    print("  Nodes by type:")
+    for t, c in node_types.most_common():
+        print(f"    {t}: {c}")
+    print()
+    print("  Edges by type:")
+    for t, c in edge_types.most_common():
+        print(f"    {t}: {c}")
+
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    brain = brain_index.brain_wiki.brain_path(getattr(args, "brain", None))
+    graph = load_graph(brain)
+    out_path = Path(args.out)
+    data = {"nodes": graph["nodes"], "edges": graph["edges"]}
+
+    if args.format == "json":
+        out_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    elif args.format == "tsv":
+        with out_path.open("w", encoding="utf-8") as f:
+            for e in graph["edges"]:
+                f.write(f"{e['from']}\t{e['to']}\t{e.get('type', 'relates_to')}\n")
+    elif args.format == "dot":
+        with out_path.open("w", encoding="utf-8") as f:
+            f.write("digraph Brain {\n")
+            for e in graph["edges"]:
+                label = e.get("type", "relates_to")
+                f.write(f'  "{e["from"]}" -> "{e["to"]}" [label="{label}"];\n')
+            f.write("}\n")
+    else:
+        print(f"ERROR: unknown format: {args.format}", file=sys.stderr)
+        return 1
+
+    print(f"Exported to {out_path}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Query and export Brain Knowledge Graph.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Commands:\n"
+            "  query   Show connections for a node\n"
+            "  stats   Graph statistics\n"
+            "  export  Export graph to JSON / TSV / DOT\n\n"
+            "Examples:\n"
+            "  brain-graph query about-brain\n"
+            "  brain-graph stats\n"
+            "  brain-graph export graph.dot\n"
+            "  brain-graph export --format tsv graph.tsv\n"
+        ),
+    )
+    parser.add_argument(
+        "--brain", default=None,
+        help="Brain path. Defaults to BRAIN_PATH env var or ~/brain.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_query = sub.add_parser("query", help="Show connections for a node")
+    p_query.add_argument("node", help="Node slug to query")
+
+    p_stats = sub.add_parser("stats", help="Graph statistics")
+
+    p_export = sub.add_parser("export", help="Export graph to file")
+    p_export.add_argument("out", help="Output file path")
+    p_export.add_argument(
+        "--format", default="json", choices=["json", "tsv", "dot"],
+        help="Export format (default: json)",
+    )
+
+    args = parser.parse_args()
+
+    handlers = {
+        "query": cmd_query,
+        "stats": cmd_stats,
+        "export": cmd_export,
+    }
+    handler = handlers.get(args.command)
+    if handler:
+        return handler(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

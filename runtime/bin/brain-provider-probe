@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Проверка провайдеров, закреплённых за ролями, с задачей на упавшего.
+
+Логика живёт в `brain_app.cycles.provider_probe`, здесь — только точка входа.
+"""
+
+from __future__ import annotations
+
+from brain_app.cycles import provider_probe, runner
+
+
+def main(argv: list[str] | None = None) -> int:
+    return runner.dispatch(provider_probe.SPEC, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

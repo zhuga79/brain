@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Прогон brain-validate по расписанию с corrective-задачей на провал.
+
+Логика живёт в `brain_app.cycles.validate`, здесь — только точка входа.
+"""
+
+from __future__ import annotations
+
+from brain_app.cycles import runner, validate
+
+
+def main(argv: list[str] | None = None) -> int:
+    return runner.dispatch(validate.SPEC, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

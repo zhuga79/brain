@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# brain-common — shared functions and variables for Brain CLI
+
+# Dynamic BRAIN_PATH resolution:
+# 1. If BRAIN_PATH env is set, use it.
+# 2. If current directory looks like a Brain repo (has wiki/ and tasks/), use it.
+# 3. Default to ~/brain.
+if [ -z "${BRAIN_PATH:-}" ]; then
+  if [ -d "wiki" ] && [ -d "tasks" ]; then
+    export BRAIN="$(pwd)"
+  else
+    export BRAIN="$HOME/brain"
+  fi
+else
+  export BRAIN="$BRAIN_PATH"
+fi
+
+export _BIN_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export A="$BRAIN/tasks/active.md"
+export D="$BRAIN/tasks/done.md"
+export LOG="$BRAIN/wiki/log.md"
+export COUNCIL="$BRAIN/council"
+export TEAMS="$BRAIN/teams"
+export PRD_DIR="$BRAIN/prd"
+export LOCKS="$BRAIN/.locks"
+
+CLI_DEFAULT="${CLI_DEFAULT:-claude}"
+
+# Маршрутизация роль → команда живёт в одном месте: config/routing.json,
+# читается через brain-provider cli. Раньше здесь была вторая, несовместимая
+# реализация — bash-строка cli_for_<role> из .cli-mapping.sh: одна команда на
+# роль, без рангов и здоровья, поэтому у brain-launch и brain-council не было
+# fallback вовсе, а решения оператора расходились с матрицей.
+cli_for_role() {
+  local role="$1"
+  local task_id="${2:-}"
+  # Третий аргумент — провайдер автора работы. Роли с diversify_from_author
+  # (рецензент, арбитр) пойдут к другому провайдеру: коррелированные слепые
+  # пятна делают ревью бессмысленным.
+  local author_provider="${3:-}"
+  local resolver="$_BIN_DIR/brain-provider"
+  [ -x "$resolver" ] || resolver="brain-provider"
+  local cmd
+  # stderr не глушим: предупреждение о повреждённой конфигурации должно дойти
+  # до оператора, а не утонуть внутри подстановки команды.
+  cmd=$("$resolver" cli --role "$role" --task "$task_id" --author-provider "$author_provider" || true)
+  echo "${cmd:-$CLI_DEFAULT}"
+}
+
+# Провайдер по команде запуска: обратное к build_role_command:client_name.
+provider_of_cli() {
+  case "$1" in
+    *gemini*)   echo gemini;;
+    *codex*)    echo codex;;
+    *opencode*) echo opencode;;
+    *ollama*)   echo ollama;;
+    *kilocode*) echo kilocode;;
+    *)          echo claude;;
+  esac
+}
+
+shell_quote() {
+  printf "%q" "$1"
+}
+
+# Идентификаторы попадают в строку, которую позже исполняет `bash -lc`.
+# Проверка живёт здесь, а не в одном brain-task: раньше её проходили только
+# команды очереди, а brain-launch и brain-council принимали id как есть.
+validate_id() {
+  local kind="$1" value="$2"
+  if ! [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "error: недопустимый $kind: $value" >&2
+    echo "  разрешены латиница, цифры, дефис, подчёркивание и точка" >&2
+    return 2
+  fi
+  return 0
+}
+
+build_role_command() {
+  local r="$1"
+  local task="$2"
+  local agent="$3"
+  local cli="$4"
+  local interactive="${5:-0}"
+  local handoff_on_limit="${6:-0}"
+
+  # Роль, задача и агент собираются в командную строку. Метасимвол здесь —
+  # исполнение произвольного кода в окне агента, поэтому отказываем сразу, а
+  # не пытаемся экранировать: легальный идентификатор их не содержит.
+  validate_id "роль" "$r" || return 2
+  validate_id "идентификатор задачи" "$task" || return 2
+  validate_id "идентификатор агента" "$agent" || return 2
+
+  local client_name="claude"
+  if [[ "$cli" =~ (^|[[:space:]])gemini($|[[:space:]]) ]]; then
+    client_name="gemini"
+  elif [[ "$cli" =~ (^|[[:space:]])codex($|[[:space:]]) ]]; then
+    client_name="codex"
+  elif [[ "$cli" =~ (^|[[:space:]])ollama($|[[:space:]]) ]]; then
+    client_name="ollama"
+  elif [[ "$cli" =~ (^|[[:space:]])opencode($|[[:space:]]) ]]; then
+    client_name="opencode"
+  elif [[ "$cli" =~ (^|[[:space:]])kilocode($|[[:space:]]) ]]; then
+    client_name="kilocode"
+  fi
+
+  # Значения экранируются даже после validate_id: проверка и подстановка
+  # разъезжаются со временем, а цена расхождения здесь — исполнение чужого кода.
+  local q_r q_task q_agent q_client
+  q_r="$(shell_quote "$r")"
+  q_task="$(shell_quote "$task")"
+  q_agent="$(shell_quote "$agent")"
+  q_client="$(shell_quote "$client_name")"
+
+  local cmd
+  if [[ "$cli" =~ (^|[[:space:]])gemini($|[[:space:]]) ]]; then
+    cmd="prompt=\$(brain-run --role $q_r --client $q_client --task $q_task --agent-id $q_agent); $cli -p \"\$prompt\" --output-format text"
+  else
+    cmd="brain-run --role $q_r --client $q_client --task $q_task --agent-id $q_agent | $cli"
+  fi
+
+  if [ "$handoff_on_limit" = 1 ]; then
+    cmd="brain-handoff run --task $q_task --agent $q_agent --to-role $q_r -- bash -lc $(shell_quote "$cmd")"
+  fi
+
+  if [ "$interactive" = 1 ]; then
+    echo "$cmd; echo; echo '[done] $q_r — нажми любую клавишу'; read -n1"
+  else
+    echo "$cmd"
+  fi
+}
+
+ts() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+log_op() {
+  local op="$1"
+  local id="$2"
+  local agent="${3:-}"
+  local extra="${4:-}"
+  printf "## [%s] %s | %s | %s | %s\n" "$(ts)" "$op" "$id" "$agent" "$extra" >> "$LOG"
+}
+
+# Границу слоёв держит brain_core.layers. Значение по умолчанию продублировано
+# здесь на случай, если библиотека недоступна: автокоммит не должен падать.
+BRAIN_DATA_PATHS="${BRAIN_DATA_PATHS:-$(python3 -c 'from brain_core.layers import DATA_PATHS; print(" ".join(DATA_PATHS))' 2>/dev/null || echo "tasks/ wiki/ council/ raw/ prd/")}"
+
+git_commit() {
+  local msg="$1"
+  if [ -d "$BRAIN/.git" ]; then
+    (
+      cd "$BRAIN"
+      # roles/, doctrine/, teams/ и MEMORY.md сюда больше не попадают: правка
+      # системы тонула в коммите «автозаписи журнала», а после раздела
+      # репозиториев уезжала бы в публичный репозиторий без ревью.
+      # Добавляем только существующие пути: git add прерывается целиком на
+      # первом отсутствующем спецификаторе, и один пустой каталог (например,
+      # prd/ на свежей установке) отменял автокоммит вместе с очередью.
+      local existing=()
+      local p
+      for p in $BRAIN_DATA_PATHS; do
+        [ -e "$p" ] && existing+=("$p")
+      done
+      [ ${#existing[@]} -gt 0 ] || exit 0
+      git add "${existing[@]}" 2>/dev/null || true
+      git diff --cached --quiet 2>/dev/null && exit 0
+      git commit -m "$msg" --quiet 2>/dev/null || true
+    )
+  fi
+}

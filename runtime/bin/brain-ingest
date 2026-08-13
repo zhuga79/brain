@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Ingest a markdown/text source into Brain raw/ and source-summary wiki."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+try:
+    import brain_wiki
+except ImportError as exc:
+    print(f"ERROR: cannot import brain_wiki: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_source(source: str | None) -> tuple[str, str]:
+    if source in (None, "-"):
+        return sys.stdin.read(), "stdin"
+    path = Path(source)
+    if path.exists():
+        return path.read_text(encoding="utf-8", errors="replace"), path.stem
+    return source, "inline"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Ingest a source into Brain raw/. Use '-' or omit SOURCE to read stdin.")
+    parser.add_argument("source", nargs="?", help="Source file path, '-' for stdin, or inline text")
+    parser.add_argument("--brain", default=os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
+    parser.add_argument("--slug", help="Raw source slug. Defaults to normalized title/source name.")
+    parser.add_argument("--title", help="Source title.")
+    parser.add_argument("--url", default="")
+    parser.add_argument("--type", default="article", dest="source_type")
+    parser.add_argument("--no-index", action="store_true", help="Do not regenerate wiki/index.md after ingest.")
+    args = parser.parse_args()
+
+    content, fallback_title = _read_source(args.source)
+    if not content.strip():
+        print("ERROR: source content is empty", file=sys.stderr)
+        return 1
+
+    title = args.title or fallback_title
+    slug = brain_wiki.normalize_slug(args.slug or title)
+    brain = brain_wiki.brain_path(args.brain)
+
+    try:
+        raw_path = brain_wiki.write_raw_source(
+            brain,
+            slug,
+            content,
+            title=title,
+            url=args.url,
+            source_type=args.source_type,
+        )
+    except (FileExistsError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary_slug = f"source-{slug}"
+    summary_path = brain / "wiki" / f"{summary_slug}.md"
+    summary_created = False
+    if not summary_path.exists():
+        body = "\n".join(
+            [
+                f"# Source: {title}",
+                "",
+                f"- Raw source: `raw/{slug}.md`",
+                f"- URL: {args.url or 'n/a'}",
+                "",
+                "## Summary",
+                "TODO: summarize the source without overwriting human-curated pages.",
+                "",
+                "## Extracted Claims",
+                "- TODO",
+                "",
+            ]
+        )
+        try:
+            brain_wiki.write_wiki_page(
+                brain,
+                summary_slug,
+                body,
+                page_type="source-summary",
+                title=f"Source: {title}",
+                sources=[f"raw/{slug}.md"],
+                tags=["source"],
+                curation="agent",
+                protected=False,
+                source_policy="required",
+                update_index=not args.no_index,
+            )
+            summary_created = True
+        except Exception as exc:
+            print(f"ERROR: raw source was written but source-summary failed: {exc}", file=sys.stderr)
+            return 1
+    elif not args.no_index:
+        brain_wiki.render_index(brain)
+
+    brain_wiki.append_log(brain, "ingest", "", "", f"raw/{slug}.md")
+    print(f"OK: ingested raw/{slug}.md")
+    if summary_created:
+        print(f"OK: created wiki/{summary_slug}.md")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

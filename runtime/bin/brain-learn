@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""brain-learn — Learning Loop CLI for Brain agents.
+
+Commands:
+  list     List incidents or lessons
+  show     Show full detail for an incident or lesson
+  capture  Capture a new incident and pending lesson
+  approve  Approve a pending lesson (arbiter required for high severity)
+  reject   Reject a pending lesson
+  activate Activate an approved lesson for prompt injection
+  deprecate Deprecate an active lesson
+  phase-capture   Auto-capture edits and failures after a phase
+  quality-check   Check lesson(s) for duplicates, wiki conflicts, expiry
+  prune-expired   Deprecate all expired active lessons
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+# Locate runtime/lib — check installed location first, then development tree
+_SCRIPT_DIR = Path(__file__).resolve().parent
+for _lib_dir in [
+    Path.home() / ".local" / "lib" / "brain",
+    _SCRIPT_DIR.parent / "lib",
+    _SCRIPT_DIR,
+]:
+    if (_lib_dir / "brain_learning.py").exists():
+        break
+
+from brain_learning import (
+    amend_incident,
+    check_wiki_conflict,
+    ensure_dirs,
+    find_duplicate_active,
+    incidents_dir,
+    is_expired,
+    lessons_dir,
+    list_incidents,
+    list_lessons,
+    new_incident_id,
+    new_lesson_id,
+    prune_expired_lessons,
+    read_incident,
+    read_lesson,
+    transition_lesson,
+    write_incident,
+    write_lesson,
+)
+
+
+def _brain_path() -> Path:
+    p = Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+    if not p.is_dir():
+        print(f"brain-learn: BRAIN_PATH does not exist: {p}", file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+def cmd_list(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    ensure_dirs(brain)
+
+    if args.kind == "incidents":
+        items = list_incidents(brain)
+        if not items:
+            print("No incidents found.")
+            return
+        print(f"{'ID':<30} {'SOURCE':<20} {'SEVERITY':<10} {'TASK'}")
+        print("-" * 80)
+        for inc in items:
+            print(
+                f"{inc.get('id',''):<30} "
+                f"{inc.get('source',''):<20} "
+                f"{inc.get('severity',''):<10} "
+                f"{inc.get('task_id','')}"
+            )
+        print(f"\n{len(items)} incident(s).")
+    else:
+        status_filter = args.status or ""
+        items = list_lessons(brain, status_filter)
+        if not items:
+            label = f"[{status_filter}]" if status_filter else ""
+            print(f"No lessons found {label}.")
+            return
+        print(f"{'ID':<30} {'STATUS':<12} {'SEV':<8} {'ROLES':<20} RULE")
+        print("-" * 100)
+        for les in items:
+            rule_preview = les.get("rule", "")[:50]
+            sev = les.get("severity", "")
+            high_flag = " [HIGH - arbiter required]" if (
+                sev == "high" and les.get("status") == "pending"
+            ) else ""
+            print(
+                f"{les.get('id',''):<30} "
+                f"{les.get('status',''):<12} "
+                f"{sev:<8} "
+                f"{str(les.get('roles','')):<20} "
+                f"{rule_preview}{high_flag}"
+            )
+        print(f"\n{len(items)} lesson(s).")
+
+
+# ── show ──────────────────────────────────────────────────────────────────────
+
+def cmd_show(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    item_id = args.id
+
+    if item_id.startswith("inc-"):
+        result = read_incident(brain, item_id)
+        if result is None:
+            print(f"Incident not found: {item_id}", file=sys.stderr)
+            sys.exit(1)
+        fm, body = result
+        print(f"=== INCIDENT: {item_id} ===")
+        for k, v in fm.items():
+            print(f"  {k}: {v}")
+        if body.strip():
+            print("\n" + body)
+    elif item_id.startswith("les-"):
+        result = read_lesson(brain, item_id)
+        if result is None:
+            print(f"Lesson not found: {item_id}", file=sys.stderr)
+            sys.exit(1)
+        fm, body = result
+        print(f"=== LESSON: {item_id} ===")
+        for k, v in fm.items():
+            print(f"  {k}: {v}")
+        if body.strip():
+            print("\n" + body)
+    else:
+        print(f"Unknown ID format: {item_id} (must start with inc- or les-)", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── capture ───────────────────────────────────────────────────────────────────
+
+def cmd_capture(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    ensure_dirs(brain)
+
+    from datetime import date
+
+    source = args.source
+    task_id = args.task_id or ""
+    role = args.role or ""
+    model = args.model or ""
+    agent_id = args.agent_id or ""
+    severity = args.severity or "low"
+    tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+    evidence = args.evidence or ""
+    root_cause = args.root_cause or ""
+    fix_text = args.fix or ""
+    rule = args.rule or ""
+
+    today = date.today().isoformat()
+
+    inc_fm = {
+        "id": new_incident_id(),
+        "source": source,
+        "task_id": task_id,
+        "role": role,
+        "model": model,
+        "agent_id": agent_id,
+        "severity": severity,
+        "created": today,
+        "tags": tags,
+    }
+    inc_path = write_incident(brain, inc_fm, evidence=evidence,
+                               root_cause=root_cause, fix=fix_text)
+    inc_id = inc_fm["id"]
+    print(f"Created incident: {inc_id}")
+    print(f"  Path: {inc_path}")
+
+    lesson_rule = rule or f"[AUTO] Review incident {inc_id} — add rule here."
+    roles_list = [role] if role else ["developer"]
+    les_fm = {
+        "id": new_lesson_id(),
+        "incident_id": inc_id,
+        "status": "pending",
+        "severity": severity,
+        "roles": roles_list,
+        "tags": tags,
+        "created": today,
+        "updated": today,
+        "approved_by": "",
+        "rule": lesson_rule,
+    }
+    les_body = f"## Rule\n{lesson_rule}\n\n## Context\nSee incident {inc_id} for full evidence."
+    les_path = write_lesson(brain, les_fm, les_body)
+    les_id = les_fm["id"]
+    print(f"Created pending lesson: {les_id}")
+    print(f"  Path: {les_path}")
+    if severity == "high":
+        print(f"  [HIGH - arbiter required before activation]")
+
+
+# ── lifecycle commands ────────────────────────────────────────────────────────
+
+def _lifecycle_cmd(args: argparse.Namespace, new_status: str) -> None:
+    brain = _brain_path()
+    agent = getattr(args, "as_agent", "") or ""
+    ok, msg = transition_lesson(brain, args.id, new_status, approved_by=agent)
+    if ok:
+        print(msg)
+    else:
+        print(f"ERROR: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_approve(args: argparse.Namespace) -> None:
+    _lifecycle_cmd(args, "approved")
+
+
+def cmd_reject(args: argparse.Namespace) -> None:
+    _lifecycle_cmd(args, "rejected")
+
+
+def cmd_activate(args: argparse.Namespace) -> None:
+    _lifecycle_cmd(args, "active")
+
+
+def cmd_deprecate(args: argparse.Namespace) -> None:
+    _lifecycle_cmd(args, "deprecated")
+
+
+# ── amend ────────────────────────────────────────────────────────────────────
+
+def cmd_amend(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    ok, msg = amend_incident(brain, args.id,
+                              root_cause=args.root_cause or "",
+                              fix=args.fix or "")
+    if ok:
+        print(msg)
+    else:
+        print(f"ERROR: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── phase-capture ─────────────────────────────────────────────────────────────
+
+_FIX_KEYWORDS = re.compile(
+    r"\b(fix|fixed|fixes|smoke|lint|validate|runtime|proxy|failure|error|bug|patch|workaround)\b",
+    re.IGNORECASE,
+)
+_SOURCE_MAP = {
+    "smoke": "smoke-failure",
+    "lint": "lint-failure",
+    "validate": "validate-failure",
+    "runtime": "runtime-error",
+    "proxy": "runtime-error",
+    "fix": "runtime-error",
+    "error": "runtime-error",
+    "failure": "runtime-error",
+}
+
+
+def _git_log_since(baseline_tag: str, repo_dir: str) -> list[str]:
+    import subprocess
+    since = f"{baseline_tag}..HEAD" if baseline_tag else "--max-count=30"
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_dir, "log", since, "--oneline"],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip().splitlines() if r.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def _git_changed_files(baseline_tag: str, repo_dir: str) -> list[str]:
+    import subprocess
+    since = f"{baseline_tag}..HEAD" if baseline_tag else "HEAD~10..HEAD"
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_dir, "diff", "--name-only", since],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip().splitlines() if r.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def cmd_quality_check(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    lesson_id = getattr(args, "lesson_id", "")
+    if lesson_id:
+        targets = [lesson_id]
+    else:
+        targets = [les["id"] for les in list_lessons(brain, "pending")]
+
+    if not targets:
+        print("No lessons to check.")
+        return
+
+    any_issue = False
+    for lid in targets:
+        result = read_lesson(brain, lid)
+        if result is None:
+            print(f"[WARN] {lid}: not found")
+            continue
+        fm, _ = result
+        rule = fm.get("rule", "")
+        issues: list[str] = []
+
+        dup = find_duplicate_active(brain, rule, exclude_id=lid)
+        if dup:
+            issues.append(f"duplicate of active lesson {dup.get('id')}")
+
+        conflicts = check_wiki_conflict(brain, rule)
+        if conflicts:
+            issues.append(f"conflicts with human-curated pages: {', '.join(conflicts)}")
+
+        if is_expired(fm):
+            issues.append(f"expired ({fm.get('expires')})")
+
+        if issues:
+            any_issue = True
+            for iss in issues:
+                print(f"  [ISSUE] {lid}: {iss}")
+        else:
+            print(f"  [OK]   {lid}: no quality issues")
+
+    if any_issue:
+        sys.exit(1)
+
+
+def cmd_prune_expired(args: argparse.Namespace) -> None:
+    brain = _brain_path()
+    pruned = prune_expired_lessons(brain)
+    if pruned:
+        for lid in pruned:
+            print(f"deprecated (expired): {lid}")
+        print(f"Pruned {len(pruned)} expired lesson(s).")
+    else:
+        print("No expired active lessons found.")
+
+
+def cmd_phase_capture(args: argparse.Namespace) -> None:
+    import subprocess
+    from datetime import date
+    brain = _brain_path()
+    ensure_dirs(brain)
+
+    phase = args.phase
+    baseline_tag = args.baseline_tag or ""
+    agent_id = getattr(args, "as_agent", "") or ""
+    today = date.today().isoformat()
+
+    # Detect repo root from cwd or common locations
+    repo_dir = os.environ.get("BRAIN_REPO_DIR", os.getcwd())
+
+    commits = _git_log_since(baseline_tag, repo_dir)
+    changed_files = _git_changed_files(baseline_tag, repo_dir)
+
+    created_incidents = []
+    created_lessons = []
+
+    # 1. Fixing commits → smoke/lint/validate/runtime incidents
+    for line in commits:
+        if not _FIX_KEYWORDS.search(line):
+            continue
+        # Determine source from keywords found
+        source = "runtime-error"
+        for kw, src in _SOURCE_MAP.items():
+            if kw in line.lower():
+                source = src
+                break
+
+        inc_fm = {
+            "id": new_incident_id(),
+            "source": source,
+            "task_id": phase,
+            "role": "",
+            "model": "",
+            "agent_id": agent_id,
+            "severity": "low",
+            "created": today,
+            "tags": [phase, "phase-capture"],
+        }
+        inc_path = write_incident(brain, inc_fm, evidence=f"Fixing commit: {line}")
+        inc_id = inc_fm["id"]
+        created_incidents.append(inc_id)
+
+        les_fm = {
+            "id": new_lesson_id(),
+            "incident_id": inc_id,
+            "status": "pending",
+            "severity": "low",
+            "roles": ["developer"],
+            "tags": [phase, "phase-capture", source.replace("-", "")],
+            "created": today,
+            "updated": today,
+            "approved_by": "",
+            "rule": f"[AUTO from {phase}] Review fixing commit: {line[:80]}",
+        }
+        les_body = (
+            f"## Rule\n{les_fm['rule']}\n\n"
+            f"## Context\nAuto-detected from phase-capture of {phase}.\n"
+            f"Incident: {inc_id}\n"
+        )
+        write_lesson(brain, les_fm, les_body)
+        created_lessons.append(les_fm["id"])
+
+    # 2. Changed brain memory files → human-edit incidents
+    brain_prefix = str(brain).rstrip("/") + "/"
+    for f in changed_files:
+        full = os.path.join(repo_dir, f)
+        if not (full.startswith(brain_prefix) or "/wiki/" in f or "/roles/" in f):
+            continue
+        inc_fm = {
+            "id": new_incident_id(),
+            "source": "human-edit",
+            "task_id": phase,
+            "role": "",
+            "model": "",
+            "agent_id": agent_id,
+            "severity": "low",
+            "created": today,
+            "tags": [phase, "phase-capture", "human-edit"],
+        }
+        inc_path = write_incident(brain, inc_fm, evidence=f"Changed file: {f}")
+        inc_id = inc_fm["id"]
+        created_incidents.append(inc_id)
+
+        les_fm = {
+            "id": new_lesson_id(),
+            "incident_id": inc_id,
+            "status": "pending",
+            "severity": "low",
+            "roles": ["developer"],
+            "tags": [phase, "phase-capture", "human-edit"],
+            "created": today,
+            "updated": today,
+            "approved_by": "",
+            "rule": f"[AUTO from {phase}] Human edited: {f} — review for lesson.",
+        }
+        les_body = (
+            f"## Rule\n{les_fm['rule']}\n\n"
+            f"## Context\nAuto-detected human edit during phase-capture of {phase}.\n"
+            f"Incident: {inc_id}\n"
+        )
+        write_lesson(brain, les_fm, les_body)
+        created_lessons.append(les_fm["id"])
+
+    print(f"phase-capture({phase}): {len(created_incidents)} incident(s), "
+          f"{len(created_lessons)} pending lesson(s) created.")
+    print("NOTE: No lessons were activated. Review with: brain-learn list --pending")
+    for les_id in created_lessons:
+        print(f"  Pending: {les_id}")
+
+
+# ── arg parser ────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="brain-learn",
+        description="Learning Loop CLI — capture, review, and inject lessons.",
+    )
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
+
+    # list
+    lp = sub.add_parser("list", help="List incidents or lessons")
+    lp.add_argument("kind", nargs="?", default="lessons",
+                    choices=["lessons", "incidents"], help="What to list")
+    lp.add_argument("--status", choices=["pending", "active", "deprecated", "rejected"],
+                    help="Filter by status (lessons only)")
+    lp.add_argument("--pending", action="store_const", const="pending", dest="status",
+                    help="Shorthand for --status pending")
+
+    # show
+    sp = sub.add_parser("show", help="Show full detail for an incident or lesson")
+    sp.add_argument("id", help="ID starting with inc- or les-")
+
+    # capture
+    cp = sub.add_parser("capture", help="Capture incident and pending lesson")
+    cp.add_argument("task_id", nargs="?", default="", help="Task ID this relates to")
+    cp.add_argument("--source", required=True,
+                    choices=["human-edit", "human-review", "test-failure",
+                             "smoke-failure", "lint-failure", "validate-failure",
+                             "runtime-error", "ci-failure", "static-analysis"],
+                    help="Incident source")
+    cp.add_argument("--role", default="", help="Agent role involved")
+    cp.add_argument("--model", default="", help="Model used")
+    cp.add_argument("--agent-id", dest="agent_id", default="", help="Agent ID")
+    cp.add_argument("--severity", default="low",
+                    choices=["low", "medium", "high"], help="Severity level")
+    cp.add_argument("--tags", default="", help="Comma-separated tags")
+    cp.add_argument("--evidence", default="", help="Evidence text")
+    cp.add_argument("--root-cause", dest="root_cause", default="", help="Root cause")
+    cp.add_argument("--fix", default="", help="Fix description")
+    cp.add_argument("--rule", default="", help="Lesson rule text")
+
+    # approve
+    app = sub.add_parser("approve", help="Approve a pending lesson")
+    app.add_argument("id", help="Lesson ID")
+    app.add_argument("--as", dest="as_agent", default="",
+                     help="Agent ID (arbiter required for high severity)")
+
+    # reject
+    rjp = sub.add_parser("reject", help="Reject a pending lesson")
+    rjp.add_argument("id", help="Lesson ID")
+    rjp.add_argument("--as", dest="as_agent", default="")
+
+    # activate
+    acp = sub.add_parser("activate", help="Activate an approved lesson")
+    acp.add_argument("id", help="Lesson ID")
+    acp.add_argument("--as", dest="as_agent", default="")
+
+    # deprecate
+    dep = sub.add_parser("deprecate", help="Deprecate an active lesson")
+    dep.add_argument("id", help="Lesson ID")
+    dep.add_argument("--as", dest="as_agent", default="")
+
+    # amend
+    amp = sub.add_parser("amend", help="Amend root-cause/fix of an existing incident")
+    amp.add_argument("id", help="Incident ID (inc-...)")
+    amp.add_argument("--root-cause", dest="root_cause", default="", help="Root cause text")
+    amp.add_argument("--fix", default="", help="Fix description")
+
+    # phase-capture
+    pcp = sub.add_parser("phase-capture", help="Auto-capture edits/failures after a phase")
+    pcp.add_argument("--phase", required=True, help="Phase ID (e.g. phase4)")
+    pcp.add_argument("--baseline-tag", dest="baseline_tag", default="",
+                     help="Git tag to diff against")
+    pcp.add_argument("--as", dest="as_agent", default="")
+
+    qcp = sub.add_parser("quality-check",
+                         help="Check a lesson (or all pending) for duplicates and wiki conflicts")
+    qcp.add_argument("--id", dest="lesson_id", default="",
+                     help="Lesson ID to check; omit to check all pending lessons")
+
+    sub.add_parser("prune-expired",
+                   help="Deprecate all expired active lessons (lessons with past 'expires' date)")
+
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.cmd is None:
+        parser.print_help()
+        sys.exit(0)
+
+    dispatch = {
+        "list": cmd_list,
+        "show": cmd_show,
+        "capture": cmd_capture,
+        "amend": cmd_amend,
+        "approve": cmd_approve,
+        "reject": cmd_reject,
+        "activate": cmd_activate,
+        "deprecate": cmd_deprecate,
+        "phase-capture": cmd_phase_capture,
+        "quality-check": cmd_quality_check,
+        "prune-expired": cmd_prune_expired,
+    }
+    fn = dispatch.get(args.cmd)
+    if fn is None:
+        print(f"Unknown command: {args.cmd}", file=sys.stderr)
+        sys.exit(1)
+    fn(args)
+
+
+if __name__ == "__main__":
+    main()

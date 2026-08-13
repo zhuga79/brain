@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Discover and summarize folder-native Brain workspaces."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+try:
+    from brain_workspace import (
+        append_local_log,
+        discover_workspaces,
+        find_nearest_workspace,
+        is_role_allowed,
+        next_local_task,
+        parse_local_tasks,
+        parse_workspace_policy,
+        update_local_task_state,
+        utc_timestamp,
+    )
+except ImportError as e:
+    print(f"Error importing brain workspace libraries: {e}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _info_to_dict(info):
+    return {
+        "path": str(info.path),
+        "brain_file": str(info.brain_file),
+        "title": info.title,
+        "has_tasks": info.has_tasks,
+        "has_log": info.has_log,
+        "open_tasks": info.open_tasks,
+        "latest_log": None
+        if info.latest_log is None
+        else {
+            "timestamp": info.latest_log.timestamp,
+            "agent": info.latest_log.agent,
+            "summary": info.latest_log.summary,
+        },
+        "warnings": list(info.warnings),
+    }
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    infos = discover_workspaces([Path(root) for root in args.root])
+    if args.json:
+        print(json.dumps([_info_to_dict(info) for info in infos], ensure_ascii=False, indent=2))
+        return 0
+    for info in infos:
+        print(str(info.path))
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    infos = discover_workspaces([Path(root) for root in args.root])
+    if not infos:
+        print("No workspaces found.")
+        return 0
+    print("WORKSPACE\tTASKS\tLOG\tPATH")
+    for info in infos:
+        log = info.latest_log.summary if info.latest_log else "-"
+        print(f"{info.title}\topen={info.open_tasks}\t{log}\t{info.path}")
+    return 0
+
+
+def cmd_nearest(args: argparse.Namespace) -> int:
+    found = find_nearest_workspace(Path(args.path))
+    if found is None:
+        print(f"No BRAIN.md workspace found for: {args.path}", file=sys.stderr)
+        return 1
+    print(found)
+    return 0
+
+
+def _workspace_path(raw: str) -> Path:
+    workspace = find_nearest_workspace(Path(raw))
+    if workspace is None:
+        raise SystemExit(f"No BRAIN.md workspace found for: {raw}")
+    return workspace
+
+
+def _task_to_dict(task):
+    return {
+        "state": task.state,
+        "priority": task.priority,
+        "task_id": task.task_id,
+        "title": task.title,
+        "role": task.role,
+        "acceptance": task.acceptance,
+    }
+
+
+def _print_task(task) -> None:
+    role = f" role={task.role}" if task.role else ""
+    print(f"{task.task_id}\t{task.priority}\t{task.state}{role}\t{task.title}")
+
+
+def cmd_tasks(args: argparse.Namespace) -> int:
+    workspace = _workspace_path(args.workspace)
+    tasks = parse_local_tasks(workspace / "TASKS.md")
+    if args.state != "all":
+        tasks = [task for task in tasks if task.state == args.state]
+    if args.role:
+        tasks = [task for task in tasks if not task.role or task.role == args.role]
+    if args.json:
+        print(json.dumps([_task_to_dict(task) for task in tasks], ensure_ascii=False, indent=2))
+        return 0
+    for task in tasks:
+        _print_task(task)
+    return 0
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    workspace = _workspace_path(args.workspace)
+    task = next_local_task(workspace / "TASKS.md", role=args.role, brain_path=workspace / "BRAIN.md")
+    if task is None:
+        if args.json:
+            print("null")
+        else:
+            print("No open local task found.")
+        return 1
+    if args.json:
+        print(json.dumps(_task_to_dict(task), ensure_ascii=False, indent=2))
+    else:
+        _print_task(task)
+    return 0
+
+
+def cmd_take(args: argparse.Namespace) -> int:
+    workspace = _workspace_path(args.workspace)
+    existing = {task.task_id: task for task in parse_local_tasks(workspace / "TASKS.md")}
+    task_before = existing.get(args.task_id)
+    if task_before is None:
+        print(f"Local task not found: {args.task_id}", file=sys.stderr)
+        return 1
+    policy = parse_workspace_policy(workspace / "BRAIN.md")
+    if task_before.role and not is_role_allowed(policy, task_before.role):
+        print(f"Role '{task_before.role}' is not allowed in workspace: {workspace}", file=sys.stderr)
+        return 1
+    task = update_local_task_state(workspace / "TASKS.md", args.task_id, "in-progress", from_states=("open",))
+    append_local_log(
+        workspace / "LOG.md",
+        timestamp=utc_timestamp(),
+        agent=args.agent,
+        summary=f"took {args.task_id}",
+        detail=f"Moved {args.task_id} to in-progress.",
+    )
+    print(f"Took local task {task.task_id} in {workspace}")
+    return 0
+
+
+def cmd_complete(args: argparse.Namespace) -> int:
+    workspace = _workspace_path(args.workspace)
+    task = update_local_task_state(
+        workspace / "TASKS.md",
+        args.task_id,
+        "done",
+        from_states=("open", "in-progress"),
+    )
+    summary = args.summary or f"completed {args.task_id}"
+    append_local_log(
+        workspace / "LOG.md",
+        timestamp=utc_timestamp(),
+        agent=args.agent,
+        summary=summary,
+        detail=f"Moved {args.task_id} to done.",
+    )
+    print(f"Completed local task {task.task_id} in {workspace}")
+    return 0
+
+
+def cmd_init_template(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    # Шаблоны лежат рядом с деревом, а при установке — в ~/.local/share.
+    # Каталог вычисляется здесь: прежняя переменная script_dir осталась от
+    # bootstrap sys.path, который убран вместе с переходом на пакет.
+    template_dir = Path(__file__).resolve().parent.parent / "templates" / "workspace"
+    if not template_dir.exists():
+        template_dir = Path(os.path.expanduser("~")) / ".local" / "share" / "brain" / "templates" / "workspace"
+    if not template_dir.exists():
+        print(f"Workspace templates not found: {template_dir}", file=sys.stderr)
+        return 1
+    for name in ("BRAIN.md", "TASKS.md", "LOG.md"):
+        target = out / name
+        if target.exists():
+            print(f"Refusing to overwrite existing file: {target}", file=sys.stderr)
+            return 1
+        shutil.copyfile(template_dir / name, target)
+    print(f"Initialized workspace templates in {out}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Brain folder-native workspace tools")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_discover = sub.add_parser("discover", help="Find workspaces by BRAIN.md marker")
+    p_discover.add_argument("--root", action="append", required=True, help="Root directory to scan")
+    p_discover.add_argument("--json", action="store_true", help="Print JSON output")
+    p_discover.set_defaults(func=cmd_discover)
+
+    p_summary = sub.add_parser("summary", help="Print workspace summary")
+    p_summary.add_argument("--root", action="append", required=True, help="Root directory to scan")
+    p_summary.set_defaults(func=cmd_summary)
+
+    p_nearest = sub.add_parser("nearest", help="Find nearest parent workspace for path")
+    p_nearest.add_argument("path")
+    p_nearest.set_defaults(func=cmd_nearest)
+
+    p_tasks = sub.add_parser("tasks", help="List local workspace tasks")
+    p_tasks.add_argument("--workspace", required=True, help="Workspace folder or child path")
+    p_tasks.add_argument("--role", default="", help="Optional role filter")
+    p_tasks.add_argument(
+        "--state",
+        default="open",
+        choices=["open", "in-progress", "done", "blocked", "all"],
+        help="Task state filter",
+    )
+    p_tasks.add_argument("--json", action="store_true", help="Print JSON output")
+    p_tasks.set_defaults(func=cmd_tasks)
+
+    p_next = sub.add_parser("next", help="Print the next open local task")
+    p_next.add_argument("--workspace", required=True, help="Workspace folder or child path")
+    p_next.add_argument("--role", default="", help="Optional role filter")
+    p_next.add_argument("--json", action="store_true", help="Print JSON output")
+    p_next.set_defaults(func=cmd_next)
+
+    p_take = sub.add_parser("take", help="Mark a local task in progress")
+    p_take.add_argument("--workspace", required=True, help="Workspace folder or child path")
+    p_take.add_argument("task_id")
+    p_take.add_argument("--as", dest="agent", required=True, help="Agent id")
+    p_take.set_defaults(func=cmd_take)
+
+    p_complete = sub.add_parser("complete", help="Mark a local task done")
+    p_complete.add_argument("--workspace", required=True, help="Workspace folder or child path")
+    p_complete.add_argument("task_id")
+    p_complete.add_argument("--as", dest="agent", required=True, help="Agent id")
+    p_complete.add_argument("--summary", default="", help="Log summary")
+    p_complete.set_defaults(func=cmd_complete)
+
+    p_init = sub.add_parser("init-template", help="Copy workspace templates into a folder")
+    p_init.add_argument("--out", required=True, help="Target folder")
+    p_init.set_defaults(func=cmd_init_template)
+
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

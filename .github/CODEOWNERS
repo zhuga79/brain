@@ -1,0 +1,18 @@
+# Владелец по умолчанию.
+*                       @Blqd
+
+# Контракты системы: меняются только вместе с обоснованием.
+/MEMORY.md              @Blqd
+/tasks/SCHEMA.md        @Blqd
+/spec/                  @Blqd
+/roles/                 @Blqd
+/doctrine/              @Blqd
+
+# Публикация: ошибка здесь выносит приватные данные наружу.
+/runtime/bin/brain-publish   @Blqd
+
+# Условия участия и безопасность.
+/CONTRIBUTING.md        @Blqd
+/SECURITY.md            @Blqd
+/LICENSE                @Blqd
+/.github/               @Blqd

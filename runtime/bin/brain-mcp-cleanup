@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Global MCP Cleanup Script for Phase 20.
+Removes all non-brain MCPs from global `settings.json` for Claude Code and Gemini CLI.
+"""
+
+import json
+import os
+from pathlib import Path
+
+def cleanup_mcp_config(filepath: Path):
+    if not filepath.exists():
+        return
+        
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        print(f"Failed to parse {filepath}")
+        return
+
+    modified = False
+    
+    # 1. Cleanup plugins in enabledPlugins (Claude Code specific)
+    if "enabledPlugins" in data:
+        keys_to_delete = []
+        for plugin, enabled in data["enabledPlugins"].items():
+            if enabled and plugin.endswith("@claude-plugins-official") and "serena" not in plugin and "brain" not in plugin:
+                keys_to_delete.append(plugin)
+        
+        for k in keys_to_delete:
+            del data["enabledPlugins"][k]
+            modified = True
+            print(f"Removed plugin {k} from {filepath}")
+
+    # 2. Cleanup direct mcpServers declarations
+    if "mcpServers" in data:
+        keys_to_delete = []
+        for server, config in data["mcpServers"].items():
+            if server != "brain":
+                keys_to_delete.append(server)
+        
+        for k in keys_to_delete:
+            del data["mcpServers"][k]
+            modified = True
+            print(f"Removed mcpServer {k} from {filepath}")
+
+    if modified:
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"Successfully cleaned up {filepath}")
+    else:
+        print(f"No global MCP tools to clean up in {filepath}")
+
+def main():
+    configs_to_check = [
+        Path(os.path.expanduser("~/.claude/settings.json")),
+        Path(os.path.expanduser("~/.gemini/settings.json")),
+        Path(os.path.expanduser("~/.codex/settings.json")),
+        Path(os.path.expanduser("~/.config/opencode/opencode.json")),
+        Path(os.path.expanduser("~/.opencode.json")),
+        Path(os.path.expanduser("~/.config/kilo/kilo.jsonc"))
+    ]
+    
+    for cfg in configs_to_check:
+        cleanup_mcp_config(cfg)
+
+if __name__ == "__main__":
+    main()

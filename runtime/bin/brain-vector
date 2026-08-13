@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""brain-vector — optional vector search layer on top of BM25.
+
+Requires: chromadb, sentence-transformers
+If unavailable: exits 1 with install instructions and fallback hint.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import subprocess
+import site
+import sys
+from pathlib import Path
+
+_DEPS_MSG = """\
+brain-vector: dependency missing — install chromadb and sentence-transformers:
+  pip install chromadb sentence-transformers
+  or run: brain-vector setup --yes
+Fallback: use brain-search (BM25) instead."""
+
+_COLLECTION = "brain_wiki"
+_MODEL = "all-MiniLM-L6-v2"
+_DEPS = ["chromadb", "sentence-transformers"]
+_TORCH_CPU = "torch==2.12.0+cpu"
+_PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+_SUPPORT_MATRIX = {
+    "primary": {
+        "backend": "chromadb",
+        "embedding_model": _MODEL,
+        "dependencies": _DEPS,
+        "commands": [
+            "brain-vector setup [--yes]",
+            "brain-vector index",
+            "brain-vector index rebuild",
+            "brain-vector search <query> [-k 5] [--json]",
+            "brain-vector status",
+        ],
+        "status": "optional",
+    },
+    "fallback": {
+        "backend": "BM25",
+        "dependencies": [],
+        "commands": ["brain-index rebuild", "brain-search <query>"],
+        "status": "required",
+    },
+    "decision": "ChromaDB is optional; BM25 remains the dependency-light required retrieval backend.",
+}
+
+
+def _brain_path() -> Path:
+    p = Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+    if not p.is_dir():
+        print(f"brain-vector: BRAIN_PATH does not exist: {p}", file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+def _vector_dir(brain: Path) -> Path:
+    return brain / ".brain" / "vector"
+
+
+def _vendor_dir(brain: Path) -> Path:
+    return _vector_dir(brain) / "vendor"
+
+
+def _add_vendor_to_syspath() -> None:
+    brain = Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+    vendor = _vendor_dir(brain)
+    if vendor.exists():
+        vendor_s = str(vendor)
+        if vendor_s not in sys.path:
+            site.addsitedir(vendor_s)
+
+
+def _check_deps() -> tuple:
+    _add_vendor_to_syspath()
+    try:
+        import chromadb  # noqa: F401
+        import sentence_transformers  # noqa: F401
+        return chromadb, sentence_transformers
+    except ImportError:
+        print(_DEPS_MSG, file=sys.stderr)
+        sys.exit(1)
+
+
+def _deps_available() -> bool:
+    _add_vendor_to_syspath()
+    try:
+        import chromadb  # noqa: F401
+        import sentence_transformers  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _get_client(vec_dir: Path):
+    _check_deps()
+    import chromadb
+    vec_dir.mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=str(vec_dir))
+
+
+def _get_collection(client, create: bool = False):
+    try:
+        if create:
+            return client.get_or_create_collection(name=_COLLECTION)
+        return client.get_collection(name=_COLLECTION)
+    except Exception as e:
+        print(f"brain-vector: collection error — {e}", file=sys.stderr)
+        print("  Run: brain-vector index rebuild", file=sys.stderr)
+        sys.exit(1)
+
+
+def _load_search_docs(brain: Path) -> list[dict]:
+    search_file = brain / ".brain" / "index" / "search.jsonl"
+    if not search_file.exists():
+        print("brain-vector: BM25 index not built — run: brain-index rebuild", file=sys.stderr)
+        sys.exit(1)
+    docs = []
+    for line in search_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                docs.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return docs
+
+
+def cmd_setup(brain: Path, yes: bool) -> None:
+    """Opt-in dependency install and vector collection bootstrap."""
+    vec_dir = _vector_dir(brain)
+    print("brain-vector setup")
+    print(f"  dependencies : {' '.join(_DEPS)}")
+    print(f"  model        : {_MODEL}")
+    print(f"  vector path  : {vec_dir}")
+    print(f"  vendor path  : {_vendor_dir(brain)}")
+
+    if not yes:
+        print()
+        print("This command is opt-in and did not install anything.")
+        print("Run with --yes to install optional dependencies and initialize the collection:")
+        print("  brain-vector setup --yes")
+        return
+
+    vendor = _vendor_dir(brain)
+    vendor.mkdir(parents=True, exist_ok=True)
+
+    install_cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--target",
+        str(vendor),
+        "--extra-index-url",
+        _PYTORCH_CPU_INDEX,
+        _TORCH_CPU,
+        *_DEPS,
+    ]
+    print(f"Installing optional dependencies: {' '.join(install_cmd)}")
+    result = subprocess.run(install_cmd, text=True)
+    if result.returncode != 0:
+        print(f"brain-vector setup: pip install failed with code {result.returncode}", file=sys.stderr)
+        sys.exit(result.returncode)
+
+    if not _deps_available():
+        print("brain-vector setup: dependencies installed but imports still fail in this Python", file=sys.stderr)
+        print(f"  Python: {sys.executable}", file=sys.stderr)
+        print(f"  Vendor: {vendor}", file=sys.stderr)
+        sys.exit(1)
+
+    from sentence_transformers import SentenceTransformer
+
+    client = _get_client(vec_dir)
+    client.get_or_create_collection(name=_COLLECTION)
+    # Constructing the model triggers the local cache/download step.
+    SentenceTransformer(_MODEL)
+
+    print("OK: vector dependencies installed and collection initialized")
+    print(f"    collection: {_COLLECTION}")
+    print(f"    model     : {_MODEL}")
+    print(f"    path      : {vec_dir}")
+    print(f"    vendor    : {vendor}")
+
+
+def cmd_index_rebuild(brain: Path) -> None:
+    _check_deps()
+    from sentence_transformers import SentenceTransformer
+
+    docs = _load_search_docs(brain)
+    if not docs:
+        print("brain-vector: no documents in BM25 index — run brain-index rebuild first")
+        sys.exit(1)
+
+    vec_dir = _vector_dir(brain)
+    client = _get_client(vec_dir)
+
+    try:
+        client.delete_collection(_COLLECTION)
+    except Exception:
+        pass
+    collection = client.get_or_create_collection(name=_COLLECTION)
+
+    model = SentenceTransformer(_MODEL)
+
+    ids, texts, metadatas = [], [], []
+    for doc in docs:
+        doc_id = doc.get("id") or doc.get("slug") or doc.get("path", "")
+        text = doc.get("text") or doc.get("content", "")
+        if not doc_id or not text:
+            continue
+        ids.append(str(doc_id))
+        texts.append(text[:2000])
+        metadatas.append({
+            "kind": doc.get("kind", ""),
+            "page_type": doc.get("page_type", ""),
+            "path": doc.get("path", ""),
+            "slug": doc.get("slug") or doc.get("id", ""),
+            "title": doc.get("title", ""),
+        })
+
+    if not ids:
+        print("brain-vector: no indexable documents found")
+        sys.exit(1)
+
+    embeddings = model.encode(texts, show_progress_bar=False).tolist()
+    collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+    print(f"OK: vector index built — {len(ids)} documents ({_MODEL})")
+    print(f"    stored in: {vec_dir}")
+
+
+def _score_from_distance(distance) -> float | None:
+    if distance is None:
+        return None
+    try:
+        return round(1.0 - float(distance), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_model(json_mode: bool = False):
+    from sentence_transformers import SentenceTransformer
+
+    if json_mode:
+        with contextlib.redirect_stdout(sys.stderr):
+            return SentenceTransformer(_MODEL)
+    return SentenceTransformer(_MODEL)
+
+
+def cmd_search(brain: Path, query: str, top_k: int, json_mode: bool = False) -> None:
+    _check_deps()
+
+    vec_dir = _vector_dir(brain)
+    client = _get_client(vec_dir)
+    collection = _get_collection(client, create=False)
+
+    model = _load_model(json_mode=json_mode)
+    embedding = model.encode([query], show_progress_bar=False).tolist()
+
+    count = collection.count()
+    if count == 0:
+        print("brain-vector: index is empty — run: brain-vector index", file=sys.stderr)
+        sys.exit(1)
+
+    results = collection.query(query_embeddings=embedding, n_results=min(top_k, count))
+
+    ids = results.get("ids", [[]])[0]
+    docs = results.get("documents", [[]])[0]
+    metas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+
+    if not docs:
+        if json_mode:
+            print(json.dumps({"ok": True, "query": query, "count": 0, "results": []}, ensure_ascii=False, indent=2))
+            return
+        print("No results.")
+        return
+
+    rows = []
+    for i, (doc_id, doc, meta, dist) in enumerate(zip(ids, docs, metas, distances), 1):
+        meta = meta or {}
+        snippet = doc[:240].replace("\n", " ")
+        rows.append({
+            "rank": i,
+            "id": doc_id,
+            "score": _score_from_distance(dist),
+            "distance": dist,
+            "title": meta.get("title") or meta.get("slug", "?"),
+            "slug": meta.get("slug", ""),
+            "kind": meta.get("kind", ""),
+            "page_type": meta.get("page_type", ""),
+            "path": meta.get("path", ""),
+            "snippet": snippet,
+        })
+
+    if json_mode:
+        print(json.dumps({"ok": True, "query": query, "count": len(rows), "results": rows}, ensure_ascii=False, indent=2))
+        return
+
+    for row in rows:
+        score = row["score"] if row["score"] is not None else "?"
+        title = row["title"]
+        snippet = row["snippet"][:120]
+        i = row["rank"]
+        print(f"{i}. [{score}] {title}")
+        print(f"   {snippet}")
+
+
+def cmd_status(brain: Path) -> None:
+    _check_deps()
+    import chromadb
+
+    vec_dir = _vector_dir(brain)
+    if not vec_dir.exists():
+        print("vector index: not built")
+        print("  Run: brain-vector index rebuild")
+        return
+
+    client = _get_client(vec_dir)
+    try:
+        collection = client.get_collection(name=_COLLECTION)
+        count = collection.count()
+        print(f"vector index: present")
+        print(f"  documents : {count}")
+        print(f"  model     : {_MODEL}")
+        print(f"  path      : {vec_dir}")
+    except Exception:
+        print("vector index: collection missing")
+        print("  Run: brain-vector index rebuild")
+
+
+def cmd_support(json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(_SUPPORT_MATRIX, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    print("brain-vector support matrix")
+    print(f"  decision : {_SUPPORT_MATRIX['decision']}")
+    print("  primary  : ChromaDB + sentence-transformers (optional)")
+    print(f"             model={_MODEL}")
+    print("             commands: brain-vector setup [--yes]; brain-vector index; brain-vector index rebuild; brain-vector search <query> [-k 5] [--json]; brain-vector status")
+    print("  fallback : BM25 (required)")
+    print("             commands: brain-index rebuild; brain-search <query>")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="brain-vector",
+        description="Optional vector search layer. Requires chromadb + sentence-transformers.",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    setup = sub.add_parser("setup")
+    setup.add_argument("--yes", action="store_true", help="Install optional dependencies and initialize the collection.")
+
+    idx = sub.add_parser("index")
+    idx_sub = idx.add_subparsers(dest="idx_cmd")
+    idx_sub.required = False
+    idx_sub.add_parser("rebuild")
+
+    srch = sub.add_parser("search")
+    srch.add_argument("query")
+    srch.add_argument("-k", "--top-k", type=int, default=5)
+    srch.add_argument("--json", action="store_true")
+
+    sub.add_parser("status")
+    sup = sub.add_parser("support")
+    sup.add_argument("--json", action="store_true")
+
+    args = parser.parse_args()
+
+    if not args.cmd:
+        parser.print_help()
+        sys.exit(0)
+
+    brain = _brain_path()
+
+    if args.cmd == "setup":
+        cmd_setup(brain, args.yes)
+    elif args.cmd == "index":
+        if args.idx_cmd in (None, "rebuild"):
+            cmd_index_rebuild(brain)
+        else:
+            idx.print_help()
+    elif args.cmd == "search":
+        cmd_search(brain, args.query, args.top_k, args.json)
+    elif args.cmd == "status":
+        cmd_status(brain)
+    elif args.cmd == "support":
+        cmd_support(args.json)
+
+
+if __name__ == "__main__":
+    main()

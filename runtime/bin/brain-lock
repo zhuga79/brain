@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# brain-lock {acquire|release|refresh|status|cleanup} <task-id> [--as <agent-id>] [--ttl <sec>] [--force] [--json]
+set -e
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+mkdir -p "$LOCKS"
+
+cmd="${1:-}"; shift || true
+id=""; agent=""; ttl=600; json_out=false; force=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --as)   agent="$2"; shift 2;;
+    --ttl)  ttl="$2"; shift 2;;
+    --json) json_out=true; shift;;
+    --force) force=true; shift;;
+    *)      id="$1"; shift;;
+  esac
+done
+
+now_epoch() { date +%s; }
+parse_owner() {
+  # формат файла owner: agent|epoch_ts|ttl
+  [ -f "$1" ] || return 1
+  cat "$1"
+}
+
+# JSON helper
+json_obj() {
+  if $json_out; then
+    echo "$1"
+  else
+    echo "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'{k}: {v}') for k,v in d.items()]"
+  fi
+}
+case "$cmd" in
+  acquire)
+    [ -z "$id" ] && { echo "task id required"; exit 2; }
+    [ -z "$agent" ] && { echo "--as <agent-id> required"; exit 2; }
+    dir="$LOCKS/$id"
+    if mkdir "$dir" 2>/dev/null; then
+      printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+      if $json_out; then
+        printf '{"ok":true,"task_id":"%s","owner":"%s","stale":false,"age_s":0,"ttl_s":%s}\n' "$id" "$agent" "$ttl"
+      else
+        echo "ok"
+      fi
+      exit 0
+    fi
+    # лок есть — проверим stale
+    owner=$(parse_owner "$dir/owner" || echo "")
+    if [ -n "$owner" ]; then
+      o_agent=$(echo "$owner" | cut -d'|' -f1)
+      o_ts=$(echo "$owner" | cut -d'|' -f2)
+      o_ttl=$(echo "$owner" | cut -d'|' -f3)
+      now=$(now_epoch)
+      age=$((now - o_ts))
+      if [ "$o_agent" = "$agent" ]; then
+        # Лок уже мой: это не конфликт, а продление. Раньше повторный acquire
+        # возвращал «locked by: <я сам>» и код 1, из-за чего ломалась
+        # последовательность из MEMORY.md — сначала brain-lock acquire, затем
+        # brain-task take, который зовёт acquire ещё раз.
+        printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+        if $json_out; then
+          printf '{"ok":true,"task_id":"%s","owner":"%s","stale":false,"age_s":0,"ttl_s":%s,"renewed":true}\n' \
+            "$id" "$agent" "$ttl"
+        else
+          echo "ok (already mine, TTL renewed)"
+        fi
+        exit 0
+      fi
+      if [ "$age" -gt "$o_ttl" ]; then
+        # Перехват протухшего лока. Раньше здесь было `rm -rf "$dir"; mkdir "$dir"`
+        # без проверки кода возврата: два агента, одновременно увидевшие один и тот
+        # же протухший лок, оба доходили до записи owner и оба получали ok —
+        # то есть лок переставал быть локом ровно тогда, когда он нужнее всего.
+        #
+        # Перехват сериализуется мьютексом. Под ним состояние перечитывается
+        # заново: проигравший увидит уже свежий лок победителя и получит отказ,
+        # как и должно быть.
+        exec 9>"$LOCKS/.reclaim.lock"
+        flock 9
+        recheck=$(parse_owner "$dir/owner" 2>/dev/null || echo "")
+        r_agent=$(echo "$recheck" | cut -d'|' -f1)
+        r_ts=$(echo "$recheck" | cut -d'|' -f2)
+        r_ttl=$(echo "$recheck" | cut -d'|' -f3)
+        r_age=$(( $(now_epoch) - ${r_ts:-0} ))
+        if [ -n "$recheck" ] && [ "$r_age" -le "${r_ttl:-0}" ]; then
+          # Пока мы ждали мьютекс, лок перехватил кто-то другой.
+          flock -u 9
+          if $json_out; then
+            printf '{"ok":false,"task_id":"%s","owner":"%s","stale":false,"age_s":%s,"ttl_s":%s}\n' \
+              "$id" "$r_agent" "$r_age" "$r_ttl"
+          else
+            echo "locked by: $r_agent (age ${r_age}s, ttl ${r_ttl}s)"
+          fi
+          exit 1
+        fi
+        rm -rf "$dir"
+        if ! mkdir "$dir" 2>/dev/null; then
+          flock -u 9
+          if $json_out; then
+            printf '{"ok":false,"task_id":"%s","error":"reclaim failed"}\n' "$id"
+          else
+            echo "locked (reclaim failed)"
+          fi
+          exit 1
+        fi
+        printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+        flock -u 9
+        if $json_out; then
+          printf '{"ok":true,"task_id":"%s","owner":"%s","stale":true,"stale_from":"%s","age_s":%s,"ttl_s":%s}\n' \
+            "$id" "$agent" "$o_agent" "$age" "$ttl"
+        else
+          echo "ok (took stale lock from $o_agent, was ${age}s old)"
+        fi
+        exit 0
+      fi
+      if $json_out; then
+        printf '{"ok":false,"task_id":"%s","owner":"%s","stale":false,"age_s":%s,"ttl_s":%s}\n' \
+          "$id" "$o_agent" "$age" "$o_ttl"
+      else
+        echo "locked by: $o_agent (age ${age}s, ttl ${o_ttl}s)"
+      fi
+      exit 1
+    fi
+    if $json_out; then
+      printf '{"ok":false,"task_id":"%s","error":"corrupt owner file"}\n' "$id"
+    else
+      echo "locked (corrupt owner file)"
+    fi
+    exit 1
+    ;;
+  release)
+    [ -z "$id" ] && { echo "task id required"; exit 2; }
+    dir="$LOCKS/$id"
+    [ ! -d "$dir" ] && {
+      if $json_out; then printf '{"ok":true,"task_id":"%s","released":false,"reason":"no_lock"}\n' "$id";
+      else echo "no lock"; fi
+      exit 0
+    }
+    if [ -n "$agent" ]; then
+      owner=$(parse_owner "$dir/owner" || echo "")
+      o_agent=$(echo "$owner" | cut -d'|' -f1)
+      if [ "$o_agent" != "$agent" ]; then
+        if $json_out; then printf '{"ok":false,"task_id":"%s","error":"not_your_lock","owner":"%s"}\n' "$id" "$o_agent";
+        else echo "not your lock (owner=$o_agent)"; fi
+        exit 1
+      fi
+    elif ! $force; then
+      # Без --as снимался любой лок, в том числе чужой. Для многоагентной
+      # работы это отмена самой блокировки: достаточно одной команды без
+      # флага, чтобы выбить работающего агента. Снятие чужого лока осталось
+      # возможным, но теперь это явное действие.
+      owner=$(parse_owner "$dir/owner" || echo "")
+      o_agent=$(echo "$owner" | cut -d'|' -f1)
+      if $json_out; then
+        printf '{"ok":false,"task_id":"%s","error":"owner_required","owner":"%s"}\n' "$id" "$o_agent"
+      else
+        echo "укажи владельца: --as <agent-id> (или --force, чтобы снять лок агента $o_agent)" >&2
+      fi
+      exit 2
+    fi
+    rm -rf "$dir"
+    if $json_out; then printf '{"ok":true,"task_id":"%s","released":true}\n' "$id";
+    else echo "released"; fi
+    ;;
+  refresh)
+    [ -z "$id" ] && { echo "task id required"; exit 2; }
+    [ -z "$agent" ] && { echo "--as <agent-id> required"; exit 2; }
+    dir="$LOCKS/$id"
+    [ ! -d "$dir" ] && {
+      if $json_out; then printf '{"ok":false,"task_id":"%s","error":"no_lock"}\n' "$id";
+      else echo "no lock"; fi
+      exit 1
+    }
+    owner=$(parse_owner "$dir/owner" || echo "")
+    o_agent=$(echo "$owner" | cut -d'|' -f1)
+    if [ "$o_agent" != "$agent" ]; then
+      if $json_out; then printf '{"ok":false,"task_id":"%s","error":"not_your_lock","owner":"%s"}\n' "$id" "$o_agent";
+      else echo "not your lock (owner=$o_agent)"; fi
+      exit 1
+    fi
+    printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+    if $json_out; then printf '{"ok":true,"task_id":"%s","refreshed":true,"ttl_s":%s}\n' "$id" "$ttl";
+    else echo "refreshed"; fi
+    ;;
+  status)
+    if [ -n "$id" ]; then
+      dir="$LOCKS/$id"
+      if [ ! -d "$dir" ]; then
+        if $json_out; then printf '{"task_id":"%s","held":false}\n' "$id";
+        else echo "free"; fi
+        exit 0
+      fi
+      owner=$(parse_owner "$dir/owner" || echo "?")
+      o_agent=$(echo "$owner" | cut -d'|' -f1)
+      o_ts=$(echo "$owner" | cut -d'|' -f2)
+      o_ttl=$(echo "$owner" | cut -d'|' -f3)
+      now=$(now_epoch)
+      age=$((now - o_ts))
+      stale="false"
+      [ "$age" -gt "$o_ttl" ] && stale="true"
+      if $json_out; then
+        printf '{"task_id":"%s","held":true,"owner":"%s","age_s":%s,"ttl_s":%s,"stale":%s}\n' \
+          "$id" "$o_agent" "$age" "$o_ttl" "$stale"
+      else
+        echo "$owner"
+      fi
+    else
+      if [ -z "$(ls -A "$LOCKS" 2>/dev/null)" ]; then
+        if $json_out; then echo '{"locks":[]}';
+        else echo "(no locks)"; fi
+        exit 0
+      fi
+      if $json_out; then
+        printf '{"locks":['
+        first=true
+        for d in "$LOCKS"/*/; do
+          # Пустой каталог локов не раскрывает шаблон, и в d попадает сама
+          # строка с «*». Без этой проверки status без аргументов падал на
+          # арифметике над несуществующей меткой времени.
+          [ -d "$d" ] || continue
+          n=$(basename "$d")
+          owner=$(parse_owner "$d/owner" || echo "?")
+          o_ts=$(echo "$owner" | cut -d'|' -f2)
+          case "$o_ts" in ''|*[!0-9]*) age=-1;; *) age=$(( $(now_epoch) - o_ts ));; esac
+          $first || printf ','
+          first=false
+          printf '{"task_id":"%s","age_s":%s,"owner":"%s"}' "$n" "$age" "$owner"
+        done
+        printf ']}\n'
+      else
+        for d in "$LOCKS"/*/; do
+          [ -d "$d" ] || continue
+          n=$(basename "$d")
+          owner=$(parse_owner "$d/owner" || echo "?")
+          o_ts=$(echo "$owner" | cut -d'|' -f2)
+          # Нечитаемая метка времени — не повод падать: лок всё равно надо
+          # показать, иначе оператор не узнает, что он вообще есть.
+          case "$o_ts" in ''|*[!0-9]*) age=-1;; *) age=$(( $(now_epoch) - o_ts ));; esac
+          echo "$n  ${age}s  $owner"
+        done
+      fi
+    fi
+    ;;
+  cleanup)
+    n=0
+    for d in "$LOCKS"/*/; do
+      [ ! -d "$d" ] && continue
+      owner=$(parse_owner "$d/owner" || echo "")
+      [ -z "$owner" ] && { rm -rf "$d"; n=$((n+1)); continue; }
+      o_ts=$(echo "$owner" | cut -d'|' -f2)
+      o_ttl=$(echo "$owner" | cut -d'|' -f3)
+      age=$(( $(now_epoch) - o_ts ))
+      if [ "$age" -gt "$o_ttl" ]; then rm -rf "$d"; n=$((n+1)); fi
+    done
+    if $json_out; then printf '{"cleaned":%s}\n' "$n";
+    else echo "cleaned $n stale locks"; fi
+    ;;
+  *)
+    cat <<USAGE
+brain-lock — атомарные блокировки задач
+
+  brain-lock acquire <id> --as <agent-id> [--ttl 600] [--json]
+  brain-lock release <id> [--as <agent-id>] [--json]
+  brain-lock refresh <id> --as <agent-id> [--ttl 600] [--json]
+  brain-lock status  [<id>] [--json]
+  brain-lock cleanup [--json]
+USAGE
+    exit 2;;
+esac

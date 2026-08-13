@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""brain-policy — policy readiness check for Brain orchestration CLI agents.
+
+Commands:
+  check   Verify that all Brain workflow operations are accessible
+
+Exit codes:
+  0  All checks passed
+  1  One or more checks failed (policy blocked or missing)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _brain_path() -> Path:
+    p = Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+    if not p.is_dir():
+        print(f"brain-policy: BRAIN_PATH does not exist: {p}", file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+# ── check ─────────────────────────────────────────────────────────────────────
+
+_CHECKS = [
+    ("brain-status", ["brain-status"]),
+    ("brain-lock acquire+release", None),   # special handling
+    ("brain-task take+complete", None),     # special handling
+    ("brain-learn capture", None),          # special handling
+    ("brain-run --role developer", None),   # special handling
+]
+
+
+def _run(cmd: list[str], env: dict | None = None, timeout: int = 15) -> tuple[int, str, str]:
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       env=env or os.environ, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    brain = _brain_path()
+    failures: list[dict] = []
+    passed: list[str] = []
+
+    def ok(name: str) -> None:
+        passed.append(name)
+        if not args.json:
+            print(f"  [OK]  {name}")
+
+    def fail(name: str, detail: str) -> None:
+        failures.append({"check": name, "detail": detail})
+        if not args.json:
+            print(f"  [FAIL] {name}: {detail}")
+
+    if not args.json:
+        print(f"brain-policy check — BRAIN_PATH={brain}")
+        print()
+
+    # 1. brain-status
+    try:
+        rc, out, err = _run(["brain-status"])
+        if rc == 0:
+            ok("brain-status (read tasks/locks/index)")
+        else:
+            fail("brain-status", err.strip()[:120] or "exit non-zero")
+    except FileNotFoundError:
+        fail("brain-status", "command not found — run setup-brain-v2.sh")
+    except subprocess.TimeoutExpired:
+        fail("brain-status", "timeout")
+
+    # 2. brain-lock acquire + release
+    test_id = "policy-check-probe"
+    agent_id = "policy-checker"
+    try:
+        rc, out, err = _run(["brain-lock", "acquire", test_id, "--as", agent_id])
+        if rc == 0 or "ok" in out:
+            _run(["brain-lock", "release", test_id, "--as", agent_id])
+            ok("brain-lock acquire + release (write .locks/)")
+        else:
+            fail("brain-lock", err.strip()[:120] or out.strip()[:120])
+    except FileNotFoundError:
+        fail("brain-lock", "command not found")
+    except subprocess.TimeoutExpired:
+        fail("brain-lock", "timeout")
+
+    # 3. brain-task (verify command exists and lists tasks)
+    try:
+        rc, out, err = _run(["brain-task", "list"])
+        if rc == 0:
+            ok("brain-task list (write tasks/ accessible)")
+        else:
+            fail("brain-task", err.strip()[:120] or out.strip()[:120])
+    except FileNotFoundError:
+        fail("brain-task", "command not found — run setup-brain-v2.sh")
+    except subprocess.TimeoutExpired:
+        fail("brain-task", "timeout")
+
+    # 4. brain-learn capture (write learning/)
+    try:
+        with tempfile.TemporaryDirectory(prefix="policy-check-") as tmp_brain:
+            env = {**os.environ, "BRAIN_PATH": tmp_brain}
+            # Minimal dirs
+            Path(tmp_brain, "tasks").mkdir()
+            Path(tmp_brain, "tasks", "active.md").write_text("# Active\n")
+            rc, out, err = _run(
+                ["brain-learn", "capture", "--source", "runtime-error",
+                 "--severity", "low", "--rule", "policy check probe"],
+                env=env)
+            if rc == 0 and "Created incident" in out:
+                ok("brain-learn capture (write learning/)")
+            else:
+                fail("brain-learn", err.strip()[:120] or out.strip()[:120])
+    except FileNotFoundError:
+        fail("brain-learn", "command not found — run setup-brain-v2.sh")
+    except Exception as e:
+        fail("brain-learn", str(e)[:120])
+
+    # 5. brain-run --role developer (read + stdout generation)
+    try:
+        with tempfile.TemporaryDirectory(prefix="policy-run-") as tmp_brain:
+            env = {**os.environ, "BRAIN_PATH": tmp_brain}
+            Path(tmp_brain, "roles").mkdir()
+            Path(tmp_brain, "roles", "developer.md").write_text("# Developer")
+            Path(tmp_brain, "wiki").mkdir()
+            Path(tmp_brain, "wiki", "index.md").write_text("# Index")
+            Path(tmp_brain, "MEMORY.md").write_text("# Memory")
+            Path(tmp_brain, "tasks").mkdir()
+            Path(tmp_brain, "tasks", "active.md").write_text("# Active\n")
+            rc, out, err = _run(["brain-run", "--role", "developer"], env=env)
+            if rc == 0 and len(out) > 50:
+                ok("brain-run --role developer (prompt generation)")
+            else:
+                fail("brain-run", err.strip()[:120] or f"short output: {len(out)} chars")
+    except FileNotFoundError:
+        fail("brain-run", "command not found")
+    except Exception as e:
+        fail("brain-run", str(e)[:120])
+
+    # Persist last-check.json for /api/metrics consumption
+    try:
+        policy_dir = brain / ".policy"
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {
+            "last_run": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ok": len(failures) == 0,
+            "gates_passed": len(passed),
+            "gates_failed": len(failures),
+            "passed": passed,
+            "failed": failures,
+        }
+        (policy_dir / "last-check.json").write_text(
+            json.dumps(snapshot, indent=2), encoding="utf-8")
+    except OSError as e:
+        if not args.json:
+            print(f"  WARN: could not persist .policy/last-check.json: {e}",
+                  file=sys.stderr)
+
+    if args.json:
+        result = {
+            "ok": len(failures) == 0,
+            "brain_path": str(brain),
+            "passed": passed,
+            "failed": failures,
+            "total": len(passed) + len(failures),
+            "passed_count": len(passed),
+            "failed_count": len(failures),
+        }
+        print(json.dumps(result, indent=2))
+    else:
+        print()
+        total = len(passed) + len(failures)
+        print(f"Results: {len(passed)}/{total} checks passed")
+        if failures:
+            print(f"Failed: {', '.join(f['check'] for f in failures)}")
+            print()
+            print("See brain-spec.md § 'Policy Profiles' and OPS_RUNBOOK.md Section 10 for remediation.")
+            return 1
+        print("All Brain workflow operations are accessible.")
+    return 0 if len(failures) == 0 else 1
+
+
+# ── arg parser ────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="brain-policy",
+        description="Policy readiness check for Brain orchestration CLI agents.",
+    )
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
+    sp = sub.add_parser("check", help="Verify all Brain workflow operations are accessible")
+    sp.add_argument("--json", action="store_true", help="Output results as JSON")
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.cmd is None:
+        parser.print_help()
+        sys.exit(0)
+    if args.cmd == "check":
+        sys.exit(cmd_check(args))
+
+
+if __name__ == "__main__":
+    main()

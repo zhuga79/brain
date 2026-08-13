@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Read-only orchestration status for Brain."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import brain_tasks
+import brain_index
+import brain_provider
+
+TASK_RE = brain_tasks.TASK_RE  # re-export for backward compat
+
+
+from brain_core.paths import brain_path
+from brain_core.version import core_location, core_version  # одна реализация на всю систему
+
+
+def parse_tasks(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return brain_tasks.parse_tasks(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def summarize_tasks(active: list[dict[str, Any]], done: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "active_count": len(active),
+        "done_count": len(done),
+        "states": dict(Counter(task["state"] for task in active)),
+        "priorities": dict(Counter(task["priority"] for task in active)),
+        "roles": dict(Counter(task["role"] or "unassigned" for task in active)),
+        "modes": dict(Counter(task["mode"] or "unspecified" for task in active)),
+    }
+
+
+def read_locks(brain: Path) -> list[dict[str, Any]]:
+    locks: list[dict[str, Any]] = []
+    locks_dir = brain / ".locks"
+    if not locks_dir.exists():
+        return locks
+
+    now = int(time.time())
+    for lock_dir in sorted(path for path in locks_dir.iterdir() if path.is_dir()):
+        owner_path = lock_dir / "owner"
+        record: dict[str, Any] = {"task_id": lock_dir.name, "owner": "", "age_seconds": None, "ttl_seconds": None, "stale": None}
+        if owner_path.exists():
+            parts = owner_path.read_text(encoding="utf-8", errors="replace").strip().split("|")
+            if len(parts) >= 3:
+                record["owner"] = parts[0]
+                try:
+                    created = int(parts[1])
+                    ttl = int(parts[2])
+                    record["age_seconds"] = max(0, now - created)
+                    record["ttl_seconds"] = ttl
+                    record["stale"] = record["age_seconds"] > ttl
+                except ValueError:
+                    record["stale"] = None
+        locks.append(record)
+    return locks
+
+
+def read_council(brain: Path) -> list[dict[str, Any]]:
+    council_dir = brain / "council"
+    if not council_dir.exists():
+        return []
+
+    councils: list[dict[str, Any]] = []
+    for task_dir in sorted(path for path in council_dir.iterdir() if path.is_dir()):
+        files = sorted(path.name for path in task_dir.iterdir() if path.is_file())
+        councils.append({"task_id": task_dir.name, "files": files, "file_count": len(files)})
+    return councils
+
+
+def read_index(brain: Path) -> dict[str, Any]:
+    status = brain_index.index_status(brain)
+    if status.get("status") == "missing":
+        status["next_step"] = "brain-index rebuild"
+    elif status.get("health") == "stale":
+        status["next_step"] = "brain-index rebuild"
+    else:
+        status["next_step"] = ""
+    return status
+
+
+def collect_status(brain: Path) -> dict[str, Any]:
+    active = parse_tasks(brain / "tasks" / "active.md")
+    done = parse_tasks(brain / "tasks" / "done.md")
+    locks = read_locks(brain)
+    councils = read_council(brain)
+    return {
+        "brain": str(brain),
+        "tasks": {
+            "summary": summarize_tasks(active, done),
+            "active": active,
+            "done": done,
+        },
+        "locks": {
+            "count": len(locks),
+            "stale_count": sum(1 for lock in locks if lock.get("stale") is True),
+            "items": locks,
+        },
+        "council": {
+            "count": len(councils),
+            "items": councils,
+        },
+        "index": read_index(brain),
+        "providers": brain_provider.collect_provider_status(brain),
+    }
+
+
+def format_counter(counter: dict[str, int], labels: dict[str, str] | None = None) -> str:
+    if not counter:
+        return "-"
+    labels = labels or {}
+    return ", ".join(f"{labels.get(key, key)}:{counter[key]}" for key in sorted(counter))
+
+
+def print_text(status: dict[str, Any]) -> None:
+    summary = status["tasks"]["summary"]
+    index = status["index"]
+
+    print(f"Brain: {status['brain']}")
+    # Версия и путь ядра: без них «правка не действует» неотличимо от
+    # «исполняется другая копия» — за этим мы и гонялись всю дорогу.
+    print(f"Core: {core_version()} ({core_location()})")
+    print(f"Tasks: active={summary['active_count']} done={summary['done_count']}")
+    print(f"  states: {format_counter(summary['states'], {' ': 'open', '~': 'in_progress', 'x': 'done', '!': 'blocked'})}")
+    print(f"  priorities: {format_counter(summary['priorities'])}")
+    print(f"  roles: {format_counter(summary['roles'])}")
+    print(f"  modes: {format_counter(summary['modes'])}")
+    print(f"Locks: {status['locks']['count']} stale={status['locks']['stale_count']}")
+    print(f"Council: {status['council']['count']}")
+    provider_roles = status.get("providers", {}).get("roles", {})
+    if provider_roles:
+        configured = sum(1 for info in provider_roles.values() if info.get("preferred"))
+        unavailable = sum(len(info.get("unavailable", [])) for info in provider_roles.values())
+        print(f"Providers: roles={len(provider_roles)} configured={configured} unavailable={unavailable}")
+    health = index.get("health", index.get("status", "unknown"))
+    idx_status = "present" if index.get("status") != "missing" else "missing"
+    health_flag = " [WARN: run brain-index rebuild]" if health in ("stale", "missing", "error") else ""
+    print(f"Index: {idx_status} health={health}{health_flag}")
+    if index.get("status") in ("present", "ok", "stale"):
+        print(
+            "  "
+            f"generated_at={index.get('generated_at', '-')}"
+            f" pages={index.get('page_count', 0)}"
+            f" raw={index.get('raw_count', 0)}"
+            f" links={index.get('link_count', 0)}"
+            f" search_docs={index.get('search_docs', 0)}"
+        )
+    if index.get("next_step"):
+        print(f"  → next step: {index['next_step']}")
+    if index.get("stale_files"):
+        print(f"  stale files ({len(index['stale_files'])}): {', '.join(index['stale_files'][:5])}"
+              + (" ..." if len(index["stale_files"]) > 5 else ""))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only Brain orchestration status.")
+    parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    args = parser.parse_args()
+
+    brain = brain_path(args.brain)
+    if not brain.exists():
+        print(f"ERROR: Brain path does not exist: {brain}", file=os.sys.stderr)
+        return 1
+
+    status = collect_status(brain)
+    if args.json:
+        print(json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print_text(status)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

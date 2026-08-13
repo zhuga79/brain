@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+# brain-run --role R --task ID [--council] [--agent-id A]
+# Печатает на stdout полный промпт. Pipe в свой CLI:
+#   brain-run --role architect --task t-... | claude -p
+#   brain-run --role developer --client gemini --task t-... | gemini
+#   brain-run --role reviewer  --task t-... | gemini
+#
+# Автоматически подгружает doctrine-файлы, упомянутые в role-файле.
+set -e
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+role=""; task=""; council=0; agent=""; client="claude"; workspace=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --role)     role="$2"; shift 2;;
+    --task)     task="$2"; shift 2;;
+    --council)  council=1; shift;;
+    --agent-id) agent="$2"; shift 2;;
+    --client)   client="$2"; shift 2;;
+    --workspace) workspace="$2"; shift 2;;
+    -h|--help)  cat <<H; exit 0
+brain-run — собрать промпт (память + роль + задача + doctrine) и вывести на stdout
+  --role R         роль (architect|developer|reviewer|researcher|linter|arbiter|...)
+  --task ID        id задачи
+  --council        включить контекст консилиума (для arbiter)
+  --agent-id A     твой agent-id (если не задан — сгенерится)
+  --client C       целевой CLI клиент (claude|gemini|codex|ollama|...)
+  --workspace PATH локальная folder-native workspace папка для TASKS.md/BRAIN.md
+H
+;;
+    *) echo "unknown arg: $1"; exit 1;;
+  esac
+done
+
+[ -z "$role" ] && { echo "--role required" >&2; exit 1; }
+[ ! -f "$BRAIN/roles/$role.md" ] && { echo "no such role: $role" >&2; exit 1; }
+[ -z "$agent" ] && agent="${role}-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+workspace_path=""
+if [ -n "$workspace" ]; then
+  workspace_path=$(python3 - "$workspace" <<'PY'
+import sys
+from pathlib import Path
+
+current = Path(sys.argv[1]).expanduser().resolve()
+if current.is_file():
+    current = current.parent
+for candidate in (current, *current.parents):
+    if (candidate / "BRAIN.md").exists():
+        print(candidate)
+        raise SystemExit(0)
+print(f"no workspace BRAIN.md found for: {sys.argv[1]}", file=sys.stderr)
+raise SystemExit(1)
+PY
+)
+fi
+export _BRAIN_RUN_ROLE="$role"
+export _BRAIN_RUN_CLIENT="$client"
+
+# JIT config injection (Phase 20)
+python3 - <<'PYEOF'
+import os
+import sys
+import json
+from pathlib import Path
+
+def inject_skills():
+    role = os.environ.get("_BRAIN_RUN_ROLE", "")
+    client = os.environ.get("_BRAIN_RUN_CLIENT", "claude")
+    brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+    skills_dir = brain_path / "skills"
+    
+    try:
+        from brain_skill_parser import get_skills_for_role
+    except ImportError as e:
+        print(f"JIT Injection Error: missing brain_skill_parser - {e}", file=sys.stderr)
+        return
+        
+    skills = get_skills_for_role(role, client, skills_dir)
+    mcp_servers = {}
+    knowledge_blocks = []
+    
+    for skill in skills:
+        if skill.get("type") == "mcp" and "mcp_command" in skill:
+            parts = skill["mcp_command"].split()
+            if parts:
+                mcp_servers[skill.get("name", "unknown")] = {
+                    "command": parts[0],
+                    "args": parts[1:]
+                }
+        elif skill.get("type") == "knowledge":
+            knowledge_blocks.append(f"## {skill.get('name')}\n\n{skill.get('_content', '')}")
+
+    if not mcp_servers:
+        config_paths = {
+            "claude": Path(os.path.expanduser("~/.claude/settings.local.json")),
+            "gemini": Path(os.path.expanduser("~/.gemini/settings.json")),
+            "codex": Path(os.path.expanduser("~/.codex/settings.json")),
+            "opencode": Path(".opencode.json"),
+            "kilocode": Path(".kilocode/mcp.json"),
+        }
+        cfg_path = config_paths.get(client)
+        if cfg_path is None or not cfg_path.exists():
+            if knowledge_blocks:
+                print("# === ROLE-SPECIFIC SKILLS ===")
+                print()
+                print("\n\n".join(knowledge_blocks))
+                print()
+            return
+    
+    if client == "claude":
+        cfg_path = Path(os.path.expanduser("~/.claude/settings.local.json"))
+        try:
+            data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            data.setdefault("mcpServers", {})
+            
+            # clear old JIT
+            keys_to_del = [k for k in data["mcpServers"] if k != "brain"]
+            for k in keys_to_del:
+                del data["mcpServers"][k]
+                
+            if mcp_servers:
+                data["mcpServers"].update(mcp_servers)
+                
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"JIT Injection Error: {e}", file=sys.stderr)
+            
+    elif client == "gemini":
+        cfg_path = Path(os.path.expanduser("~/.gemini/settings.json"))
+        try:
+            data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            data.setdefault("mcpServers", {})
+            
+            # clear old JIT
+            keys_to_del = [k for k in data["mcpServers"] if k != "brain"]
+            for k in keys_to_del:
+                del data["mcpServers"][k]
+                
+            if mcp_servers:
+                data["mcpServers"].update(mcp_servers)
+                
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"JIT Injection Error: {e}", file=sys.stderr)
+            
+    elif client == "codex":
+        cfg_path = Path(os.path.expanduser("~/.codex/settings.json"))
+        try:
+            data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            data.setdefault("mcpServers", {})
+            
+            # clear old JIT
+            keys_to_del = [k for k in data["mcpServers"] if k != "brain"]
+            for k in keys_to_del:
+                del data["mcpServers"][k]
+                
+            if mcp_servers:
+                data["mcpServers"].update(mcp_servers)
+                
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"JIT Injection Error: {e}", file=sys.stderr)
+            
+    elif client == "opencode":
+        cfg_path = Path(".opencode.json")
+        try:
+            data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            data.setdefault("mcp", {})
+            
+            # clear old JIT
+            keys_to_del = [k for k in data["mcp"] if k != "brain"]
+            for k in keys_to_del:
+                del data["mcp"][k]
+                
+            if mcp_servers:
+                # Opencode expects a slightly different format
+                for name, cfg in mcp_servers.items():
+                    data["mcp"][name] = {
+                        "type": "local",
+                        "command": [cfg["command"]] + cfg["args"],
+                        "enabled": True
+                    }
+                
+            cfg_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"JIT Injection Error (opencode): {e}", file=sys.stderr)
+
+    elif client == "kilocode":
+        cfg_path = Path(".kilocode/mcp.json")
+        try:
+            data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            data.setdefault("mcpServers", {})
+            
+            # clear old JIT
+            keys_to_del = [k for k in data["mcpServers"] if k != "brain"]
+            for k in keys_to_del:
+                del data["mcpServers"][k]
+                
+            if mcp_servers:
+                data["mcpServers"].update(mcp_servers)
+                
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"JIT Injection Error (kilocode): {e}", file=sys.stderr)
+                
+    if knowledge_blocks:
+        print("# === ROLE-SPECIFIC SKILLS ===")
+        print()
+        print("\n\n".join(knowledge_blocks))
+        print()
+
+inject_skills()
+PYEOF
+
+# Доктрины берём из frontmatter роли (поле doctrine: [slug, ...]).
+# Греп по прозе удалён: упоминание доктрины в тексте role-файла больше
+# не подгружает файл — только явное машиночитаемое поле, которое
+# проверяется brain-validate (роль без frontmatter = ошибка).
+doctrine_files=$(
+  python3 - "$BRAIN/roles/$role.md" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+def parse_frontmatter(content: str) -> dict:
+    match = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n?", content, re.S)
+    if not match:
+        return {}
+    fm = {}
+    for line in match.group(1).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fm[key.strip()] = value.strip()
+    return fm
+
+def as_list(value: str) -> list:
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    return [part.strip().strip("'\"") for part in value.split(",") if part.strip()]
+
+path = Path(sys.argv[1])
+fm = parse_frontmatter(path.read_text(encoding="utf-8")) if path.exists() else {}
+for slug in as_list(str(fm.get("doctrine", ""))):
+    print(f"doctrine/{slug}.md")
+PY
+)
+
+# Промпт собирается в переменную: размер печатается в stderr, потому что цену
+# платит каждый запуск любого агента, а увидеть её было негде.
+_prompt="$(
+
+cat <<HEADER
+# === SYSTEM ===
+
+You are an LLM agent connected to a shared persistent memory at \`~/brain/\`.
+Your agent-id for this session: **$agent**
+
+Read these in order before responding:
+
+1. The MEMORY schema (rules of the system).
+2. Your role definition.
+3. Doctrine documents relevant to your role (if any).
+4. The current task (if any).
+5. Recent log (last 10 entries).
+6. Wiki index.
+
+# === MEMORY.md ===
+
+$(
+  if [ -f "$BRAIN/MEMORY.md" ]; then
+    cat "$BRAIN/MEMORY.md"
+  else
+    echo "(no MEMORY.md found)"
+  fi
+)
+
+# === REGISTRY (только то, что касается твоей роли) ===
+
+$(python3 -c "
+import sys
+from pathlib import Path
+try:
+    from brain_core.registry import role_brief
+    print(role_brief(Path('$BRAIN'), '$role'))
+except Exception as exc:
+    print(f'(реестр недоступен: {exc})', file=sys.stderr)
+" 2>/dev/null || echo "(реестр недоступен)")
+
+# === ROLE: $role ===
+
+$(cat "$BRAIN/roles/$role.md")
+
+$(
+  if [ -f "$BRAIN/.identities/${agent}_ed25519.pub" ]; then
+    echo "# === CRYPTO IDENTITY ==="
+    echo
+    echo "You have an active cryptographic identity (ED25519) for this session."
+    echo "Public Key: $(cat "$BRAIN/.identities/${agent}_ed25519.pub")"
+    echo "You can sign your output files using: brain-identity sign --agent-id $agent --file <path>"
+    echo "Other agents can verify using: brain-identity verify --agent-id $agent --file <path> --sig <sig_path>"
+    echo
+  fi
+)
+
+HEADER
+
+# Подгружаем релевантные doctrine
+if [ -n "$doctrine_files" ]; then
+  echo "# === DOCTRINE (mandatory reading for your role) ==="
+  echo
+  for df in $doctrine_files; do
+    fpath="$BRAIN/$df"
+    if [ -f "$fpath" ]; then
+      echo "## $df"
+      echo
+      cat "$fpath"
+      echo
+    fi
+  done
+fi
+
+cat <<MIDDLE
+# === RECENT LOG (last 10) ===
+
+\`\`\`
+$(grep -E '^## \[' "$LOG" 2>/dev/null | tail -10)
+\`\`\`
+
+# === WIKI INDEX ===
+
+\`\`\`
+$(
+  # Индекс — ориентир, а не содержимое: полный список страниц занимал в промпте
+  # больше, чем роль и задача вместе. Даём разделы и объём, дальше агент читает
+  # сам через brain-search или wiki/index.md.
+  if [ -f "$BRAIN/wiki/index.md" ]; then
+    grep -E "^#{1,3} " "$BRAIN/wiki/index.md" | head -40
+    printf '\n(страниц в wiki: %s — полный список в wiki/index.md, поиск: brain-search "<запрос>")\n' \
+      "$(find "$BRAIN/wiki" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')"
+  else
+    echo "(no wiki/index.md found)"
+  fi
+)
+\`\`\`
+
+MIDDLE
+
+if [ -n "$workspace_path" ]; then
+  echo "# === WORKSPACE: $workspace_path ==="
+  echo
+  echo '```'
+  cat "$workspace_path/BRAIN.md"
+  echo '```'
+  echo
+fi
+
+if [ -n "$task" ]; then
+  echo "# === TASK: $task ==="
+  echo
+  echo '```'
+  if [ -n "$workspace_path" ]; then
+    awk -v id="$task" '
+      $0 ~ "- \\[.\\]" && $0 ~ id { print; in_block=1; next }
+      in_block && /^- \[/ { exit }
+      in_block && /^##/ { exit }
+      in_block { print }
+    ' "$workspace_path/TASKS.md" 2>/dev/null
+  else
+    awk -v id="$task" '
+      $0 ~ "- \\[.\\]" && $0 ~ id { print; in_block=1; next }
+      in_block && /^- \[/ { exit }
+      in_block && /^##/ { exit }
+      in_block { print }
+    ' "$BRAIN/tasks/active.md" 2>/dev/null
+  fi
+  echo '```'
+  echo
+
+  if [ "$council" = 1 ] && [ -d "$BRAIN/council/$task" ]; then
+    echo "# === COUNCIL OPINIONS for $task ==="
+    echo
+    for f in "$BRAIN/council/$task"/*.md; do
+      [ "$(basename "$f")" = "synthesis.md" ] && continue
+      grep -q "^written: TODO" "$f" && continue
+      echo "## $(basename "$f" .md)"
+      echo
+      cat "$f"
+      echo
+    done
+  fi
+fi
+
+# Inject bounded active lessons for this role (max 5, max 800 tokens)
+_learning_dir="$BRAIN/learning/lessons/active"
+if [ -d "$_learning_dir" ]; then
+  python3 - <<PYEOF
+import os, sys
+try:
+    from brain_learning import select_lessons_for_injection, render_injection_block
+    brain_path = __import__("pathlib").Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+    role = os.environ.get("_BRAIN_RUN_ROLE", "")
+    lessons = select_lessons_for_injection(brain_path, role)
+    block = render_injection_block(lessons)
+    if block:
+        print(block)
+except Exception:
+    pass
+PYEOF
+fi
+
+if [ -n "$workspace_path" ]; then
+cat <<FOOTER
+
+# === INSTRUCTIONS ===
+
+1. This is a folder-native workspace task. Use local workspace commands, not the global task queue.
+2. Mark the local task in-progress if you're starting work:
+   \`brain-workspace take --workspace "$workspace_path" $task --as $agent\`
+3. Do the work according to your role and the workspace \`BRAIN.md\`. If doctrine documents apply
+   (loaded above), follow them strictly.
+4. On completion: \`brain-workspace complete --workspace "$workspace_path" $task --as $agent --summary "<what changed>"\`.
+5. If an action is listed under workspace Action Gates, stop and get explicit user approval before doing it.
+
+Begin.
+FOOTER
+else
+cat <<FOOTER
+
+# === INSTRUCTIONS ===
+
+1. Acquire lock if you're starting work on a task:
+   \`brain-lock acquire $task --as $agent\`
+2. Mark the task in-progress: \`brain-task take $task --as $agent\`
+3. Do the work according to your role. If doctrine documents apply
+   (loaded above), follow them strictly.
+4. On completion: \`brain-task complete $task --as $agent\` and update wiki.
+5. Release the lock if not auto-released.
+
+If the task is council-mode and you are NOT the arbiter, write your opinion
+to \`~/brain/council/$task/$role.md\` independently — do NOT read other roles'
+opinions before writing your own.
+
+If you are the arbiter, read all opinions and write \`synthesis.md\`.
+
+Begin.
+FOOTER
+fi
+
+# Pre-flight check: tax-advisor must declare stage in first line
+if [ "$role" = "tax-advisor" ]; then
+cat <<PREFLIGHT
+
+# === PRE-FLIGHT CHECK (tax-advisor) ===
+
+ОБЯЗАТЕЛЬНО: первая строка твоего ответа должна быть:
+
+  ТЕКУЩИЙ ЭТАП: <номер и название этапа из doctrine>
+
+Пример: «ТЕКУЩИЙ ЭТАП: 1 — Исследование и диагностика»
+
+Без этой декларации ответ считается незавершённым.
+PREFLIGHT
+fi
+)"
+printf '%s\n' "$_prompt"
+printf 'brain-run: промпт %s КБ (роль %s)\n' "$(( ${#_prompt} / 1024 ))" "$role" >&2

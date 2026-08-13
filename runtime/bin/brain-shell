@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Read-only (and controlled write) interactive Brain shell."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import brain_tasks
+from brain_app import queue
+
+TASK_RE = brain_tasks.TASK_RE  # re-export for backward compat
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def _run_cli(args: list[str]) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True)
+        return result.returncode, result.stdout, result.stderr
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _local_bin(cmd: str) -> str:
+    """Resolve CLI tool path: prefer $HOME/.local/bin/<cmd>."""
+    local = Path.home() / ".local" / "bin" / cmd
+    if local.exists():
+        return str(local)
+    return cmd
+
+
+def read_locks(brain: Path) -> list[dict[str, Any]]:
+    locks_dir = brain / ".locks"
+    if not locks_dir.exists():
+        return []
+    now = int(time.time())
+    locks: list[dict[str, Any]] = []
+    for lock_dir in sorted(p for p in locks_dir.iterdir() if p.is_dir()):
+        owner_path = lock_dir / "owner"
+        record: dict[str, Any] = {
+            "task_id": lock_dir.name, "owner": "",
+            "age_seconds": None, "ttl_seconds": None, "stale": None,
+        }
+        if owner_path.exists():
+            parts = owner_path.read_text(encoding="utf-8", errors="replace").strip().split("|")
+            if len(parts) >= 3:
+                record["owner"] = parts[0]
+                try:
+                    created, ttl = int(parts[1]), int(parts[2])
+                    record["age_seconds"] = max(0, now - created)
+                    record["ttl_seconds"] = ttl
+                    record["stale"] = record["age_seconds"] > ttl
+                except ValueError:
+                    pass
+        locks.append(record)
+    return locks
+
+
+def read_council(brain: Path) -> list[dict[str, Any]]:
+    council_dir = brain / "council"
+    if not council_dir.exists():
+        return []
+    councils: list[dict[str, Any]] = []
+    for task_dir in sorted(p for p in council_dir.iterdir() if p.is_dir()):
+        files = sorted(p.name for p in task_dir.iterdir() if p.is_file())
+        councils.append({"task_id": task_dir.name, "files": files})
+    return councils
+
+
+# ---------------------------------------------------------------------------
+# Command implementations
+# ---------------------------------------------------------------------------
+
+STATE_LABELS = {" ": "open", "~": "in-progress", "x": "done", "!": "blocked"}
+
+
+def cmd_status(brain: Path) -> None:
+    """Print orchestration status (mirrors brain-status output)."""
+    code, out, err = _run_cli([_local_bin("brain-status"), "--brain", str(brain)])
+    if code == 0:
+        print(out, end="")
+    else:
+        # Fallback: inline read
+        active = queue.load_active(brain)
+        done = queue.load_done(brain)
+        locks = read_locks(brain)
+        councils = read_council(brain)
+        summary = {
+            "active_count": len(active),
+            "done_count": len(done),
+            "states": dict(Counter(t["state"] for t in active)),
+            "priorities": dict(Counter(t["priority"] for t in active)),
+        }
+        print(f"Brain: {brain}")
+        print(f"Tasks: active={summary['active_count']} done={summary['done_count']}")
+        state_str = ", ".join(
+            f"{STATE_LABELS.get(k, k)}:{v}" for k, v in sorted(summary["states"].items())
+        )
+        print(f"  states: {state_str or '-'}")
+        print(f"Locks: {len(locks)}")
+        print(f"Council: {len(councils)}")
+
+
+def cmd_tasks(brain: Path, role: str = "") -> None:
+    """List active tasks."""
+    code, out, err = _run_cli(
+        [_local_bin("brain-task"), "list"] + (["--role", role] if role else [])
+    )
+    if code == 0 and out.strip():
+        print(out, end="")
+        return
+    # Inline fallback
+    tasks = queue.load_active(brain)
+    if role:
+        tasks = [t for t in tasks if t["role"] == role]
+    if not tasks:
+        print("(no tasks)")
+        return
+    for t in tasks:
+        state = STATE_LABELS.get(t["state"], t["state"])
+        role_s = f"  [{t['role']}]" if t["role"] else ""
+        print(f"  [{state}] [{t['priority']}] {t['id']} — {t['title']}{role_s}")
+
+
+def cmd_next(brain: Path, role: str = "") -> None:
+    """Show next available task."""
+    args = [_local_bin("brain-task"), "next"]
+    if role:
+        args += ["--role", role]
+    code, out, err = _run_cli(args)
+    if out.strip():
+        print(out, end="")
+    elif code == 0:
+        print("(no available tasks)")
+    else:
+        print("(no available tasks)")
+
+
+def cmd_locks(brain: Path) -> None:
+    """List current locks."""
+    locks = read_locks(brain)
+    if not locks:
+        print("Locks: none")
+        return
+    now = int(time.time())
+    print(f"Locks: {len(locks)}")
+    for lock in locks:
+        stale = " [STALE]" if lock.get("stale") else ""
+        age = f"  age={lock['age_seconds']}s" if lock.get("age_seconds") is not None else ""
+        print(f"  {lock['task_id']}  owner={lock['owner'] or '?'}{age}{stale}")
+
+
+def cmd_council(brain: Path) -> None:
+    """List council sessions."""
+    councils = read_council(brain)
+    if not councils:
+        print("Council sessions: none")
+        return
+    print(f"Council sessions: {len(councils)}")
+    for c in councils:
+        print(f"  {c['task_id']}  files={len(c['files'])}: {', '.join(c['files'])}")
+
+
+def cmd_search(brain: Path, query: str) -> None:
+    """Search brain using brain-search."""
+    code, out, err = _run_cli([_local_bin("brain-search"), query])
+    if code == 0 and out.strip():
+        print(out, end="")
+    elif code == 0:
+        print(f"(no results for '{query}')")
+    else:
+        print(f"Search error: {err.strip() or 'unknown'}", file=sys.stderr)
+
+
+def cmd_dashboard_export(brain: Path) -> None:
+    """Export static HTML dashboard."""
+    code, out, err = _run_cli([_local_bin("brain-dashboard"), "--brain", str(brain), "export"])
+    if code == 0:
+        print(out, end="")
+    else:
+        print(f"Error: {err.strip() or 'brain-dashboard export failed'}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Write actions (Phase 5)
+# ---------------------------------------------------------------------------
+
+def _confirm(prompt: str, yes: bool) -> bool:
+    if yes:
+        return True
+    try:
+        answer = input(f"{prompt} [y/N] ").strip().lower()
+        return answer in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def cmd_take(brain: Path, task_id: str, agent_id: str, yes: bool = False) -> None:
+    """Take a task (acquire lock + set in-progress)."""
+    if not _confirm(f"Take task {task_id} as {agent_id}?", yes):
+        print("Aborted.")
+        return
+    code, out, err = _run_cli([_local_bin("brain-task"), "take", task_id, "--as", agent_id])
+    if code == 0:
+        print(out.strip() or f"Took {task_id}")
+    else:
+        print(f"Error: {err.strip() or out.strip()}", file=sys.stderr)
+        sys.exit(code)
+
+
+def cmd_release(brain: Path, task_id: str, agent_id: str, yes: bool = False) -> None:
+    """Release a task lock."""
+    if not _confirm(f"Release task {task_id} (agent {agent_id})?", yes):
+        print("Aborted.")
+        return
+    code, out, err = _run_cli([_local_bin("brain-task"), "release", task_id, "--as", agent_id])
+    if code == 0:
+        print(out.strip() or f"Released {task_id}")
+    else:
+        print(f"Error: {err.strip() or out.strip()}", file=sys.stderr)
+        sys.exit(code)
+
+
+def cmd_complete(brain: Path, task_id: str, agent_id: str, yes: bool = False) -> None:
+    """Complete a task (mark done, move to done.md)."""
+    if not _confirm(f"Complete task {task_id} as {agent_id}?", yes):
+        print("Aborted.")
+        return
+    code, out, err = _run_cli([_local_bin("brain-task"), "complete", task_id, "--as", agent_id])
+    if code == 0:
+        print(out.strip() or f"Completed {task_id}")
+    else:
+        print(f"Error: {err.strip() or out.strip()}", file=sys.stderr)
+        sys.exit(code)
+
+
+def cmd_launch_dryrun(brain: Path, task_id: str) -> None:
+    """Run brain-launch --dry-run for a council task."""
+    code, out, err = _run_cli([_local_bin("brain-launch"), task_id, "--dry-run"])
+    if code == 0:
+        print(out, end="")
+    else:
+        print(f"Error: {err.strip() or out.strip()}", file=sys.stderr)
+        sys.exit(code)
+
+
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+
+ROLE_PRESETS: dict[str, list[str]] = {
+    "architect": ["status", "next architect", "locks", "council"],
+    "developer": ["status", "next developer", "tasks developer"],
+    "reviewer":  ["status", "tasks reviewer", "next reviewer"],
+    "researcher": ["status", "next researcher", "tasks researcher"],
+    "linter":    ["status", "tasks linter", "next linter"],
+    "arbiter":   ["status", "council", "locks"],
+}
+
+
+def cmd_preset(brain: Path, role: str) -> None:
+    """Run the read-only preset command sequence for a given role."""
+    role = role.lower()
+    if role not in ROLE_PRESETS:
+        known = ", ".join(sorted(ROLE_PRESETS))
+        print(f"Unknown role: {role!r}. Known roles: {known}")
+        return
+    print(f"=== Preset: {role} ===")
+    for cmd_line in ROLE_PRESETS[role]:
+        print(f"\n--- {cmd_line} ---")
+        _dispatch_read_only(cmd_line, brain)
+
+
+def _dispatch_read_only(cmd_line: str, brain: Path) -> None:
+    """Execute a single read-only command (used by presets)."""
+    parts = cmd_line.strip().split()
+    if not parts:
+        return
+    cmd = parts[0].lower()
+    if cmd == "status":
+        cmd_status(brain)
+    elif cmd == "tasks":
+        cmd_tasks(brain, parts[1] if len(parts) > 1 else "")
+    elif cmd == "next":
+        cmd_next(brain, parts[1] if len(parts) > 1 else "")
+    elif cmd == "locks":
+        cmd_locks(brain)
+    elif cmd == "council":
+        cmd_council(brain)
+    elif cmd == "search":
+        cmd_search(brain, " ".join(parts[1:]) if len(parts) > 1 else "")
+
+
+# ---------------------------------------------------------------------------
+# REPL
+# ---------------------------------------------------------------------------
+
+HELP_TEXT = """\
+brain-shell commands:
+  status              — orchestration summary
+  tasks [role]        — list active tasks (optionally filter by role)
+  next [role]         — show next available task
+  locks               — list active locks
+  council             — list council sessions
+  preset <role>       — run role-specific read-only preset (architect/developer/reviewer/researcher/linter/arbiter)
+  search <query>      — full-text search (requires brain-search)
+  dashboard export    — generate static HTML dashboard
+  take <id> --as <agent>     — take a task (write action)
+  release <id> --as <agent>  — release a task lock (write action)
+  complete <id> --as <agent> — mark task complete (write action)
+  launch <id> --dry-run      — preview council launch
+  help                — show this help
+  quit / exit         — exit shell"""
+
+
+def run_command(line: str, brain: Path, yes: bool = False) -> bool:
+    """Execute a single command. Returns False to quit."""
+    parts = line.strip().split()
+    if not parts:
+        return True
+    cmd = parts[0].lower()
+
+    if cmd in ("quit", "exit", "q"):
+        return False
+    if cmd == "help":
+        print(HELP_TEXT)
+    elif cmd == "status":
+        cmd_status(brain)
+    elif cmd == "tasks":
+        role = parts[1] if len(parts) > 1 else ""
+        cmd_tasks(brain, role)
+    elif cmd == "next":
+        role = parts[1] if len(parts) > 1 else ""
+        cmd_next(brain, role)
+    elif cmd == "locks":
+        cmd_locks(brain)
+    elif cmd == "council":
+        cmd_council(brain)
+    elif cmd == "preset":
+        if len(parts) < 2:
+            print(f"Usage: preset <role>  (roles: {', '.join(sorted(ROLE_PRESETS))})")
+        else:
+            cmd_preset(brain, parts[1])
+    elif cmd == "search":
+        if len(parts) < 2:
+            print("Usage: search <query>")
+        else:
+            cmd_search(brain, " ".join(parts[1:]))
+    elif cmd == "dashboard" and len(parts) >= 2 and parts[1] == "export":
+        cmd_dashboard_export(brain)
+    elif cmd == "take":
+        # take <id> --as <agent>
+        if len(parts) >= 4 and parts[2] == "--as":
+            cmd_take(brain, parts[1], parts[3], yes)
+        else:
+            print("Usage: take <task-id> --as <agent-id>")
+    elif cmd == "release":
+        if len(parts) >= 4 and parts[2] == "--as":
+            cmd_release(brain, parts[1], parts[3], yes)
+        else:
+            print("Usage: release <task-id> --as <agent-id>")
+    elif cmd == "complete":
+        if len(parts) >= 4 and parts[2] == "--as":
+            cmd_complete(brain, parts[1], parts[3], yes)
+        else:
+            print("Usage: complete <task-id> --as <agent-id>")
+    elif cmd == "launch":
+        if len(parts) >= 3 and parts[2] == "--dry-run":
+            cmd_launch_dryrun(brain, parts[1])
+        else:
+            print("Usage: launch <task-id> --dry-run")
+    else:
+        print(f"Unknown command: {cmd!r}  (type 'help' for commands)")
+    return True
+
+
+def repl(brain: Path, yes: bool = False) -> None:
+    """Interactive read-eval-print loop."""
+    print(f"brain-shell  brain={brain}  (type 'help' for commands, 'quit' to exit)")
+    while True:
+        try:
+            line = input("brain> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not run_command(line, brain, yes):
+            break
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Interactive Brain shell (read-only + controlled write actions).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  brain-shell                          # interactive REPL\n"
+            "  brain-shell --once status            # one-shot status\n"
+            "  brain-shell --once tasks             # one-shot task list\n"
+            "  brain-shell --once locks             # one-shot lock list\n"
+            "  brain-shell --once council           # one-shot council list\n"
+            '  brain-shell --once "search brain"    # one-shot search\n'
+            '  brain-shell --once "dashboard export" # one-shot dashboard export\n'
+        ),
+    )
+    parser.add_argument(
+        "--brain", default=None,
+        help="Brain path. Defaults to BRAIN_PATH env var or ~/brain.",
+    )
+    parser.add_argument(
+        "--once", metavar="COMMAND",
+        help="Run a single command and exit.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Auto-confirm write actions (for automation).",
+    )
+
+    args = parser.parse_args()
+    brain = brain_path(args.brain)
+
+    if not brain.exists():
+        print(f"ERROR: Brain path does not exist: {brain}", file=sys.stderr)
+        return 1
+
+    if args.once:
+        run_command(args.once, brain, args.yes)
+        return 0
+
+    repl(brain, args.yes)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

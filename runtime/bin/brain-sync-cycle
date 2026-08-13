@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Синхронизация Brain с LAN-репозиторием: только durable-состояние под git.
+
+Логика живёт в `brain_app.cycles.sync`, здесь — только точка входа.
+"""
+
+from __future__ import annotations
+
+from brain_app.cycles import runner, sync
+
+
+def main(argv: list[str] | None = None) -> int:
+    return runner.dispatch(sync.SPEC, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

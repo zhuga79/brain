@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Thin wrapper for brain-phase init — kept for backward compatibility
+set -euo pipefail
+
+phase_num="${1:-}"
+title="${2:-Placeholder Title}"
+
+if [ -z "$phase_num" ]; then
+    echo "Usage: brain-phase-init <phase_num> [title]"
+    echo "(thin wrapper for: brain-phase init <phase_num> [title])"
+    exit 1
+fi
+
+exec "$(dirname "${BASH_SOURCE[0]}")/brain-phase" init "$phase_num" "$title"

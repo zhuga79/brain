@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain-runtime"
+version = "0.2.0"
+description = "Brain knowledge management runtime"
+requires-python = ">=3.10"
+
+# Установка editable: ровно одна копия библиотеки — та, что в дереве.
+# Раньше setup ставил её тремя способами сразу (install -m 755 в ~/.local/bin,
+# cp -R в ~/.local/lib/brain и в ~/.local/share/brain/lib), а каждый файл
+# runtime/* подмешивал эти каталоги в sys.path сам. Расхождение версий было
+# штатным состоянием: правка в дереве не действовала до переустановки, а
+# полный прогон тестов мог подтянуть устаревший модуль и показать падение
+# кода, который давно исправлен.
+[tool.setuptools]
+package-dir = { "" = "runtime/lib" }
+# Плоские модули приходится перечислять: find находит только пакеты.
+py-modules = [
+    "brain_handoff_detector",
+    "brain_index",
+    "brain_launch_queue",
+    "brain_launch_watch",
+    "brain_learning",
+    "brain_provider",
+    "brain_sandbox_guard",
+    "brain_skill_check",
+    "brain_skill_parser",
+    "brain_task_parser",
+    "brain_tasks",
+    "brain_uiux_lint",
+    "brain_webhook",
+    "brain_workspace",
+]
+
+
+[tool.setuptools.packages.find]
+where = ["runtime/lib"]
+include = ["brain_*"]
+namespaces = false
+
+[project.scripts]
+# Точки входа для чисто питоновских утилит. Остальные CLI остаются скриптами:
+# они запускают bash-логику и не сводятся к вызову функции.
+brain-provider = "brain_cli.provider:main"
+brain-validate = "brain_cli.validate:main"
+brain-search = "brain_cli.search:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: fast in-process tests",
+    "integration: tests touching disk/git",
+]
+
+[tool.coverage.run]
+source = ["runtime/lib", "runtime/mcp"]
+omit = ["*/tests/*", "*/__pycache__/*"]

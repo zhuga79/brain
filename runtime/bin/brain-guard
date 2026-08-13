@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""brain-guard — проверка на персональные данные и секреты.
+
+Один детектор для всех точек, где данные могут утечь: индекс перед коммитом,
+рабочее дерево, вся история репозитория.
+
+Два набора правил:
+
+* **generic** — признаки, не зависящие от конкретных людей: адреса почты,
+  телефоны, ИНН, ОГРН, СНИЛС, номера паспортов, ключи API, приватные ключи.
+  Живёт в коде и потому может уехать в публичный репозиторий.
+* **named** — имена конкретных людей, организаций и дел. Живёт только в
+  локальном файле секретов: список сущностей сам является персональными
+  данными, публиковать его нельзя.
+
+Fail-closed: если файл секретов не найден, а проверка требует именных правил,
+guard отказывает, а не пропускает. Молчаливый пропуск здесь дороже ложной
+тревоги — по этому же принципу работает brain-publish.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SECRETS_CANDIDATES = (
+    os.environ.get("BRAIN_PUBLISH_SECRETS", ""),
+    ".publish-secrets.local",
+    str(Path.home() / ".config" / "brain" / "publish-secrets"),
+)
+
+# Признаки, не привязанные к конкретным людям. Пригодны для публичного CI.
+GENERIC = {
+    "адрес почты": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+    "телефон": r"(?<![\d-])\+7\s?\(?\d{3}\)?\s?\d{3}[- ]?\d{2}[- ]?\d{2}(?![\d-])",
+    "ИНН/ОГРН": r"\b(?:ИНН|ОГРНИ?П?)[\s:]*\d{10,15}\b",
+    "СНИЛС": r"\b\d{3}-\d{3}-\d{3}\s\d{2}\b",
+    "паспорт": r"\b(?:паспорт|серия)[\s:]*\d{4}\s?\d{6}\b",
+    "ключ API": r"\b(?:sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,})",
+    "приватный ключ": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "счёт": r"(?<!\d)\d{20}(?!\d)",
+}
+
+# Строки, где совпадение заведомо безобидно: примеры, тесты, заглушки.
+ALLOW = re.compile(
+    r"example\.(com|org)|@example|noreply|localhost|\btest@|\bsmoke@|\byou@|"
+    r"\bt@t\.com\b|user\.email|"
+    r"ромашка|placeholder|<[a-z-]+>|xxx|0000000000",
+    re.I,
+)
+
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".worktrees", ".venv", ".brain"}
+MAX_BYTES = 1_000_000
+
+
+def load_named_patterns(brain: Path) -> tuple[str, str]:
+    """Именные правила из локального файла секретов.
+
+    Возвращает (regex, путь). Пустой regex означает, что файла нет.
+    """
+    for cand in SECRETS_CANDIDATES:
+        if not cand:
+            continue
+        path = Path(cand)
+        if not path.is_absolute():
+            path = brain / cand
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(r"\s*PII_PATTERN=['\"](.+)['\"]\s*$", line)
+            if m:
+                return m.group(1), str(path)
+    return "", ""
+
+
+def scan_text(text: str, patterns: dict[str, str], named: str) -> list[tuple[int, str]]:
+    hits: list[tuple[int, str]] = []
+    named_re = re.compile(named, re.I) if named else None
+    for i, line in enumerate(text.splitlines(), 1):
+        if ALLOW.search(line):
+            continue
+        for label, pat in patterns.items():
+            if re.search(pat, line):
+                hits.append((i, label))
+        if named_re is not None and named_re.search(line):
+            hits.append((i, "именованная сущность"))
+    return hits
+
+
+class GuardError(RuntimeError):
+    """Проверку невозможно выполнить — это отказ, а не «чисто»."""
+
+
+def is_git_repo(brain: Path) -> bool:
+    res = subprocess.run(
+        ["git", "-C", str(brain), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, check=False,
+    )
+    return res.returncode == 0
+
+
+def walk_files(brain: Path) -> list[Path]:
+    """Обход дерева без git.
+
+    Нужен, потому что пустой список файлов молча превращал любую проверку в
+    «чисто»: каталог без git — обычное дело для собранного публичного среза
+    до git init, и рапортовать по нему успех нельзя.
+    """
+    out = []
+    for path in brain.rglob("*"):
+        if any(part in SKIP_DIRS for part in path.relative_to(brain).parts):
+            continue
+        if path.is_file():
+            out.append(path)
+    return out
+
+
+def tracked_files(brain: Path) -> list[Path]:
+    if not is_git_repo(brain):
+        return walk_files(brain)
+    res = subprocess.run(
+        ["git", "-C", str(brain), "ls-files", "-z"],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        raise GuardError(f"git ls-files завершился с кодом {res.returncode}: {res.stderr.strip()}")
+    files = [brain / n for n in res.stdout.split("\0") if n]
+    if not files and any(brain.iterdir()):
+        raise GuardError("git не вернул ни одного файла, хотя каталог не пуст")
+    return files
+
+
+def staged_files(brain: Path, added_only: bool = False) -> list[Path]:
+    """Файлы индекса. `added_only` — только заведённые этим коммитом.
+
+    Журнал операций, архив задач и выгрузки handoff несут имена по существу:
+    они фиксируют, что было сделано. Проверять их при каждом коммите — значит
+    остановить работу системы, которая сама их дописывает. Режим `added_only`
+    ловит другое: новый документ по делу, заводимый в репозитории системы.
+    Место такого документа — папка дела.
+    """
+    if not is_git_repo(brain):
+        raise GuardError("проверка индекса невозможна: каталог не является git-репозиторием")
+    res = subprocess.run(
+        ["git", "-C", str(brain), "diff", "--cached", "--name-only", "-z",
+         "--diff-filter=A" if added_only else "--diff-filter=ACMR"],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        raise GuardError(f"git diff завершился с кодом {res.returncode}: {res.stderr.strip()}")
+    return [brain / n for n in res.stdout.split("\0") if n]
+
+
+def scan_paths(paths: list[Path], patterns: dict[str, str], named: str) -> list[str]:
+    problems = []
+    for path in paths:
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_BYTES:
+                continue
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line_no, label in scan_text(text, patterns, named):
+            problems.append(f"{path}:{line_no} — {label}")
+    return problems
+
+
+def scan_history(brain: Path, named: str) -> list[str]:
+    """Поиск по всем версиям файлов. История переживает удаление файла."""
+    if not is_git_repo(brain):
+        raise GuardError("проверка истории невозможна: каталог не является git-репозиторием")
+    problems = []
+    patterns = dict(GENERIC)
+    if named:
+        patterns["именованная сущность"] = named
+    for label, pat in patterns.items():
+        res = subprocess.run(
+            ["git", "-C", str(brain), "log", "--all", "-S", pat, "--pickaxe-regex",
+             "--format=%h %s", "--max-count=20"],
+            capture_output=True, text=True, check=False,
+        )
+        for line in res.stdout.splitlines():
+            if line.strip():
+                problems.append(f"{line.strip()} — {label}")
+    return problems
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Проверка на персональные данные и секреты.")
+    ap.add_argument("scope", nargs="?", default="staged",
+                    choices=["staged", "tree", "history"],
+                    help="что проверять: индекс (по умолчанию), рабочее дерево, историю")
+    ap.add_argument("--brain", default=os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
+    ap.add_argument("--generic-only", action="store_true",
+                    help="только обезличенные признаки — режим для публичного CI")
+    ap.add_argument("--added-only", action="store_true",
+                    help="для индекса: только файлы, заведённые этим коммитом")
+    args = ap.parse_args()
+
+    brain = Path(args.brain).expanduser()
+    named, secrets_src = load_named_patterns(brain)
+
+    if not args.generic_only and not named:
+        # Fail-closed: без именных правил проверка неполна, и молчаливый
+        # пропуск опаснее отказа.
+        print("brain-guard: не найден файл с именными правилами", file=sys.stderr)
+        print("  ожидается PII_PATTERN='...' в .publish-secrets.local", file=sys.stderr)
+        print("  для публичного CI запускайте с --generic-only", file=sys.stderr)
+        return 2
+
+    try:
+        if args.scope == "history":
+            problems = scan_history(brain, "" if args.generic_only else named)
+            what = "истории"
+        else:
+            if args.scope == "staged":
+                paths = staged_files(brain, added_only=args.added_only)
+                what = "новых файлах индекса" if args.added_only else "индексе"
+            else:
+                paths = tracked_files(brain)
+                what = "рабочем дереве"
+            problems = scan_paths(paths, GENERIC, "" if args.generic_only else named)
+    except GuardError as exc:
+        # Невозможность проверить — отказ. Иначе guard рапортует «чисто» там,
+        # где он просто ничего не смотрел.
+        print(f"brain-guard: {exc}", file=sys.stderr)
+        return 2
+
+    if problems:
+        print(f"brain-guard: похоже на персональные данные в {what}:", file=sys.stderr)
+        for p in problems[:40]:
+            print(f"  {p}", file=sys.stderr)
+        if len(problems) > 40:
+            print(f"  ... и ещё {len(problems) - 40}", file=sys.stderr)
+        return 1
+
+    src = f", именные правила: {secrets_src}" if named and not args.generic_only else " (только обезличенные признаки)"
+    print(f"brain-guard: чисто в {what}{src}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

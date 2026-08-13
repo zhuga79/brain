@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Generate opt-in Brain compaction adapter profiles for CLI agents."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+
+PROVIDERS = ("claude", "codex", "gemini")
+
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def adapter_root(brain: Path) -> Path:
+    return brain / ".agent-configs" / "compact-adapters"
+
+
+def provider_paths(brain: Path) -> dict[str, Path]:
+    root = adapter_root(brain)
+    return {
+        "claude": root / "claude-settings.brain-compact.json",
+        "codex": root / "AGENTS.brain-compact.md",
+        "gemini": root / "GEMINI.brain-compact.md",
+    }
+
+
+def claude_profile() -> str:
+    return """{
+  "comment": "Opt-in Brain compact adapter profile. Review before merging into Claude settings.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Brain compact policy: prefer brain-compact --kind <kind> -- <command> for noisy commands. Do not rewrite human-provided commands silently.'"
+          }
+        ]
+      }
+    ]
+  },
+  "rollback": "Remove this merged hook block from Claude settings, or delete this profile if it was only staged."
+}
+"""
+
+
+def codex_profile() -> str:
+    return """# Brain Compact Adapter — Codex
+
+Opt-in guidance profile. Add this text to project AGENTS.md only after review.
+
+- Prefer `brain-compact --kind rg -- rg ...` for broad searches.
+- Prefer `brain-compact --kind test -- <test command>` for verbose test/build output.
+- Use `--raw-artifact <path>` when the full output may be needed for review.
+- Human commands and manual instructions override compaction.
+- Do not compact legal/source evidence unless the user explicitly accepts a summary.
+
+Rollback: remove this block from AGENTS.md and delete generated artifacts under `.brain/artifacts/`.
+"""
+
+
+def gemini_profile() -> str:
+    return """# Brain Compact Adapter — Gemini CLI
+
+Opt-in launch/profile guidance. Add to GEMINI.md only after review.
+
+Recommended manual shapes:
+
+```bash
+brain-compact --kind rg -- rg "<query>" .
+brain-compact --kind test -- bash tests/smoke.sh
+brain-run --role developer --task <id> | gemini -p "$(cat)" --output-format text
+```
+
+Rules:
+
+- Use `brain-compact` for noisy shell output before sending it to Gemini.
+- Keep raw artifacts for truncated output.
+- Do not enable this profile automatically; it is a reviewed operator choice.
+
+Rollback: remove this block from GEMINI.md and delete generated artifacts under `.brain/artifacts/`.
+"""
+
+
+def selected(provider: str) -> tuple[str, ...]:
+    if provider == "all":
+        return PROVIDERS
+    return (provider,)
+
+
+def render(provider: str) -> str:
+    return {
+        "claude": claude_profile,
+        "codex": codex_profile,
+        "gemini": gemini_profile,
+    }[provider]()
+
+
+def print_plan(brain: Path, providers: tuple[str, ...], action: str) -> None:
+    paths = provider_paths(brain)
+    print(f"Brain: {brain}")
+    print(f"Adapter dir: {adapter_root(brain)}")
+    print(f"Action: {action}")
+    for provider in providers:
+        print(f"  {provider}: {paths[provider]}")
+    print("")
+    print("Opt-in contract:")
+    print("  dry-run has no side effects")
+    print("  install writes staged profile files only")
+    print("  no global Claude/Codex/Gemini config is modified")
+    print("  rollback: brain-compact-adapters uninstall --provider <name|all>")
+
+
+def cmd_install(brain: Path, providers: tuple[str, ...], dry_run: bool) -> int:
+    print_plan(brain, providers, "install (dry-run)" if dry_run else "install")
+    if dry_run:
+        return 0
+    paths = provider_paths(brain)
+    adapter_root(brain).mkdir(parents=True, exist_ok=True)
+    for provider in providers:
+        paths[provider].write_text(render(provider), encoding="utf-8")
+        print(f"written: {paths[provider]}")
+    return 0
+
+
+def cmd_uninstall(brain: Path, providers: tuple[str, ...], dry_run: bool) -> int:
+    print_plan(brain, providers, "uninstall (dry-run)" if dry_run else "uninstall")
+    if dry_run:
+        return 0
+    paths = provider_paths(brain)
+    for provider in providers:
+        p = paths[provider]
+        if p.exists():
+            p.unlink()
+            print(f"removed: {p}")
+    root = adapter_root(brain)
+    if root.exists() and not any(root.iterdir()):
+        shutil.rmtree(root)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate opt-in Brain compact adapter profiles.")
+    parser.add_argument("action", choices=("dry-run", "install", "uninstall"))
+    parser.add_argument("--provider", choices=PROVIDERS + ("all",), default="all")
+    parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
+    args = parser.parse_args(argv)
+    brain = brain_path(args.brain)
+    providers = selected(args.provider)
+    if args.action == "dry-run":
+        return cmd_install(brain, providers, dry_run=True)
+    if args.action == "install":
+        return cmd_install(brain, providers, dry_run=False)
+    if args.action == "uninstall":
+        return cmd_uninstall(brain, providers, dry_run=False)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

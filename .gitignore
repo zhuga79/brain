@@ -1,0 +1,59 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+.DS_Store
+*.swp
+*.tmp
+
+# Brain system transient data
+.brain/
+.brain/index/
+.brain/vector/
+.brain/orchestrator/
+.brain/token-metrics.jsonl
+.brain/skills/fake_pin.md
+.brain/artifacts/
+.locks/
+.agent-configs/
+.provider-health.json
+council/
+learning/
+.agents/
+.codex/
+.secrets/
+
+# Local editor / CLI state
+.coverage
+.gemini/
+.gigaide/
+.idea/
+.vscode/
+.policy/
+
+# Local scratch artifacts
+.worktrees/
+base.md
+local.md
+remote.md
+merged.md
+coverage_report.txt
+test-limit.json
+test-limit.md
+test_cli.sh
+*-local-command-caveatcaveat-the-messages-below.txt
+wiki/stale-test.md
+
+# Keep documentation tracked
+!wiki/
+!tasks/
+!roles/
+!teams/
+!doctrine/
+!prd/
+!raw/
+!spec/
+!MEMORY.md
+
+# Local publish secrets (client names / PII markers)
+.publish-secrets.local

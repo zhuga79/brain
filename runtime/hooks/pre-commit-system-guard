@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# pre-commit-system-guard — системный слой не меняется агентом в главной ветке.
+#
+# Слой данных (tasks/, wiki/, raw/, council/, prd/) агент правит по ходу работы,
+# и автокоммит его стажирует. Системный слой (roles/, doctrine/, runtime/,
+# config/, tests/, MEMORY.md и т. д.) описывает, КАК агент работает: правка
+# меняет поведение всех будущих запусков и должна проходить обзор человеком.
+#
+# Поэтому агентский коммит с системными файлами в главной ветке отклоняется, а
+# работа предлагается перенести в ветку agent/<task-id>. Для человека хук
+# молчит: признак агента — переменная окружения BRAIN_AGENT_ID.
+set -euo pipefail
+
+MAIN_BRANCHES="${BRAIN_MAIN_BRANCHES:-main master}"
+AGENT="${BRAIN_AGENT_ID:-}"
+
+# Человек коммитит без ограничений — обзор и есть он сам.
+[ -n "$AGENT" ] || exit 0
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+case " $MAIN_BRANCHES " in
+  *" $branch "*) ;;
+  *) exit 0 ;;   # уже в ветке — ровно то, чего мы хотим
+esac
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+[ -n "$staged" ] || exit 0
+
+system="$(printf '%s\n' "$staged" | python3 -c '
+import sys
+from brain_core.layers import system_paths_among
+
+paths = [line.strip() for line in sys.stdin if line.strip()]
+for path in system_paths_among(paths):
+    print(path)
+' 2>/dev/null || true)"
+
+[ -n "$system" ] || exit 0
+
+task="${BRAIN_TASK_ID:-}"
+target="$(python3 -c "
+from brain_core.layers import agent_branch
+print(agent_branch('${task:-unscoped}'))
+" 2>/dev/null || echo "agent/${task:-unscoped}")"
+
+{
+  echo "ОТКАЗ: агент $AGENT правит системный слой в ветке $branch."
+  echo
+  echo "Системные файлы в индексе:"
+  printf '  %s\n' $system
+  echo
+  echo "Такая правка меняет поведение всех будущих запусков и требует обзора."
+  echo "Перенеси работу в ветку задачи:"
+  echo
+  echo "    git switch -c $target"
+  echo "    git commit ..."
+  echo
+  echo "Если это осознанное решение человека — сними BRAIN_AGENT_ID."
+} >&2
+exit 1

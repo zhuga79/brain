@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# brain-ops {watch|refresh} — Background operational maintenance.
+#
+# watch   : run a loop that refreshes provider health, metrics and gates.
+# refresh : run one-shot refresh of all data supply components.
+
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+
+refresh() {
+  echo ">>> [brain-ops] Refreshing data supply..."
+  
+  # 1. Provider health (probes)
+  "${_BIN_DIR}/brain-provider" collect >/dev/null 2>&1 || true
+  
+  # 2. Token metrics
+  "${_BIN_DIR}/brain-compact" --metrics-only >/dev/null 2>&1 || true
+  
+  # 3. Policy gates
+  "${_BIN_DIR}/brain-policy" check >/dev/null 2>&1 || true
+  
+  # 4. Index rebuild (best effort)
+  "${_BIN_DIR}/brain-index" rebuild --with-obsidian >/dev/null 2>&1 || true
+  
+  echo ">>> [brain-ops] Done."
+}
+
+usage() {
+  cat <<USAGE
+brain-ops — фоновое обслуживание и актуализация данных
+
+  brain-ops refresh       актуализировать здоровье провайдеров, метрики и политики
+  brain-ops watch         запустить цикл фонового обновления (300с)
+
+USAGE
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  refresh) refresh ;;
+  watch)
+    interval="${BRAIN_OPS_INTERVAL:-300}"
+    echo ">>> [brain-ops] Starting ops watch loop (interval: ${interval}s)"
+    while true; do
+      refresh
+      sleep "$interval"
+    done
+    ;;
+  *) usage; exit 1 ;;
+esac

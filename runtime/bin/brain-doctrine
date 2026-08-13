@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Read-only doctrine browser for Brain."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def doctrine_dir(brain: Path) -> Path:
+    return brain / "doctrine"
+
+
+def list_doctrines(brain: Path) -> list[dict[str, str]]:
+    d = doctrine_dir(brain)
+    if not d.exists():
+        return []
+    result = []
+    for f in sorted(d.glob("*.md")):
+        result.append({"slug": f.stem, "path": str(f)})
+    return result
+
+
+def show_doctrine(brain: Path, slug: str) -> dict[str, str] | None:
+    d = doctrine_dir(brain)
+    f = d / f"{slug}.md"
+    if not f.exists():
+        return None
+    return {"slug": slug, "path": str(f), "content": f.read_text(encoding="utf-8", errors="replace")}
+
+
+def search_doctrines(brain: Path, query: str) -> list[dict[str, str]]:
+    query_lower = query.lower()
+    results = []
+    for entry in list_doctrines(brain):
+        f = Path(entry["path"])
+        content = f.read_text(encoding="utf-8", errors="replace")
+        snippet = ""
+        for line in content.splitlines():
+            if query_lower in line.lower():
+                snippet = line.strip()
+                break
+        if snippet:
+            results.append({"slug": entry["slug"], "path": entry["path"], "snippet": snippet})
+    return results
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    doctrines = list_doctrines(brain)
+    if args.json:
+        print(json.dumps({"doctrines": doctrines}, ensure_ascii=False, indent=2))
+    else:
+        if not doctrines:
+            print("(no doctrine files found)")
+        else:
+            for entry in doctrines:
+                print(entry["slug"])
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    result = show_doctrine(brain, args.slug)
+    if result is None:
+        print(f"ERROR: doctrine not found: {args.slug}", file=os.sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(result["content"], end="")
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    results = search_doctrines(brain, args.query)
+    if args.json:
+        print(json.dumps({"query": args.query, "results": results}, ensure_ascii=False, indent=2))
+    else:
+        if not results:
+            print("(no matches found)")
+        else:
+            for r in results:
+                print(f"{r['slug']}: {r['snippet']}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Read-only doctrine browser for Brain.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+commands:
+  list                    list doctrine slugs
+  show <slug>             print content of a doctrine file
+  search <query>          search across all doctrine files
+
+examples:
+  brain-doctrine list
+  brain-doctrine list --json
+  brain-doctrine show tax-boundaries
+  brain-doctrine show tax-boundaries --json
+  brain-doctrine search "accountant"
+  brain-doctrine search "accountant" --json
+""",
+    )
+    parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    list_p = subparsers.add_parser("list", help="List doctrine slugs.")
+    list_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    show_p = subparsers.add_parser("show", help="Print content of a doctrine file.")
+    show_p.add_argument("slug", help="Doctrine slug (filename without .md).")
+    show_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    search_p = subparsers.add_parser("search", help="Search across all doctrine files.")
+    search_p.add_argument("query", help="Case-insensitive search query.")
+    search_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    args = parser.parse_args()
+
+    if args.command == "list":
+        return cmd_list(args)
+    elif args.command == "show":
+        return cmd_show(args)
+    elif args.command == "search":
+        return cmd_search(args)
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

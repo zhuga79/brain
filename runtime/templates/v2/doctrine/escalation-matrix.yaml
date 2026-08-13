@@ -1,0 +1,183 @@
+# Escalation matrix — машиночитаемый единственный источник матрицы зон.
+#
+# Раньше зоны (зона → primary → escalate) и налоговые этапы 1–4 жили только
+# прозой в MEMORY.md (и её копии в runtime/templates/v2/MEMORY.md): матрица не
+# исполнялась, не валидировалась и расходилась с roles/ бесшумно. Теперь файл
+# — единственный источник, а brain-validate проверяет, что каждая зона
+# ссылается на существующие роли. MEMORY.md ссылается на этот файл и таблицу
+# не дублирует.
+#
+# Схема (ограниченное подмножество YAML, парсер в runtime/lib/brain_wiki/
+# escalation.py — без внешних зависимостей; формат вне подмножества — ошибка):
+#   version: int                    — версия схемы
+#   updated: YYYY-MM-DD             — дата обновления
+#   zones:     список общих зон
+#   tax_stages: список налоговых этапов 1–4
+# Каждый элемент списка:
+#   id:       уникальный slug
+#   name:     название зоны/этапа
+#   primary:  [список ролей, непустой] — кто решает по умолчанию
+#   escalate: [список ролей] — кого привлекают на консультацию/council
+#   council:  (опц.) условие, когда нужен council
+#   note:     (опц.) пояснение к escalate/правилам зоны
+#
+# Подмножество: `#`-комментарии, top-level `key: значение`, список после
+# `key:` (элементы `  - `), подполя элемента (`    key: значение`), inline
+# списки `[a, b]`, простые, одинарно- и двойно-кавычённые скаляры.
+version: 1
+updated: 2026-08-11
+
+zones:
+  - id: contract-text
+    name: Текст договора, оферты, устава
+    primary: [lawyer]
+    escalate: [compliance, tax-advisor, negotiator]
+
+  - id: fz152-single-docs
+    name: ФЗ-152/187/259 как разовые документы
+    primary: [lawyer]
+    escalate: [compliance]
+
+  - id: fz152-regular-process
+    name: ФЗ-152/187/259 как регулярный процесс
+    primary: [compliance]
+    escalate: [lawyer]
+
+  - id: aml-115fz
+    name: 115-ФЗ AML
+    primary: [compliance]
+    escalate: [tax-advisor]
+    note: tax-advisor — источники средств
+
+  - id: cashflow-unit-economics
+    name: Cashflow, юнит-эк., pricing
+    primary: [cfo]
+    escalate: [tax-advisor, accountant, strategist]
+
+  - id: strategy-positioning
+    name: Стратегия / позиционирование
+    primary: [strategist]
+    escalate: [growth-analyst, cfo, product]
+
+  - id: copy
+    name: Текст коммуникации
+    primary: [copywriter]
+    escalate: [designer, strategist, negotiator]
+
+  - id: visual-language
+    name: Визуальный язык, UI, brand
+    primary: [designer]
+    escalate: [product, developer, reviewer, copywriter]
+
+  - id: visual-taste
+    name: Визуальный вкус UI, anti-slop
+    primary: [taste-reviewer]
+    escalate: [designer, product, impeccable-reviewer]
+
+  - id: ui-structure-implementation
+    name: Структура/реализуемость UI
+    primary: [impeccable-reviewer]
+    escalate: [designer, developer, qa, reviewer, taste-reviewer]
+
+  - id: negotiation
+    name: Переговоры (тактика, скрипт)
+    primary: [negotiator]
+    escalate: [lawyer, cfo]
+    note: "lawyer — после, cfo — структура"
+
+  - id: architecture
+    name: Архитектурные решения
+    primary: [architect]
+    escalate: [reviewer, security]
+    note: security — если AppSec/OpSec
+
+  - id: feature-implementation
+    name: Реализация фичи
+    primary: [developer]
+    escalate: [architect]
+
+  - id: code-quality
+    name: Качество кода
+    primary: [reviewer]
+    escalate: [architect]
+
+  - id: appsec
+    name: AppSec/OpSec, секреты, write-gates
+    primary: [security]
+    escalate: [architect, reviewer, compliance]
+
+  - id: product
+    name: Что и зачем делаем (продукт)
+    primary: [product]
+    escalate: [strategist, growth-analyst]
+
+  - id: project-risks
+    name: Сроки/бюджет/риски проекта
+    primary: [pm]
+    escalate: [cfo, delivery]
+
+  - id: flow-rhythm
+    name: Поток работы, ритмы
+    primary: [delivery]
+    escalate: [pm]
+
+tax_stages:
+  - id: tax-stage-1
+    name: Этап 1 — Учёт операции, первичка, ОСВ
+    primary: [accountant]
+    escalate: [tax-advisor]
+    council: только при спорной норме
+
+  - id: tax-stage-2
+    name: Этап 2 — Расчёт налога, выбор режима, льготы
+    primary: [tax-advisor]
+    escalate: []
+    council: не требуется, если данные переданы от accountant
+
+  - id: tax-stage-3a
+    name: Этап 3a — Договор влияет на налоговую квалификацию
+    primary: [tax-advisor]
+    escalate: [lawyer]
+    council: обязателен
+
+  - id: tax-stage-3b
+    name: Этап 3b — Самозанятый, дробление, ст. 54.1 НК
+    primary: [tax-advisor]
+    escalate: [lawyer, compliance]
+    council: обязателен
+
+  - id: tax-stage-3c
+    name: Этап 3c — Валютный контроль (173-ФЗ + НК)
+    primary: [tax-advisor]
+    escalate: [compliance, lawyer]
+    council: обязателен
+
+  - id: tax-stage-3d
+    name: Этап 3d — Налоговая льгота (ИТ, Сколково)
+    primary: [tax-advisor]
+    escalate: [lawyer, compliance]
+    council: обязателен
+
+  - id: tax-stage-4a
+    name: Этап 4a — Требование/пояснения от ФНС
+    primary: [tax-advisor]
+    escalate: [lawyer]
+    council: не требуется, если по существу простой вопрос
+
+  - id: tax-stage-4b
+    name: Этап 4b — Возражения на акт, апелляция в УФНС
+    primary: [lawyer, tax-advisor]
+    escalate: []
+    council: обязателен
+
+  - id: tax-stage-4c
+    name: Этап 4c — Суд по налоговому спору
+    primary: [lawyer]
+    escalate: [tax-advisor]
+    council: обязателен
+
+  - id: tax-stage-4d
+    name: Этап 4d — Уголовный налоговый риск (198, 199 УК)
+    primary: [lawyer]
+    escalate: [tax-advisor]
+    council: обязателен

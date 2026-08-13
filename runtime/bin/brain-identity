@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Manage cryptographic agent identities for Federation (Hotfix 23.1)."""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+def get_identity_dir() -> Path:
+    d = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain"))) / ".identities"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def cmd_init(args: argparse.Namespace) -> int:
+    d = get_identity_dir()
+    key_path = d / f"{args.agent_id}_ed25519"
+    if key_path.exists():
+        print(f"Identity for {args.agent_id} already exists.")
+        return 0
+        
+    print(f"Generating ED25519 identity for {args.agent_id}...")
+    res = subprocess.run([
+        "ssh-keygen", "-t", "ed25519", "-N", "", "-C", args.agent_id, "-f", str(key_path)
+    ], capture_output=True, text=True)
+    
+    if res.returncode != 0:
+        print(f"Error generating key:\n{res.stderr}", file=sys.stderr)
+        return 1
+        
+    pub = Path(f"{key_path}.pub").read_text().strip()
+    print(f"Created: {pub}")
+    return 0
+
+def cmd_sign(args: argparse.Namespace) -> int:
+    d = get_identity_dir()
+    key_path = d / f"{args.agent_id}_ed25519"
+    if not key_path.exists():
+        print(f"Identity {args.agent_id} not found. Run init first.", file=sys.stderr)
+        return 1
+        
+    res = subprocess.run([
+        "ssh-keygen", "-Y", "sign", "-n", "brain", "-f", str(key_path), args.file
+    ], capture_output=True, text=True)
+    
+    if res.returncode != 0:
+        print(f"Error signing:\n{res.stderr}", file=sys.stderr)
+        return 1
+        
+    print(f"Signature created at {args.file}.sig")
+    return 0
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    d = get_identity_dir()
+    pub_path = d / f"{args.agent_id}_ed25519.pub"
+    if not pub_path.exists():
+        print(f"Public key for {args.agent_id} not found locally.", file=sys.stderr)
+        return 1
+        
+    pub_key = pub_path.read_text().strip()
+    
+    allowed_signers = d / "allowed_signers"
+    allowed_signers.write_text(f"{args.agent_id} {pub_key}\n")
+    
+    res = subprocess.run([
+        "ssh-keygen", "-Y", "verify", "-n", "brain", "-f", str(allowed_signers), 
+        "-I", args.agent_id, "-s", args.sig
+    ], input=Path(args.file).read_bytes(), capture_output=True)
+    
+    if res.returncode != 0:
+        print(f"Verification failed:\n{res.stderr.decode()}", file=sys.stderr)
+        return 1
+        
+    print(f"Good signature for {args.agent_id}")
+    return 0
+
+def main():
+    parser = argparse.ArgumentParser(description="Brain Crypto Identity Manager")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    
+    p_init = sub.add_parser("init", help="Initialize a new agent identity")
+    p_init.add_argument("--agent-id", required=True)
+    p_init.set_defaults(func=cmd_init)
+    
+    p_sign = sub.add_parser("sign", help="Sign a file")
+    p_sign.add_argument("--agent-id", required=True)
+    p_sign.add_argument("--file", required=True)
+    p_sign.set_defaults(func=cmd_sign)
+    
+    p_verify = sub.add_parser("verify", help="Verify a signature")
+    p_verify.add_argument("--agent-id", required=True)
+    p_verify.add_argument("--file", required=True)
+    p_verify.add_argument("--sig", required=True, help="Path to .sig file")
+    p_verify.set_defaults(func=cmd_verify)
+    
+    args = parser.parse_args()
+    sys.exit(args.func(args))
+
+if __name__ == "__main__":
+    main()

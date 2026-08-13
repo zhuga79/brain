@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Compact noisy CLI output while preserving raw artifacts when needed."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+
+ERROR_RE = re.compile(
+    r"(error|failed|failure|traceback|exception|assertion|panic|fatal|segmentation|timeout)",
+    re.I,
+)
+
+
+
+from brain_core.paths import brain_path  # одна реализация на всю систему
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text.encode("utf-8")) + 3) // 4) if text else 0
+
+
+def unique_keep_order(lines: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = line.rstrip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+
+def head_tail(lines: list[str], head: int = 80, tail: int = 20) -> tuple[list[str], bool]:
+    if len(lines) <= head + tail:
+        return lines, False
+    return (
+        lines[:head]
+        + [f"... truncated {len(lines) - head - tail} line(s) ..."]
+        + lines[-tail:],
+        True,
+    )
+
+
+def compact_generic(text: str, limit: int) -> tuple[str, bool]:
+    lines = text.splitlines()
+    important = [line for line in lines if ERROR_RE.search(line)]
+    compacted, truncated = head_tail(unique_keep_order(lines), head=max(20, limit - 20), tail=20)
+    if important:
+        compacted = ["# Important lines"] + unique_keep_order(important[:60]) + ["", "# Compacted output"] + compacted
+    return "\n".join(compacted) + ("\n" if compacted else ""), truncated or len(compacted) < len(lines)
+
+
+def compact_listing(text: str, limit: int) -> tuple[str, bool]:
+    groups: dict[str, list[str]] = defaultdict(list)
+    loose: list[str] = []
+    for line in text.splitlines():
+        raw = line.rstrip()
+        if not raw:
+            continue
+        path = raw.split(" -> ", 1)[0]
+        parent = str(Path(path).parent)
+        if parent in ("", "."):
+            loose.append(raw)
+        else:
+            groups[parent].append(Path(path).name)
+    out: list[str] = []
+    if loose:
+        out.append("# Root")
+        out.extend(loose[:limit])
+    for parent in sorted(groups):
+        names = groups[parent]
+        out.append(f"# {parent} ({len(names)} item(s))")
+        out.extend(f"  {name}" for name in names[:12])
+        if len(names) > 12:
+            out.append(f"  ... {len(names) - 12} more")
+    compacted, truncated = head_tail(out, head=limit, tail=10)
+    return "\n".join(compacted) + ("\n" if compacted else ""), truncated or len(out) < sum(len(v) for v in groups.values()) + len(loose)
+
+
+def compact_search(text: str, limit: int) -> tuple[str, bool]:
+    by_file: dict[str, list[str]] = defaultdict(list)
+    loose: list[str] = []
+    important: list[str] = []
+    for line in text.splitlines():
+        if ERROR_RE.search(line):
+            important.append(line)
+        if ":" in line:
+            file_name, rest = line.split(":", 1)
+            if file_name and not file_name.isspace():
+                by_file[file_name].append(rest)
+                continue
+        loose.append(line)
+    out: list[str] = []
+    if important:
+        out.append("# Important lines")
+        out.extend(unique_keep_order(important[:60]))
+    for file_name in sorted(by_file):
+        matches = by_file[file_name]
+        out.append(f"# {file_name} ({len(matches)} match(es))")
+        for match in matches[:5]:
+            out.append(f"  {match}")
+        if len(matches) > 5:
+            out.append(f"  ... {len(matches) - 5} more match(es)")
+    if loose:
+        out.append("# Other")
+        out.extend(unique_keep_order(loose[:20]))
+    compacted, truncated = head_tail(out, head=limit, tail=10)
+    return "\n".join(compacted) + ("\n" if compacted else ""), truncated or sum(max(0, len(v) - 5) for v in by_file.values()) > 0
+
+
+def compact_git(text: str, limit: int) -> tuple[str, bool]:
+    lines = text.splitlines()
+    files = []
+    for line in lines:
+        m = re.match(r"\s*(modified|deleted|new file|renamed|M|A|D|\?\?)\s*:?\s+(.+)$", line)
+        if m:
+            files.append(line.strip())
+    diff_headers = [line for line in lines if line.startswith("diff --git ") or line.startswith("+++ ") or line.startswith("--- ")]
+    out = []
+    if files:
+        out.append("# Changed files")
+        out.extend(unique_keep_order(files[:80]))
+    if diff_headers:
+        out.append("# Diff headers")
+        out.extend(unique_keep_order(diff_headers[:80]))
+    if not out:
+        return compact_generic(text, limit)
+    compacted, truncated = head_tail(out, head=limit, tail=10)
+    return "\n".join(compacted) + "\n", truncated or len(out) < len(files) + len(diff_headers) + (2 if files and diff_headers else 1)
+
+
+def compact_test(text: str, limit: int) -> tuple[str, bool]:
+    lines = text.splitlines()
+    important = unique_keep_order([line for line in lines if ERROR_RE.search(line)])
+    summaries = unique_keep_order([
+        line for line in lines
+        if re.search(r"(passed|failed|skipped|errors?|failures?|ALL TESTS PASSED|FAILED)", line, re.I)
+    ])
+    out = []
+    if important:
+        out.append("# Failures / errors")
+        out.extend(important[:80])
+    if summaries:
+        out.append("# Summaries")
+        out.extend(summaries[-40:])
+    if not out:
+        out.extend(lines[-min(limit, 80):])
+    compacted, truncated = head_tail(out, head=limit, tail=10)
+    return "\n".join(compacted) + ("\n" if compacted else ""), truncated or len(out) < len(lines)
+
+
+def compact(kind: str, text: str, limit: int) -> tuple[str, bool]:
+    normalized = kind.replace("_", "-").lower()
+    if normalized in ("ls", "find", "tree", "listing"):
+        return compact_listing(text, limit)
+    if normalized in ("rg", "grep", "search"):
+        return compact_search(text, limit)
+    if normalized.startswith("git"):
+        return compact_git(text, limit)
+    if normalized in ("test", "pytest", "smoke", "build", "lint"):
+        return compact_test(text, limit)
+    return compact_generic(text, limit)
+
+
+def run_command(command: list[str]) -> tuple[int, str]:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        return 127, f"{exc}\n"
+    parts = [f"$ {' '.join(command)}", f"exit_code: {result.returncode}"]
+    if result.stdout:
+        parts.extend(["--- stdout ---", result.stdout.rstrip("\n")])
+    if result.stderr:
+        parts.extend(["--- stderr ---", result.stderr.rstrip("\n")])
+    return result.returncode, "\n".join(parts) + "\n"
+
+
+def write_artifact(path_arg: str, raw: str) -> str:
+    path = Path(path_arg).expanduser() if path_arg else brain_path() / ".brain" / "artifacts" / f"compact-{int(time.time())}.log"
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw, encoding="utf-8")
+        return str(path)
+    except OSError:
+        if path_arg:
+            raise
+        fallback = Path.cwd() / ".brain" / "artifacts" / f"compact-{int(time.time())}.log"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        fallback.write_text(raw, encoding="utf-8")
+        return str(fallback)
+
+
+def append_metrics(brain: Path, payload: dict[str, Any]) -> str:
+    path = brain / ".brain" / "token-metrics.jsonl"
+    line = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+        return str(path)
+    except OSError:
+        fallback = Path.cwd() / ".brain" / "token-metrics.jsonl"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        with fallback.open("a", encoding="utf-8") as f:
+            f.write(line)
+        return str(fallback)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Compact CLI output for model-facing use.")
+    parser.add_argument("--kind", default="generic", help="Compactor kind: ls/find/rg/git/test/generic.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON with metrics and compact output.")
+    parser.add_argument("--raw-artifact", default="", help="Path for full raw output when truncation occurs.")
+    parser.add_argument("--limit-lines", type=int, default=120, help="Approximate compact output line cap.")
+    parser.add_argument("--provider", default="", help="Provider label for token metrics.")
+    parser.add_argument("--role", default="", help="Brain role label for token metrics.")
+    parser.add_argument("--session", default="", help="Session label for token metrics.")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command after --.")
+    args = parser.parse_args(argv)
+    if args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    if args.command:
+        exit_code, raw = run_command(args.command)
+    else:
+        exit_code = 0
+        raw = sys.stdin.read()
+    compacted, truncated = compact(args.kind, raw, max(20, args.limit_lines))
+    # Safeguard: if "compaction" inflates output (overhead dominates on small/diverse
+    # input), fall back to raw and clear truncated flag. Token Economy must never
+    # cost more than passthrough.
+    if not truncated and len(compacted.encode("utf-8")) >= len(raw.encode("utf-8")):
+        compacted = raw
+    artifact = write_artifact(args.raw_artifact, raw) if truncated else ""
+    if artifact and not args.json:
+        compacted = compacted.rstrip("\n") + f"\n\n[raw artifact] {artifact}\n"
+    raw_bytes = len(raw.encode("utf-8"))
+    compact_bytes = len(compacted.encode("utf-8"))
+    payload: dict[str, Any] = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "kind": args.kind,
+        "provider": args.provider,
+        "role": args.role,
+        "session": args.session,
+        "command": " ".join(args.command) if args.command else "stdin",
+        "exit_code": exit_code,
+        "raw_bytes": raw_bytes,
+        "compact_bytes": compact_bytes,
+        "raw_tokens_est": estimate_tokens(raw),
+        "compact_tokens_est": estimate_tokens(compacted),
+        "savings_percent": round((1 - compact_bytes / raw_bytes) * 100, 2) if raw_bytes else 0,
+        "truncated": truncated,
+        "raw_artifact": artifact,
+        "output": compacted,
+    }
+    metrics_payload = {k: v for k, v in payload.items() if k != "output"}
+    metrics_path = append_metrics(brain_path(), metrics_payload)
+    payload["metrics_path"] = metrics_path
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(compacted, end="")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

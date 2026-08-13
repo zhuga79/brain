@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Backup Brain secrets to Google Drive."""
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+def get_gdrive_path(email: str) -> Path | None:
+    # Try finding in standard GVFS mount point
+    uid = os.getuid()
+    gvfs_dir = Path(f"/run/user/{uid}/gvfs")
+    
+    if "@" in email:
+        user_part, host_part = email.split("@", 1)
+    else:
+        user_part, host_part = email, ""
+
+    if not gvfs_dir.exists():
+        return None
+
+    # Mounts look like: google-drive:host=gmail.com,user=zhukovga
+    # Match host and user exactly. A substring test is unsafe here: several
+    # accounts can be mounted at once, and a loose match would silently pick
+    # somebody else's Drive — this function decides where .secrets gets copied.
+    for d in gvfs_dir.iterdir():
+        if not d.name.startswith("google-drive:"):
+            continue
+        fields = dict(
+            kv.split("=", 1)
+            for kv in d.name.split(":", 1)[1].split(",")
+            if "=" in kv
+        )
+        if fields.get("user") != user_part:
+            continue
+        if host_part and fields.get("host") != host_part:
+            continue
+        return d
+    return None
+
+def main():
+    brain_path = Path(os.environ.get("BRAIN_PATH", Path.home() / "brain"))
+    # In this workspace it's typically $PROJECT_ROOT but we respect BRAIN_PATH
+    # Just in case, let's also check the actual project dir if run directly here
+    if not brain_path.exists():
+        brain_path = Path(__file__).resolve().parent.parent.parent
+
+    secrets_dir = brain_path / ".secrets"
+    
+    if not secrets_dir.exists():
+        print(f"No secrets directory found at {secrets_dir}")
+        return 1
+        
+    email = os.environ.get("BRAIN_BACKUP_GDRIVE_EMAIL", "").strip()
+    if not email:
+        print("BRAIN_BACKUP_GDRIVE_EMAIL is not set — cannot locate the Google Drive mount.")
+        print("Set it to the account whose Drive is mounted via gvfs, e.g.")
+        print("  export BRAIN_BACKUP_GDRIVE_EMAIL=you@example.com")
+        return 1
+
+    gdrive_path = get_gdrive_path(email)
+    
+    if not gdrive_path:
+        print(f"Google Drive for {email} not found in /run/user/{os.getuid()}/gvfs/")
+        print("Please ensure it is mounted via your file manager.")
+        
+        # Fallback to typical rclone/insync paths
+        fallback_dirs = [Path.home() / "Google Drive", Path.home() / "gdrive"]
+        for fb in fallback_dirs:
+            if fb.exists():
+                gdrive_path = fb
+                break
+        
+        if not gdrive_path:
+            return 1
+            
+    print(f"Found Google Drive mount at: {gdrive_path}")
+    
+    # GVFS Google Drive has a root with Shared and My Drive. We need to find My Drive (usually a long alphanumeric ID)
+    my_drive_path = None
+    for d in gdrive_path.iterdir():
+        if d.is_dir() and d.name != "GVfsSharedWithMe":
+            my_drive_path = d
+            break
+            
+    if not my_drive_path:
+        my_drive_path = gdrive_path
+        
+    backup_dest = my_drive_path / "Brain_Backup" / ".secrets"
+    
+    print(f"Backing up {secrets_dir} to {backup_dest}...")
+    try:
+        # GVFS exposes a standard FUSE filesystem, so we can use standard filesystem operations
+        backup_dest.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["rm", "-rf", str(backup_dest)], check=False)
+        
+        # We use cp -r to perform the recursive copy
+        res = subprocess.run(["cp", "-r", str(secrets_dir), str(backup_dest.parent)], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"Failed to copy: {res.stderr}")
+            return 1
+            
+        print("Backup successful.")
+    except Exception as e:
+        print(f"Failed to backup to Google Drive: {e}")
+        return 1
+        
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

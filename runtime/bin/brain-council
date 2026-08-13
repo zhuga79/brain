@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# brain-council {start|status|synthesize|list} <task-id>
+# Поддерживает team:<name> — разворачивает в список ролей из ~/brain/teams/<name>.md
+set -e
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+mkdir -p "$COUNCIL"
+
+# Развернуть team:<name> -> список ролей
+expand_teams() {
+  local input="$1"
+  local out=""
+  for token in $(echo "$input" | tr ',' ' '); do
+    token=$(echo "$token" | tr -d ' []')
+    [ -z "$token" ] && continue
+    if [[ "$token" == team:* ]]; then
+      local team_name="${token#team:}"
+      local team_file="$TEAMS/$team_name.md"
+      if [ ! -f "$team_file" ]; then
+        echo "no such team: $team_name (looked at $team_file)" >&2
+        return 1
+      fi
+      # вытащить roles: [a, b, c] из team-файла
+      local team_roles=$(grep -E '^roles:' "$team_file" | head -1 \
+        | sed -E 's/.*\[(.*)\].*/\1/' | tr ',' ' ')
+      out="$out $team_roles"
+    else
+      out="$out $token"
+    fi
+  done
+  # дедуп + trim
+  echo "$out" | tr ' ' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ' '
+}
+
+cmd="${1:-}"; id="${2:-}"
+# id уходит в имена каталогов council/<id>/ и в собираемые команды.
+[ -n "$id" ] && { validate_id "идентификатор задачи" "$id" || exit 2; }
+case "$cmd" in
+  start)
+    [ -z "$id" ] && { echo "task id required"; exit 1; }
+    raw=$(awk -v id="$id" '
+      $0 ~ "- \\[.\\]" && $0 ~ id { found=1; next }
+      found && /^- \[/ { exit }
+      found && /^##/ { exit }
+      found && /council:/ { gsub(/.*council: *\[/, ""); gsub(/\].*/, ""); print; exit }
+    ' "$A")
+    [ -z "$raw" ] && { echo "no council: field on $id"; exit 1; }
+    roles=$(expand_teams "$raw") || exit 1
+    [ -z "$roles" ] && { echo "empty council"; exit 1; }
+    mkdir -p "$COUNCIL/$id"
+    for r in $roles; do
+      [ -z "$r" ] && continue
+      [ ! -f "$BRAIN/roles/$r.md" ] && { echo "warn: no role file for '$r'"; continue; }
+      f="$COUNCIL/$id/$r.md"
+      if [ ! -f "$f" ]; then
+        cat > "$f" <<TEMPLATE
+---
+task: $id
+role: $r
+agent: TODO
+model: TODO
+written: TODO
+---
+
+## Position
+
+## Reasoning
+
+## Risks / Open questions
+
+## Recommendation
+TEMPLATE
+      fi
+    done
+    log_op "council-start" "$id" "roles=$roles"
+    echo "council started for $id"
+    echo "roles: $roles"
+    echo "directory: $COUNCIL/$id"
+    echo
+    echo "Запусти каждую роль:"
+    for r in $roles; do
+      echo "  brain-run --role $r --task $id  | <твой-CLI-агент>"
+    done
+    ;;
+  run)
+    [ -z "$id" ] && { echo "task id required"; exit 1; }
+    
+    parallel=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --parallel) parallel=1; shift;;
+        *) shift;;
+      esac
+    done
+
+    # Ensure council directory and skeletons exist
+    [ ! -d "$COUNCIL/$id" ] && "$0" start "$id" >/dev/null || true
+
+    # Extract roles
+    raw=$(awk -v id="$id" '
+      $0 ~ "- \\[.\\]" && $0 ~ id { found=1; next }
+      found && /^- \[/ { exit }
+      found && /^##/ { exit }
+      found && /council:/ { gsub(/.*council: *\[/, ""); gsub(/\].*/, ""); print; exit }
+    ' "$A")
+    roles=$(expand_teams "$raw") || exit 1
+
+    if [ "$parallel" -eq 1 ]; then
+      echo ">>> Running council for $id in PARALLEL..."
+      pids=()
+      # Провайдер автора мнения: роли с diversify_from_author пойдут к другому.
+      # Автором считаем первую роль совета — она пишет то, что рецензируют.
+      author_provider=""
+      for r in $roles; do
+        cli=$(cli_for_role "$r" "$id" "$author_provider")
+        [ -z "$author_provider" ] && author_provider=$(provider_of_cli "$cli")
+        agent="${r}-council-$(od -An -N2 -tx1 /dev/urandom | tr -d ' ')"
+        cmd=$(build_role_command "$r" "$id" "$agent" "$cli")
+        echo "  [spawn] $r ($cli)"
+        ( eval "$cmd" ) > /dev/null 2>&1 &
+        pids+=($!)
+      done
+      echo ">>> Waiting for roles to finish..."
+      for pid in "${pids[@]}"; do
+        wait "$pid" || true
+      done
+    else
+      echo ">>> Running council for $id SEQUENTIALLY (safe mode)..."
+      author_provider=""
+      for r in $roles; do
+        cli=$(cli_for_role "$r" "$id" "$author_provider")
+        [ -z "$author_provider" ] && author_provider=$(provider_of_cli "$cli")
+        agent="${r}-council-$(od -An -N2 -tx1 /dev/urandom | tr -d ' ')"
+        cmd=$(build_role_command "$r" "$id" "$agent" "$cli")
+        echo ">>> Role: $r ($cli)"
+        eval "$cmd" || echo "WARN: role $r failed"
+      done
+    fi
+
+    echo ">>> Synthesizing..."
+    "$0" synthesize "$id" --force >/dev/null
+
+    echo ">>> Running arbiter..."
+    # Арбитр синтезирует чужие мнения — ему тем более нельзя разделять слепые
+    # пятна с авторами.
+    cli=$(cli_for_role "arbiter" "$id" "${author_provider:-}")
+    agent="arbiter-council-$(od -An -N2 -tx1 /dev/urandom | tr -d ' ')"
+    # Значения экранируются перед eval: id приходит из аргументов, и метасимвол
+    # здесь исполнился бы с правами оператора.
+    cmd="brain-run --role arbiter --task $(shell_quote "$id") --council --agent-id $(shell_quote "$agent") | $cli"
+    eval "$cmd"
+    echo ">>> Council execution complete."
+    ;;
+  status)
+    [ -z "$id" ] && { echo "task id required"; exit 1; }
+    d="$COUNCIL/$id"
+    [ ! -d "$d" ] && { echo "no council for $id"; exit 1; }
+    echo "council/$id/:"
+    for f in "$d"/*.md; do
+      [ "$(basename "$f")" = "synthesis.md" ] && continue
+      role=$(basename "$f" .md)
+      if grep -q "^written: TODO" "$f" 2>/dev/null; then
+        echo "  [ ] $role  (pending)"
+      else
+        echo "  [x] $role  ($(grep -E '^written:' "$f" | head -1 | sed 's/written: *//'))"
+      fi
+    done
+    [ -f "$d/synthesis.md" ] && echo "  [✓] synthesis.md"
+    ;;
+  synthesize)
+    [ -z "$id" ] && { echo "task id required"; exit 1; }
+    d="$COUNCIL/$id"
+    [ ! -d "$d" ] && { echo "no council for $id"; exit 1; }
+    pending=$(grep -l "^written: TODO" "$d"/*.md 2>/dev/null | grep -v synthesis.md || true)
+    if [ -n "$pending" ]; then
+      echo "pending opinions:"; echo "$pending"
+      [ "${3:-}" != "--force" ] && { echo "use --force чтобы синтезировать всё равно"; exit 1; }
+    fi
+    cat > "$d/synthesis.md" <<TEMPLATE
+---
+task: $id
+synthesized: TODO
+arbiter: TODO
+inputs: [$(ls "$d"/*.md | grep -v synthesis | xargs -n1 basename | tr '\n' ',' | sed 's/,$//')]
+---
+
+## Positions (TL;DR)
+
+## Agreement
+
+## Disagreement
+
+## Decision
+
+## Why
+
+## Open questions
+
+## Follow-up tasks
+TEMPLATE
+    log_op "council-synth" "$id" "skeleton-created"
+    echo "skeleton: $d/synthesis.md"
+    echo "Запусти arbiter:"
+    echo "  brain-run --role arbiter --task $id --council  | <CLI>"
+    ;;
+  list)
+    [ -z "$(ls "$COUNCIL" 2>/dev/null)" ] && { echo "(no councils)"; exit 0; }
+    for d in "$COUNCIL"/*/; do
+      tid=$(basename "$d")
+      total=$(ls "$d"/*.md 2>/dev/null | grep -v synthesis | wc -l)
+      ready=$(grep -L "^written: TODO" "$d"/*.md 2>/dev/null | grep -v synthesis | wc -l)
+      synth=$([ -f "$d/synthesis.md" ] && echo "✓" || echo "·")
+      echo "$tid  $ready/$total  synth:$synth"
+    done
+    ;;
+  teams)
+    [ -z "$(ls "$TEAMS" 2>/dev/null)" ] && { echo "(no teams)"; exit 0; }
+    for f in "$TEAMS"/*.md; do
+      name=$(basename "$f" .md)
+      roles=$(grep -E '^roles:' "$f" | sed -E 's/roles: *//')
+      echo "$name  $roles"
+    done
+    ;;
+  check)
+    [ -z "$id" ] && { echo "task id required"; exit 1; }
+    d="$COUNCIL/$id"
+    [ ! -d "$d" ] && { echo "ERROR: no council directory for $id"; exit 1; }
+    errors=0; warnings=0
+    role_files=()
+    for f in "$d"/*.md; do
+      [ "$(basename "$f")" = "synthesis.md" ] && continue
+      [ -f "$f" ] && role_files+=("$f")
+    done
+    if [ ${#role_files[@]} -eq 0 ]; then
+      echo "ERROR: no role files found in $d"
+      exit 1
+    fi
+    # Collect agent IDs to detect solo council
+    agents=()
+    for f in "${role_files[@]}"; do
+      role=$(basename "$f" .md)
+      agent_val=$(grep -E '^agent:' "$f" | head -1 | sed 's/agent: *//')
+      written_val=$(grep -E '^written:' "$f" | head -1 | sed 's/written: *//')
+      # Check 1: agent not TODO
+      if [ "$agent_val" = "TODO" ] || [ -z "$agent_val" ]; then
+        echo "ERROR: $role: agent field is TODO or missing"
+        errors=$((errors+1))
+      else
+        agents+=("$agent_val")
+      fi
+      # Check 2: written not TODO
+      if [ "$written_val" = "TODO" ] || [ -z "$written_val" ]; then
+        echo "ERROR: $role: written field is TODO or missing"
+        errors=$((errors+1))
+      fi
+      # Check 3: ## Position section non-empty
+      pos_content=$(awk '/^## Position/{found=1;next} found && /^## /{exit} found{print}' "$f" | grep -v '^$' || true)
+      if [ -z "$pos_content" ]; then
+        echo "ERROR: $role: ## Position section is empty"
+        errors=$((errors+1))
+      fi
+      # Check 4: ## Recommendation section non-empty
+      rec_content=$(awk '/^## Recommendation/{found=1;next} found && /^## /{exit} found{print}' "$f" | grep -v '^$' || true)
+      if [ -z "$rec_content" ]; then
+        echo "ERROR: $role: ## Recommendation section is empty"
+        errors=$((errors+1))
+      fi
+    done
+    # Check 5: synthesis.md not a skeleton (no synthesized: TODO)
+    synth="$d/synthesis.md"
+    if [ ! -f "$synth" ]; then
+      echo "WARN: synthesis.md missing (run brain-council synthesize $id)"
+      warnings=$((warnings+1))
+    elif grep -q "^synthesized: TODO" "$synth"; then
+      echo "WARN: synthesis.md is still a skeleton (synthesized: TODO)"
+      warnings=$((warnings+1))
+    fi
+    # WARN: solo council (all roles same agent)
+    if [ ${#agents[@]} -gt 1 ]; then
+      unique_agents=$(printf '%s\n' "${agents[@]}" | sort -u | wc -l)
+      if [ "$unique_agents" -eq 1 ]; then
+        echo "WARN: solo council — all roles written by the same agent: ${agents[0]}"
+        warnings=$((warnings+1))
+      fi
+    fi
+    # Summary
+    echo "---"
+    echo "council check: $id"
+    echo "  roles: ${#role_files[@]}  errors: $errors  warnings: $warnings"
+    if [ $errors -eq 0 ]; then
+      echo "  status: OK"
+    else
+      echo "  status: FAIL"
+      exit 1
+    fi
+    ;;
+  *)
+    cat <<USAGE
+brain-council — консилиум по задаче
+
+  brain-council start <id>        запустить совет (поддерживает team:<name>)
+  brain-council run <id> [--parallel]  автоматический запуск всех ролей (default: sequential)
+  brain-council status <id>       прогресс совета
+  brain-council synthesize <id>   skeleton для arbiter
+  brain-council check <id>        проверить готовность совета
+  brain-council list              все активные советы
+  brain-council teams             список доступных команд
+USAGE
+    exit 1;;
+esac

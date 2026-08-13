@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Autonomous Skill Curator CLI."""
+
+import argparse
+import datetime
+import os
+import sys
+import json
+import re
+from pathlib import Path
+from collections import Counter
+
+try:
+    from brain_skill_parser import parse_skill_file
+except ImportError:
+    # Optional dependency-free stub or error
+    parse_skill_file = lambda x: {}
+
+def get_brain_dir() -> Path:
+    return Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    """Scan learning lessons and logs for starvation triggers and build a Wishlist."""
+    brain = get_brain_dir()
+    
+    wishlist = []
+    
+    # 1. Analyze learning lessons (recurring errors)
+    lessons_dir = brain / "learning" / "lessons"
+    error_patterns = []
+    if lessons_dir.exists():
+        for state in ["pending", "active"]:
+            state_dir = lessons_dir / state
+            if not state_dir.exists():
+                continue
+            for f in state_dir.rglob("*.json"):
+                try:
+                    data = json.loads(f.read_text())
+                    if "incident" in data:
+                        # Extract a simplified version of the error message to cluster
+                        err = data["incident"].split("\n")[0][:100]
+                        error_patterns.append(err)
+                except Exception:
+                    pass
+                    
+    # If same error happens >= 2 times, it's a starvation trigger
+    counts = Counter(error_patterns)
+    for err, count in counts.items():
+        if count >= 2:
+            wishlist.append({
+                "type": "error_resolution",
+                "trigger": err,
+                "count": count,
+                "status": "pending_search"
+            })
+            
+    # 2. Analyze log.md for limit exhaustion (fleet starvation)
+    log_file = brain / "wiki" / "log.md"
+    if log_file.exists():
+        log_text = log_file.read_text()
+        # Search for limit-exhausted lines
+        limit_lines = re.findall(r"orchestrator-handoff \| [^\|]+ \| ([^\|]+) \| limit-exhausted", log_text)
+        limit_counts = Counter(limit_lines)
+        for agent, count in limit_counts.items():
+            if count >= 1:
+                # E.g., claude-3-opus has hit the limit
+                wishlist.append({
+                    "type": "fleet_starvation",
+                    "trigger": f"Agent {agent.strip()} hit rate limit",
+                    "count": count,
+                    "status": "pending_search"
+                })
+
+    # Save to wishlist
+    wishlist_path = brain / "wiki" / "wishlist.json"
+    existing = []
+    if wishlist_path.exists():
+        try:
+            existing = json.loads(wishlist_path.read_text())
+        except Exception:
+            pass
+            
+    # Merge existing with new (deduplicate by trigger)
+    existing_triggers = {w["trigger"] for w in existing}
+    for w in wishlist:
+        if w["trigger"] not in existing_triggers:
+            existing.append(w)
+            
+    wishlist_path.parent.mkdir(parents=True, exist_ok=True)
+    wishlist_path.write_text(json.dumps(existing, indent=2))
+    
+    print(f"Starvation Monitor: Added {len(wishlist)} new items to Wishlist. Total items: {len(existing)}")
+    return 0
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """Take pending wishlist items and search for solutions."""
+    brain = get_brain_dir()
+    wishlist_path = brain / "wiki" / "wishlist.json"
+    if not wishlist_path.exists():
+        print("Wishlist not found.")
+        return 1
+        
+    try:
+        wishlist = json.loads(wishlist_path.read_text())
+    except Exception as e:
+        print(f"Failed to read wishlist: {e}")
+        return 1
+
+    modified = False
+    for item in wishlist:
+        if item.get("status") != "pending_search":
+            continue
+            
+        print(f"Searching for: {item['trigger']}...")
+        
+        # Mock logic: Generate a fake "discovery" result
+        if item["type"] == "fleet_starvation":
+            item["discovery"] = {
+                "source": "OpenRouter API",
+                "recommendation": "Switch to gemini-1.5-flash-8b (Cheaper/High quota)",
+                "action": "update-matrix"
+            }
+        else:
+            item["discovery"] = {
+                "source": "agentskill.sh",
+                "url": f"https://agentskill.sh/skills/{item['trigger'].lower().replace(' ', '-')}",
+                "action": "ingest-skill"
+            }
+            
+        item["status"] = "synthesizing"
+        modified = True
+        
+    if modified:
+        wishlist_path.write_text(json.dumps(wishlist, indent=2))
+        print(f"Search complete. Wishlist updated.")
+    else:
+        print("No pending items found in wishlist.")
+        
+    return 0
+
+def cmd_synthesize(args: argparse.Namespace) -> int:
+    """Generate Proposals (Wiki/Skills) for discovered items."""
+    brain = get_brain_dir()
+    wishlist_path = brain / "wiki" / "wishlist.json"
+    if not wishlist_path.exists():
+        return 1
+        
+    try:
+        wishlist = json.loads(wishlist_path.read_text())
+    except Exception:
+        return 1
+
+    try:
+        from brain_wiki.frontmatter import format_frontmatter
+    except ImportError:
+        print("Error: brain_wiki.frontmatter not found. Check sys.path.")
+        return 1
+    
+    proposals_dir = brain / "wiki" / "proposals"
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+
+    modified = False
+    for item in wishlist:
+        if item.get("status") != "synthesizing":
+            continue
+            
+        disc = item.get("discovery", {})
+        action = disc.get("action")
+        
+        prop_id = f"prop-{item['type']}-{re.sub(r'[^a-z0-9]', '-', item['trigger'].lower())[:30]}"
+        prop_path = proposals_dir / f"{prop_id}.md"
+        
+        print(f"Synthesizing proposal: {prop_id}...")
+        
+        content = f"Proposal generated by Skill Curator.\n\nTrigger: {item['trigger']}\nSource: {disc.get('source')}\n"
+        
+        if action == "update-matrix":
+            content += f"\nRecommendation: {disc.get('recommendation')}\n\nProposed Change to provider-matrix.json: ...\n"
+        elif action == "ingest-skill":
+            content += f"\nURL: {disc.get('url')}\n\nProposed new Skill: ...\n"
+            
+        frontmatter = {
+            "title": f"Skill Proposal: {item['trigger'][:40]}",
+            "type": "proposal",
+            "status": "pending_approval",
+            "curator": "skill-curator"
+        }
+        
+        prop_path.write_text(format_frontmatter(frontmatter, content))
+        item["status"] = "proposed"
+        item["proposal_path"] = str(prop_path)
+        modified = True
+        
+    if modified:
+        wishlist_path.write_text(json.dumps(wishlist, indent=2))
+        print(f"Synthesis complete. {sum(1 for i in wishlist if i['status'] == 'proposed')} items proposed.")
+    else:
+        print("No items in synthesis status.")
+        
+    return 0
+
+def cmd_rank(args: argparse.Namespace) -> int:
+    """Fetch benchmarks/prices and calculate IQ/Cost ratio."""
+    # Mock benchmark data
+    benchmarks = {
+        "claude-3-5-sonnet": {"score": 85.2, "cost_in": 3.0, "cost_out": 15.0},
+        "gemini-1.5-pro":    {"score": 82.1, "cost_in": 3.5, "cost_out": 10.5},
+        "gemini-1.5-flash":  {"score": 75.8, "cost_in": 0.075, "cost_out": 0.3},
+        "gpt-4o":            {"score": 88.5, "cost_in": 5.0, "cost_out": 15.0}
+    }
+    
+    print(f"{'MODEL':<20} {'SCORE':<10} {'COST(avg)':<15} {'IQ/COST'}")
+    print("-" * 60)
+    
+    rankings = []
+    for model, data in benchmarks.items():
+        avg_cost = (data["cost_in"] + data["cost_out"]) / 2.0
+        iq_cost = data["score"] / (avg_cost + 0.001) # Avoid div by zero
+        rankings.append((model, data["score"], avg_cost, iq_cost))
+        
+    for model, score, cost, iq_cost in sorted(rankings, key=lambda x: x[3], reverse=True):
+        print(f"{model:<20} {score:<10.1f} ${cost:<14.3f} {iq_cost:.2f}")
+        
+    best_model = sorted(rankings, key=lambda x: x[3], reverse=True)[0][0]
+    print(f"\nRecommendation: Use **{best_model}** for efficiency.")
+    
+    # Update matrix (mock)
+    brain = get_brain_dir()
+    
+    # Always write the report
+    report_path = brain / "wiki" / "model-fleet-report.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(f"# Model Fleet Efficiency Report\n\nGenerated: {datetime.datetime.now(datetime.timezone.utc).isoformat()}Z\n\nBest efficient model: {best_model}\n")
+    print(f"Report written to {report_path}")
+    
+    matrix_path = brain / "wiki" / "provider-matrix.json"
+    if matrix_path.exists():
+        try:
+            matrix = json.loads(matrix_path.read_text())
+            # (Logic to update matrix would go here)
+        except Exception:
+            pass
+            
+    return 0
+
+def cmd_monitor_limits(args: argparse.Namespace) -> int:
+    """Analyze real-time rate limits across all CLI clients and update health status."""
+    brain = get_brain_dir()
+    log_file = brain / "wiki" / "log.md"
+    if not log_file.exists():
+        print("No log file found.")
+        return 1
+        
+    log_text = log_file.read_text()
+    
+    # Track limits per CLI/model
+    # Format: orchestrator-handoff | task | agent | reason
+    handoffs = re.findall(r"orchestrator-handoff \| [^\|\n]+ \| ([^\|\n]+) \| ([^\|\n]+)", log_text)
+    
+    health = {}
+    for agent, reason in handoffs:
+        agent = agent.strip()
+        reason = reason.strip()
+        if reason in ["rate-limit", "limit-exhausted"]:
+            health[agent] = health.get(agent, 0) + 1
+            
+    print(f"{'CLI AGENT':<40} {'ERRORS':<10} {'STATUS'}")
+    print("-" * 60)
+    
+    fleet_health = {"version": 1, "clients": {}}
+    for agent, errors in health.items():
+        status = "CRITICAL" if errors >= 3 else "DEGRADED"
+        print(f"{agent:<40} {errors:<10} {status}")
+        fleet_health["clients"][agent] = {"errors": errors, "status": status}
+        
+    health_path = brain / ".provider-health.json"
+    health_path.write_text(json.dumps(fleet_health, indent=2))
+    print(f"\nFleet health written to {health_path}")
+    
+    return 0
+
+def main():
+    parser = argparse.ArgumentParser(description="Autonomous Skill Curator")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    
+    p_monitor = sub.add_parser("monitor", help="Scan logs for starvation and update wishlist")
+    p_monitor.set_defaults(func=cmd_monitor)
+    
+    p_search = sub.add_parser("search", help="Search for solutions for wishlist items")
+    p_search.set_defaults(func=cmd_search)
+    
+    p_synth = sub.add_parser("synthesize", help="Generate proposals for discovered items")
+    p_synth.set_defaults(func=cmd_synthesize)
+    
+    p_rank = sub.add_parser("rank-models", help="Rank models by IQ/Cost ratio")
+    p_rank.set_defaults(func=cmd_rank)
+    
+    p_fleet = sub.add_parser("monitor-limits", help="Monitor cross-CLI rate limits")
+    p_fleet.set_defaults(func=cmd_monitor_limits)
+    
+    args = parser.parse_args()
+    sys.exit(args.func(args))
+
+if __name__ == "__main__":
+    main()

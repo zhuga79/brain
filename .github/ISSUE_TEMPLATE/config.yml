@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Как устроен приём вклада
+    url: https://github.com/Blqd/brain/blob/main/CONTRIBUTING.md
+    about: Репозиторий — генерируемый срез, прямые PR стираются пересборкой. Прочитайте до начала работы
+  - name: Конституция системы
+    url: https://github.com/Blqd/brain/blob/main/MEMORY.md
+    about: Схема, роли, протокол блокировок — прежде чем предлагать изменение
+  - name: Принятые решения
+    url: https://github.com/Blqd/brain/blob/main/wiki/decisions-log.md
+    about: Возможно, ваш вопрос уже разобран в ADR

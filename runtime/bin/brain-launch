@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# brain-launch [<task-id>] [--session NAME] [--dry-run] [--watch [--role R] [--interval N] [--exit-on-empty]]
+# Поднимает tmux-сессию: одно окно на роль из совета задачи.
+# Каждое окно запускает: brain-run --role X --task Y | <CLI for X>
+set -e
+# shellcheck source=./brain-common
+source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
+
+refuse_sandbox_agent_launch() {
+  [ "${BRAIN_SANDBOX_AGENT_LAUNCH_GUARD:-}" = "1" ] || [ "${CODEX_SANDBOX_NETWORK_DISABLED:-}" = "1" ] || [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${SANDBOX_MODE:-}" ] || return 0
+  echo "brain-launch: refusing live agent launch inside sandbox. Use --dry-run here, then run the real launch outside sandbox." >&2
+  exit 2
+}
+
+brain_lib_file() {
+  local name="$1"
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for candidate in \
+    "$script_dir/../lib/$name" \
+    "$HOME/.local/share/brain/lib/$name" \
+    "$HOME/.local/lib/brain/$name"; do
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+task=""
+session=""
+dry_run=0
+watch=0
+auto_next=0
+handoff_on_limit=0
+watch_role=""
+watch_interval="${BRAIN_WATCH_INTERVAL:-30}"
+watch_sync_interval="${BRAIN_WATCH_SYNC_INTERVAL:-300}"
+watch_ops_interval="${BRAIN_WATCH_OPS_INTERVAL:-600}"
+watch_exit_on_empty=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)        session="$2"; shift 2;;
+    --dry-run)        dry_run=1; shift;;
+    --watch)          watch=1; shift;;
+    --auto-next)      auto_next=1; shift;;
+    --handoff-on-limit) handoff_on_limit=1; shift;;
+    --role)           watch_role="$2"; shift 2;;
+    --interval)       watch_interval="$2"; shift 2;;
+    --sync-interval)  watch_sync_interval="$2"; shift 2;;
+    --ops-interval)   watch_ops_interval="$2"; shift 2;;
+    --exit-on-empty)  watch_exit_on_empty=1; shift;;
+    -h|--help)
+      cat <<H
+brain-launch — запустить совет задачи в tmux / авто-очередь задач
+
+  brain-launch <task-id> [--session NAME] [--dry-run] [--watch] [--auto-next] [--handoff-on-limit]
+  brain-launch --watch [--role R] [--interval N] [--sync-interval N] [--ops-interval N] [--exit-on-empty]   # standalone watch loop
+
+  --session NAME      имя tmux-сессии (default: brain-<task-id>)
+  --dry-run           не запускать tmux, только напечатать что бы запустилось
+  --watch             (с task-id) показать статус окон запущенной сессии
+                      (без task-id) запустить watch-loop: авто-очередь задач
+  --role R            (watch-loop) фильтр по роли для brain-task next
+  --interval N        (watch-loop) интервал поллинга в секундах (default: 30;
+                      override env BRAIN_WATCH_INTERVAL)
+  --sync-interval N   (watch-loop) интервал синхронизации федерации в секундах (default: 300;
+                      override env BRAIN_WATCH_SYNC_INTERVAL)
+  --ops-interval N    (watch-loop) интервал обновления данных дашборда в секундах (default: 600;
+                      override env BRAIN_WATCH_OPS_INTERVAL)
+  --exit-on-empty     (watch-loop) завершиться при пустой очереди (иначе — ждать)
+  --auto-next         (с task-id) после завершения текущей задачи взять следующую
+  --watch --auto-next --dry-run  показать план auto-next без side effects
+  --handoff-on-limit  обернуть CLI через brain-handoff run
+
+  Маршрутизация роль → CLI: ~/brain/config/routing.json (brain-provider cli)
+  Env: BRAIN_WATCH_INTERVAL  (default 30)  — polling interval in seconds
+H
+      exit 0;;
+    *) task="$1"; validate_id "идентификатор задачи" "$task" || exit 2; shift;;
+  esac
+done
+
+# Standalone --watch mode (no task-id): run the Python watch loop
+if [ "$watch" = 1 ] && [ -z "$task" ]; then
+  [ "$dry_run" = 1 ] || refuse_sandbox_agent_launch
+  _LIBPATH="$(dirname "${BASH_SOURCE[0]}")/../lib"
+  _agent_id="brain-launch-watch-$$"
+  _watch_args=("$BRAIN" "$_agent_id" "--interval" "$watch_interval" "--sync-interval" "$watch_sync_interval" "--ops-interval" "$watch_ops_interval")
+  [ -n "$watch_role" ] && _watch_args+=("--role" "$watch_role")
+  [ "$watch_exit_on_empty" = 1 ] && _watch_args+=("--exit-on-empty")
+  PYTHONPATH="${_LIBPATH}:${HOME}/.local/lib/brain:${HOME}/.local/share/brain/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+    exec python3 -m brain_launch_watch "${_watch_args[@]}"
+fi
+
+[ -z "$task" ] && { echo "usage: brain-launch <task-id>"; exit 1; }
+
+# Validate task-id: lowercase alphanumeric, dots, hyphens, underscores only
+if ! [[ "$task" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "brain-launch: invalid task-id '$task' — must match ^[a-z0-9._-]+$"
+  exit 1
+fi
+
+[ -z "$session" ] && session="brain-${task}"
+
+# Validate session name (tmux-safe chars only)
+if ! [[ "$session" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "brain-launch: invalid session name '$session' — must match ^[a-z0-9._-]+$"
+  exit 1
+fi
+
+# извлечь council:
+raw=$(awk -v id="$task" '
+  $0 ~ "- \\[.\\]" && $0 ~ id { found=1; next }
+  found && /^- \[/ { exit }
+  found && /^##/ { exit }
+  found && /council:/ { gsub(/.*council: *\[/, ""); gsub(/\].*/, ""); print; exit }
+' "$A")
+[ -z "$raw" ] && { echo "no council: field on $task"; exit 1; }
+
+# развернуть team:<name>
+roles=""
+for token in $(echo "$raw" | tr ',' ' '); do
+  token=$(echo "$token" | tr -d ' []')
+  [ -z "$token" ] && continue
+  if [[ "$token" == team:* ]]; then
+    tn="${token#team:}"
+    tf="$TEAMS/$tn.md"
+    [ ! -f "$tf" ] && { echo "no team: $tn"; exit 1; }
+    tr=$(grep -E '^roles:' "$tf" | head -1 | sed -E 's/.*\[(.*)\].*/\1/' | tr ',' ' ')
+    roles="$roles $tr"
+  else
+    roles="$roles $token"
+  fi
+done
+roles=$(echo "$roles" | tr ' ' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ' ')
+
+[ -z "$roles" ] && { echo "empty council"; exit 1; }
+
+# Validate each role name: lowercase alphanumeric, hyphens, underscores only
+for r in $roles; do
+  if ! [[ "$r" =~ ^[a-z0-9_-]+$ ]]; then
+    echo "brain-launch: invalid role '$r' — must match ^[a-z0-9_-]+$"
+    exit 1
+  fi
+done
+
+# Resolve effective launch surface (headless|interactive) for a task id.
+# See wiki/decision-interactive-surface.md (t-2026-06-26).
+effective_surface_of() {
+  python3 - "$1" "$A" <<'PYEOF' 2>/dev/null || echo headless
+import sys, pathlib
+tid, active = sys.argv[1], sys.argv[2]
+try:
+    import brain_task_parser as P
+    blk = P.find_block(pathlib.Path(active).read_text(), tid) or ""
+    print(P.effective_surface(P.parse_block(blk)) if blk else "headless")
+except Exception:
+    print("headless")
+PYEOF
+}
+
+# --watch --dry-run: show watch plan without creating anything
+if [ "$watch" = 1 ] && [ "$dry_run" = 1 ]; then
+  echo "tmux session: $session"
+  echo "roles:"
+  for r in $roles; do
+    cli=$(cli_for_role "$r" "$task")
+    echo "  $r  →  $cli"
+  done
+  echo ""
+  echo "Watch plan for session: $session"
+  role_list=$(echo "$roles" | tr ' ' ', ' | sed 's/, $//')
+  echo "  Current task : $task"
+  echo "  Watching     : $role_list"
+  echo "  Poll targets : council/$task/*.md, .locks/$task/owner"
+  echo "  Completion   : all council opinions written + synthesis done"
+  cur_surface=$(effective_surface_of "$task")
+  if [ "$cur_surface" = "interactive" ]; then
+    echo "  Surface      : interactive — runs in a VISIBLE window (human-in-the-loop)"
+  else
+    echo "  Surface      : headless"
+  fi
+  if [ "$auto_next" = 1 ]; then
+    next_task=$(brain-task next --headless-only 2>/dev/null | grep -oE "t-[0-9a-z-]+" | head -1 || true)
+    echo ""
+    echo "Auto-next plan (--auto-next):"
+    echo "  Criteria     : all roles written, lock released for $task"
+    echo "  Auto-next picks: headless tasks only (interactive → visible window)"
+    echo "  Lock protocol: brain-lock acquire <next-id> --as <agent>"
+    echo "  Next task    : ${next_task:-<none available>}"
+    [ -n "$next_task" ] && echo "  Would run    : brain-task take $next_task --as <agent>" || true
+    echo "  [DRY-RUN: no side effects]"
+  else
+    echo "  Auto-next    : disabled (add --auto-next to enable)"
+  fi
+  if [ "$handoff_on_limit" = 1 ]; then
+    echo "  Limit handoff: enabled (brain-handoff run wrapper)"
+  else
+    echo "  Limit handoff: disabled (add --handoff-on-limit to enable)"
+  fi
+  exit 0
+fi
+
+# Phase 23: On-the-Fly Skill Generation Fallback
+_skill_check="$(brain_lib_file brain_skill_check.py || true)"
+if [ -n "$_skill_check" ]; then
+  _block_res=$(python3 "$_skill_check" "$task" || true)
+else
+  _block_res=""
+fi
+if [ "$_block_res" = "BLOCKED" ]; then
+  echo "brain-launch: task $task requires missing skills. Spawned generation tasks and blocked current."
+  exit 1
+fi
+
+# dry-run (no --watch)
+if [ "$dry_run" = 1 ]; then
+  echo "tmux session: $session"
+  cur_surface=$(effective_surface_of "$task")
+  if [ "$cur_surface" = "interactive" ]; then
+    echo "surface: interactive — runs in a VISIBLE window (human-in-the-loop); excluded from headless auto-next"
+  else
+    echo "surface: headless"
+  fi
+  echo "roles:"
+  for r in $roles; do
+    cli=$(cli_for_role "$r" "$task")
+    echo "  $r  →  $cli"
+    cmd=$(build_role_command "$r" "$task" "${r}-tmux" "$cli" 0 "$handoff_on_limit")
+    echo "    cmd: $cmd"
+  done
+  exit 0
+fi
+
+# --watch --auto-next (real): poll until task done, then take next task
+if [ "$watch" = 1 ] && [ "$auto_next" = 1 ]; then
+  refuse_sandbox_agent_launch
+  agent_id="brain-launch-autonext-$$"
+  poll_interval="${BRAIN_WATCH_POLL_SEC:-5}"
+  echo "[watch] Monitoring task: $task (agent: $agent_id)"
+  echo "[watch] Will auto-take next task when $task completes."
+  echo "[watch] Poll interval: ${poll_interval}s  (override: BRAIN_WATCH_POLL_SEC)"
+  while true; do
+    # Check if task has moved to done.md
+    if grep -q "$task" "$D" 2>/dev/null; then
+      echo "[watch] Task $task is done."
+      break
+    fi
+    # Check if lock on task is gone (task completed by another agent)
+    if [ ! -f "$BRAIN/.locks/$task/owner" ]; then
+      if grep -q "\[x\].*$task" "$A" 2>/dev/null || grep -q "$task" "$D" 2>/dev/null; then
+        echo "[watch] Task $task completed (lock released)."
+        break
+      fi
+    fi
+    sleep "$poll_interval"
+  done
+  # Take next open task following lock protocol
+  next_task=$(brain-task next --headless-only 2>/dev/null | grep -oE "t-[0-9a-z-]+" | head -1 || true)
+  if [ -z "$next_task" ]; then
+    echo "[watch] No next task available. Exiting."
+    log_op "watch-auto-next" "$task" "$agent_id" "no-next-task"
+    exit 0
+  fi
+  echo "[watch] Next task: $next_task — acquiring lock..."
+  if brain-lock acquire "$next_task" --as "$agent_id" 2>/dev/null; then
+    brain-task take "$next_task" --as "$agent_id"
+    log_op "watch-auto-next" "$task" "$agent_id" "took:$next_task"
+    echo "[watch] Auto-next: took $next_task"
+    brain-lock release "$next_task" --as "$agent_id" >/dev/null 2>&1 || true
+  else
+    echo "[watch] Could not acquire lock for $next_task (already taken). Exiting."
+    log_op "watch-auto-next" "$task" "$agent_id" "lock-failed:$next_task"
+  fi
+  exit 0
+fi
+
+# --watch (real, no --auto-next): show session window status
+if [ "$watch" = 1 ]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux not found, install tmux to use --watch"
+    exit 1
+  fi
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    echo "Session $session not found. Start with: brain-launch $task"
+    exit 1
+  fi
+  echo "Session: $session"
+  echo "Windows:"
+  tmux list-windows -t "$session" -F "  #I: #W  [#{pane_current_command}]" 2>/dev/null || true
+  exit 0
+fi
+
+# создать совет если ещё нет
+refuse_sandbox_agent_launch
+[ ! -d "$BRAIN/council/$task" ] && brain-council start "$task" >/dev/null || true
+
+# проверка tmux
+command -v tmux >/dev/null || { echo "tmux не установлен"; exit 1; }
+
+# создать сессию или приаттачиться
+if tmux has-session -t "$session" 2>/dev/null; then
+  echo "session $session already exists — attaching"
+  exec tmux attach -t "$session"
+fi
+
+first=1
+for r in $roles; do
+  cli=$(cli_for_role "$r" "$task")
+  agent="${r}-tmux-$(od -An -N2 -tx1 /dev/urandom | tr -d ' ')"
+  cmd=$(build_role_command "$r" "$task" "$agent" "$cli" 1 "$handoff_on_limit")
+  if [ "$first" = 1 ]; then
+    tmux new-session -d -s "$session" -n "$r" "$cmd"
+    first=0
+  else
+    tmux new-window -t "$session" -n "$r" "$cmd"
+  fi
+done
+
+echo "✓ session $session запущен с $(echo $roles | wc -w) окнами"
+echo "  attach: tmux attach -t $session"
+echo "  switch window: Ctrl-b + n / p / 0..9"
+echo "  kill session: tmux kill-session -t $session"

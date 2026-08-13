@@ -1,0 +1,1211 @@
+#!/usr/bin/env python3
+"""Read-only Brain orchestration dashboard — thin CLI wrapper.
+
+Implementation lives in ``runtime/lib/brain_dashboard/``:
+  - data.py    — collectors, snapshot/delta logic
+  - render.py  — HTML rendering
+"""
+
+from __future__ import annotations
+
+import argparse
+import hmac
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import tempfile
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+from brain_dashboard.data import (  # noqa: E402
+    brain_path,
+    collect_learning_stats,
+    collect_metrics,
+    collect_queue_proposals,
+    collect_status,
+    collect_token_metrics,
+    compute_delta,
+    load_snapshot,
+    read_audit_log,
+    read_index,
+    save_snapshot,
+)
+from brain_dashboard.render import build_html  # noqa: E402
+import brain_provider  # noqa: E402
+from brain_sandbox_guard import SandboxLaunchError, assert_not_sandbox_agent_launch  # noqa: E402
+import brain_launch_queue  # noqa: E402
+
+
+# Max seconds to wait for a launch subprocess. brain-orchestrator console
+# spawns a detached terminal and returns, so this only bounds hangs.
+LAUNCH_TIMEOUT_SECONDS = int(os.environ.get("BRAIN_LAUNCH_TIMEOUT", "120"))
+WORKSPACE_DESCRIPTOR_MAX_BYTES = int(os.environ.get("BRAIN_WORKSPACE_DESCRIPTOR_MAX_BYTES", str(1024 * 1024)))
+
+ALLOWED_LAUNCH_CLIENTS = {client: client for client in brain_launch_queue.ALLOWED_CLIENTS}
+
+
+def _valid_id(value: str) -> bool:
+    return bool(re.match(r"^[a-zA-Z0-9_.-]+$", value or ""))
+
+
+def _is_safe_public_url(url: str) -> tuple[bool, str]:
+    """SSRF guard: allow only http(s) to public hosts (block private/loopback/
+    link-local/reserved). Resolves the host and checks every address."""
+    import ipaddress
+    import socket
+    import urllib.parse as _up
+    try:
+        u = _up.urlparse(url)
+    except Exception:
+        return False, "invalid url"
+    if u.scheme not in ("http", "https"):
+        return False, "only http(s) URLs allowed"
+    host = u.hostname or ""
+    if not host:
+        return False, "no host"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False, "cannot resolve host"
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except Exception:
+            return False, "unresolved address"
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False, f"blocked non-public host ({ip})"
+    return True, ""
+
+
+class _SafeDescriptorRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        safe, why = _is_safe_public_url(newurl)
+        if not safe:
+            raise ValueError(f"descriptor redirect URL rejected: {why}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _read_response_text_bounded(response, *, max_bytes: int = WORKSPACE_DESCRIPTOR_MAX_BYTES) -> str:
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"descriptor too large (max {max_bytes} bytes)")
+    return body.decode("utf-8")
+
+
+def _read_remote_descriptor_url(url: str, *, timeout: int = 10, max_bytes: int = WORKSPACE_DESCRIPTOR_MAX_BYTES) -> str:
+    safe, why = _is_safe_public_url(url)
+    if not safe:
+        raise ValueError(f"descriptor URL rejected: {why}")
+    req = urllib.request.Request(url, headers={"User-Agent": "Brain-Dashboard/1.0"})
+    opener = urllib.request.build_opener(_SafeDescriptorRedirectHandler)
+    with opener.open(req, timeout=timeout) as response:
+        final_url = response.geturl()
+        final_safe, final_why = _is_safe_public_url(final_url)
+        if not final_safe:
+            raise ValueError(f"descriptor final URL rejected: {final_why}")
+        return _read_response_text_bounded(response, max_bytes=max_bytes)
+
+
+def _queue_proposals_path(brain: Path) -> Path:
+    return brain_launch_queue.proposals_path(brain)
+
+
+def _load_queue_proposals(brain: Path) -> dict:
+    path = _queue_proposals_path(brain)
+    if not path.exists():
+        return {"ok": True, "proposals": [], "summary": {"pending": 0}, "generated_at": "", "path": str(path)}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "proposals": [], "summary": {"pending": 0}, "path": str(path)}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "invalid queue proposal file", "proposals": [], "summary": {"pending": 0}, "path": str(path)}
+    data.setdefault("ok", True)
+    data.setdefault("path", str(path))
+    data.setdefault("proposals", [])
+    data.setdefault("summary", {"pending": 0})
+    return data
+
+
+def _save_queue_proposals(brain: Path, data: dict) -> None:
+    brain_launch_queue.atomic_write_json(_queue_proposals_path(brain), data)
+
+
+def _find_queue_proposal(data: dict, proposal_id: str) -> dict | None:
+    for proposal in data.get("proposals", []):
+        if isinstance(proposal, dict) and proposal.get("id") == proposal_id:
+            return proposal
+    return None
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    import http.server
+    import urllib.parse
+    import urllib.request
+
+    brain = brain_path(getattr(args, "brain", None))
+    if not brain.exists():
+        print(f"ERROR: Brain path does not exist: {brain}", file=sys.stderr)
+        return 1
+
+    port = getattr(args, "port", 8765)
+    host = getattr(args, "host", "127.0.0.1")
+    auth_token = os.environ.get("BRAIN_DASHBOARD_AUTH_TOKEN", "")
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    if host not in loopback_hosts and not auth_token:
+        print(
+            "ERROR: non-loopback dashboard bind requires dashboard auth token "
+            "(BRAIN_DASHBOARD_AUTH_TOKEN) for write actions",
+            file=sys.stderr,
+        )
+        return 2
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if self._read_auth_required(path) and not self._authorized(parsed):
+                ctype = "application/json" if path.startswith("/api/") else "text/plain"
+                body = (
+                    b'{"ok":false,"error":"invalid or missing dashboard auth token"}'
+                    if path.startswith("/api/")
+                    else b"invalid or missing dashboard auth token"
+                )
+                self._respond(403, ctype, body)
+                return
+            if path == "/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                try:
+                    while True:
+                        status = collect_status(brain)
+                        payload = {
+                            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "tasks": status["tasks"]["summary"],
+                            "locks": {
+                                "count": status["locks"]["count"],
+                                "stale_count": status["locks"]["stale_count"],
+                            },
+                            "council": {"count": status["council"]["count"]},
+                            "index": {"health": status["index"].get("health", "unknown")},
+                            "tokens": status.get("tokens", {}),
+                        }
+                        data = json.dumps(payload, ensure_ascii=False)
+                        self.wfile.write(f"data: {data}\n\n".encode())
+                        self.wfile.flush()
+                        time.sleep(5)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+            elif path == "/api/status":
+                data = json.dumps(collect_status(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/search":
+                qs_params = urllib.parse.parse_qs(parsed.query)
+                query = qs_params.get("q", [""])[0]
+                mode = qs_params.get("mode", ["hybrid"])[0]
+                limit = int(qs_params.get("limit", ["10"])[0])
+                if not query:
+                    self._respond(200, "application/json", b'{"query":"","results":[]}')
+                    return
+                # Prefer local bin, then PATH
+                local_bs = Path(__file__).resolve().parent / "brain-search"
+                bs = str(local_bs) if local_bs.exists() else (shutil.which("brain-search") or "brain-search")
+                cmd = [bs, query, "--mode", mode, "--limit", str(limit), "--json"]
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True, text=True,
+                        env={**os.environ, "BRAIN_PATH": str(brain)},
+                        timeout=3,
+                    )
+                    self._respond(200, "application/json", result.stdout.encode())
+                except subprocess.TimeoutExpired:
+                    if mode == "hybrid":
+                        fallback_cmd = [bs, query, "--mode", "bm25", "--limit", str(limit), "--json"]
+                        try:
+                            fallback = subprocess.run(
+                                fallback_cmd,
+                                capture_output=True, text=True,
+                                env={**os.environ, "BRAIN_PATH": str(brain)},
+                                timeout=3,
+                            )
+                            payload = json.loads(fallback.stdout or "{}")
+                            if isinstance(payload, dict):
+                                payload.setdefault("mode", "bm25")
+                                payload["fallback"] = "hybrid-timeout"
+                                self._respond(200, "application/json", json.dumps(payload, ensure_ascii=False).encode())
+                                return
+                        except (subprocess.TimeoutExpired, Exception):
+                             # Both hybrid and bm25 timed out. Return a 200 with a special payload.
+                             self._respond(
+                                 200,
+                                 "application/json",
+                                 b'{"ok": false, "timed_out": true, "error": "search timed out", "results": []}',
+                             )
+                             return
+                    # Fallback for non-hybrid modes, or if the fallback itself failed unexpectedly before.
+                    self._respond(
+                        200,
+                        "application/json",
+                        b'{"ok": false, "timed_out": true, "error": "search timed out", "results": []}',
+                    )
+                except Exception as exc:
+                    self._respond(500, "application/json", 
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+            elif path == "/api/index":
+                data = json.dumps(read_index(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/tasks":
+                status = collect_status(brain)
+                payload = {
+                    "tasks": status.get("tasks", {}).get("active", []),
+                    "summary": status.get("tasks", {}).get("summary", {}),
+                }
+                data = json.dumps(payload, ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/queue-proposals":
+                payload = collect_queue_proposals(brain)
+                payload["ok"] = not bool(payload.get("error"))
+                data = json.dumps(payload, ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/audit":
+                qs_params = urllib.parse.parse_qs(parsed.query)
+                task_f = qs_params.get("task", [""])[0]
+                limit = int(qs_params.get("limit", ["20"])[0])
+                entries = read_audit_log(brain, limit=limit, task_filter=task_f)
+                data = json.dumps({"entries": entries, "count": len(entries)}, ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/learning":
+                data = json.dumps(collect_learning_stats(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/providers":
+                data = json.dumps(brain_provider.collect_provider_status(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/models":
+                qs_params = urllib.parse.parse_qs(parsed.query)
+                client = qs_params.get("client", [""])[0].strip()
+                if client not in ALLOWED_LAUNCH_CLIENTS:
+                    self._respond(400, "application/json",
+                                  json.dumps({"ok": False, "error": f"unsupported client: {client}"}).encode())
+                    return
+                data = json.dumps(brain_provider.list_client_models(brain, client), ensure_ascii=False)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/tokens":
+                data = json.dumps(collect_token_metrics(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path == "/api/metrics":
+                data = json.dumps(collect_metrics(brain), ensure_ascii=False, indent=2)
+                self._respond(200, "application/json", data.encode())
+            elif path in ("/", "/index.html"):
+                qs_params = urllib.parse.parse_qs(parsed.query)
+                task_f = qs_params.get("task", [""])[0]
+                status = collect_status(brain)
+                generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                content = build_html(status, brain, generated_at,
+                                     live_refresh=True, task_filter=task_f,
+                                     audit_entries=read_audit_log(brain, limit=20, task_filter=task_f))
+                self._respond(200, "text/html; charset=utf-8", content.encode())
+            else:
+                self._respond(404, "text/plain", b"Not found")
+
+        def do_POST(self) -> None:  # noqa: N802
+            parsed = urllib.parse.urlparse(self.path)
+            parts = parsed.path.strip("/").split("/")
+            qs = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/api/providers/probe":
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                role = qs.get("role", [""])[0].strip()
+                timeout = qs.get("timeout", ["8"])[0].strip()
+                bp = shutil.which("brain-provider") or str(Path.home() / ".local" / "bin" / "brain-provider")
+                cmd = [bp, "--brain", str(brain), "probe", "--timeout", timeout, "--json"]
+                if role:
+                    cmd.extend(["--role", role])
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        env={**os.environ, "BRAIN_PATH": str(brain)},
+                        timeout=20,
+                    )
+                    payload = result.stdout.strip()
+                    if not payload:
+                        payload = json.dumps(
+                            {"ok": result.returncode == 0, "error": result.stderr.strip() if result.returncode else ""},
+                            ensure_ascii=False,
+                        )
+                    self._respond(200 if result.returncode == 0 else 500, "application/json", payload.encode())
+                except subprocess.TimeoutExpired:
+                    self._respond(504, "application/json", b'{"ok":false,"error":"provider probe timed out"}')
+                except Exception as exc:
+                    self._respond(500, "application/json",
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+                return
+            if parsed.path == "/api/launch":
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                workspace = qs.get("workspace", [""])[0].strip()
+                task_id = qs.get("task", [""])[0].strip()
+                role = qs.get("role", [""])[0].strip()
+                client = qs.get("client", [""])[0].strip()
+                model = qs.get("model", [""])[0].strip()
+                effort = qs.get("effort", [""])[0].strip()
+                agent = qs.get("as", [""])[0].strip()
+                dry_run = qs.get("dry_run", ["0"])[0] in ("1", "true", "yes")
+                mode = qs.get("mode", [""])[0].strip() or "interactive"
+                if mode not in ("interactive", "background"):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid mode (interactive|background)"}')
+                    return
+                if not workspace:
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"missing workspace"}')
+                    return
+                if not _valid_id(task_id):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid task id"}')
+                    return
+                if not _valid_id(role):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid role"}')
+                    return
+                if client not in ALLOWED_LAUNCH_CLIENTS:
+                    self._respond(400, "application/json",
+                                  json.dumps({"ok": False, "error": f"unsupported client: {client}"}).encode())
+                    return
+                if model and not re.match(r"^[A-Za-z0-9_.:/-]+$", model):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid model"}')
+                    return
+                if effort and not re.match(r"^[A-Za-z0-9_.-]+$", effort):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid effort"}')
+                    return
+                try:
+                    assert_not_sandbox_agent_launch(dry_run=dry_run, action="dashboard launch")
+                except SandboxLaunchError as exc:
+                    self._respond(409, "application/json",
+                                  json.dumps(
+                                      {
+                                          "ok": False,
+                                          "error": str(exc),
+                                          "sandbox_blocked": True,
+                                          "suggest_dry_run": True,
+                                      },
+                                      ensure_ascii=False,
+                                  ).encode())
+                    return
+                bo = shutil.which("brain-orchestrator") or str(Path.home() / ".local" / "bin" / "brain-orchestrator")
+                cmd = [
+                    bo,
+                    "--brain",
+                    str(brain),
+                    "console",
+                    "--task",
+                    task_id,
+                    "--role",
+                    role,
+                    "--primary",
+                    ALLOWED_LAUNCH_CLIENTS[client],
+                ]
+                cmd.append("--no-visible" if mode == "background" else "--interactive")
+                # Only pass --workspace for real project folders (with BRAIN.md);
+                # main-brain tasks run without it (brain has MEMORY.md, not BRAIN.md).
+                if workspace and workspace != str(brain):
+                    cmd[4:4] = ["--workspace", workspace]
+                if agent:
+                    if not _valid_id(agent):
+                        self._respond(400, "application/json",
+                                      b'{"ok":false,"error":"invalid agent id"}')
+                        return
+                    cmd.extend(["--agent", agent])
+                if model:
+                    cmd.extend(["--model", model])
+                if effort:
+                    cmd.extend(["--effort", effort])
+                if dry_run:
+                    cmd.append("--dry-run")
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True, text=True,
+                        env={**os.environ, "BRAIN_PATH": str(brain)},
+                        timeout=LAUNCH_TIMEOUT_SECONDS,
+                    )
+                    ok = result.returncode == 0
+                    payload = json.dumps({
+                        "ok": ok,
+                        "workspace": workspace,
+                        "task": task_id,
+                        "role": role,
+                        "client": client,
+                        "model": model,
+                        "effort": effort,
+                        "dry_run": dry_run,
+                        "output": result.stdout.strip(),
+                        "error": result.stderr.strip() if not ok else "",
+                    }, ensure_ascii=False)
+                    self._respond(200 if ok else 500, "application/json", payload.encode())
+                except subprocess.TimeoutExpired:
+                    self._respond(504, "application/json",
+                                  json.dumps({"ok": False, "error": f"launch timed out after {LAUNCH_TIMEOUT_SECONDS}s"}).encode())
+                except Exception as exc:
+                    self._respond(500, "application/json",
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+            elif len(parts) == 4 and parts[0] == "api" and parts[1] == "queue-proposals" and parts[3] == "launch":
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                proposal_id = parts[2]
+                if not _valid_id(proposal_id):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid proposal id"}')
+                    return
+                data = _load_queue_proposals(brain)
+                if not data.get("ok"):
+                    self._respond(500, "application/json", json.dumps(data, ensure_ascii=False).encode())
+                    return
+                proposal = _find_queue_proposal(data, proposal_id)
+                if not proposal:
+                    self._respond(404, "application/json",
+                                  b'{"ok":false,"error":"proposal not found"}')
+                    return
+                workspace = str(proposal.get("workspace") or "")
+                task_id = str(proposal.get("task") or "")
+                role = str(proposal.get("role") or "")
+                # Use client from query string if provided, otherwise fall back to proposal.
+                client_override = qs.get("client", [""])[0].strip()
+                client = client_override if client_override else str(proposal.get("client") or "")
+                model = qs.get("model", [""])[0].strip()
+                effort = qs.get("effort", [""])[0].strip()
+                dry_run = qs.get("dry_run", ["0"])[0] in ("1", "true", "yes")
+                mode = qs.get("mode", [""])[0].strip()
+                if mode and mode not in ("interactive", "background"):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid mode (interactive|background)"}')
+                    return
+                proposal_status = str(proposal.get("status") or "pending")
+                if not dry_run and proposal_status != "pending":
+                    self._respond(409, "application/json",
+                                  json.dumps({
+                                      "ok": False,
+                                      "proposal": proposal_id,
+                                      "status": proposal_status,
+                                      "error": f"proposal status is {proposal_status!r}; refusing to relaunch (only pending may be launched)",
+                                  }, ensure_ascii=False).encode())
+                    return
+                if not _valid_id(task_id) or not _valid_id(role):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"proposal has invalid task or role"}')
+                    return
+                if client not in ALLOWED_LAUNCH_CLIENTS:
+                    self._respond(400, "application/json",
+                                  json.dumps({"ok": False, "error": f"unsupported client: {client}"}).encode())
+                    return
+                if model and not re.match(r"^[A-Za-z0-9_.:/-]+$", model):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid model"}')
+                    return
+                if effort and not re.match(r"^[A-Za-z0-9_.-]+$", effort):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid effort"}')
+                    return
+                if workspace:
+                    ws = Path(workspace)
+                    if not ws.is_absolute() or not ws.is_dir():
+                        self._respond(400, "application/json",
+                                      json.dumps({"ok": False, "proposal": proposal_id,
+                                                  "error": f"proposal workspace is not an existing absolute directory: {workspace}"},
+                                                 ensure_ascii=False).encode())
+                        return
+                    workspace = str(ws.resolve())
+                try:
+                    assert_not_sandbox_agent_launch(dry_run=dry_run, action="dashboard queue proposal launch")
+                except SandboxLaunchError as exc:
+                    self._respond(409, "application/json",
+                                  json.dumps(
+                                      {
+                                          "ok": False,
+                                          "proposal": proposal_id,
+                                          "error": str(exc),
+                                          "sandbox_blocked": True,
+                                          "suggest_dry_run": True,
+                                      },
+                                      ensure_ascii=False,
+                                  ).encode())
+                    return
+                def mark_launch_status(status: str, **fields: object) -> None:
+                    with brain_launch_queue.lock(brain):
+                        fresh = _load_queue_proposals(brain)
+                        target = _find_queue_proposal(fresh, proposal_id) if fresh.get("ok") else None
+                        if target is None:
+                            return
+                        target["status"] = status
+                        for key, value in fields.items():
+                            if value is None:
+                                target.pop(key, None)
+                            else:
+                                target[key] = value
+                        _save_queue_proposals(brain, fresh)
+
+                if not dry_run:
+                    launching_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    with brain_launch_queue.lock(brain):
+                        fresh = _load_queue_proposals(brain)
+                        if not fresh.get("ok"):
+                            self._respond(500, "application/json", json.dumps(fresh, ensure_ascii=False).encode())
+                            return
+                        target = _find_queue_proposal(fresh, proposal_id)
+                        if not target:
+                            self._respond(404, "application/json",
+                                          b'{"ok":false,"error":"proposal not found"}')
+                            return
+                        current_status = str(target.get("status") or "pending")
+                        if current_status != "pending":
+                            self._respond(409, "application/json",
+                                          json.dumps({
+                                              "ok": False,
+                                              "proposal": proposal_id,
+                                              "status": current_status,
+                                              "error": f"proposal status is {current_status!r}; refusing to relaunch (only pending may be launched)",
+                                          }, ensure_ascii=False).encode())
+                            return
+                        target["status"] = "launching"
+                        target["launching_at"] = launching_at
+                        target.pop("error", None)
+                        target.pop("error_at", None)
+                        _save_queue_proposals(brain, fresh)
+                bo = shutil.which("brain-orchestrator") or str(Path.home() / ".local" / "bin" / "brain-orchestrator")
+                cmd = [
+                    bo,
+                    "--brain",
+                    str(brain),
+                    "console",
+                    "--task",
+                    task_id,
+                    "--role",
+                    role,
+                    "--primary",
+                    ALLOWED_LAUNCH_CLIENTS[client],
+                ]
+                if workspace:
+                    cmd[4:4] = ["--workspace", workspace]
+                if mode == "interactive":
+                    cmd.append("--interactive")
+                elif mode == "background":
+                    cmd.append("--no-visible")
+                if model:
+                    cmd.extend(["--model", model])
+                if effort:
+                    cmd.extend(["--effort", effort])
+                if dry_run:
+                    cmd.append("--dry-run")
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        env={**os.environ, "BRAIN_PATH": str(brain)},
+                        timeout=LAUNCH_TIMEOUT_SECONDS,
+                    )
+                    ok = result.returncode == 0
+                    if not dry_run:
+                        finished_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if ok:
+                            mark_launch_status(
+                                "launched",
+                                launched_at=finished_at,
+                                error=None,
+                                error_at=None,
+                                returncode=result.returncode,
+                            )
+                        else:
+                            launch_error = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+                            mark_launch_status(
+                                "error",
+                                error_at=finished_at,
+                                error=launch_error[:4000],
+                                returncode=result.returncode,
+                            )
+                    payload = json.dumps({
+                        "ok": ok,
+                        "proposal": proposal_id,
+                        "workspace": workspace,
+                        "task": task_id,
+                        "role": role,
+                        "client": client,
+                        "model": model,
+                        "effort": effort,
+                        "dry_run": dry_run,
+                        "output": result.stdout.strip(),
+                        "error": result.stderr.strip() if not ok else "",
+                    }, ensure_ascii=False)
+                    self._respond(200 if ok else 500, "application/json", payload.encode())
+                except subprocess.TimeoutExpired:
+                    if not dry_run:
+                        error = f"launch timed out after {LAUNCH_TIMEOUT_SECONDS}s"
+                        mark_launch_status(
+                            "error",
+                            error_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            error=error,
+                        )
+                    self._respond(504, "application/json",
+                                  json.dumps({"ok": False, "proposal": proposal_id,
+                                              "error": f"launch timed out after {LAUNCH_TIMEOUT_SECONDS}s"}).encode())
+                except Exception as exc:
+                    if not dry_run:
+                        mark_launch_status(
+                            "error",
+                            error_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            error=str(exc),
+                        )
+                    self._respond(500, "application/json",
+                                  json.dumps({"ok": False, "proposal": proposal_id, "error": str(exc)}).encode())
+            elif len(parts) == 3 and parts[0] == "api" and parts[1] == "cycle":
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                unit = parts[2]
+                action = qs.get("action", [""])[0].strip()
+                if not re.match(r"^brain-[a-z0-9-]+\.timer$", unit):
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"invalid cycle unit (expected brain-*.timer)"}')
+                    return
+                base = unit[: -len(".timer")]
+                if action == "run":
+                    cmd = ["systemctl", "--user", "start", base + ".service"]
+                elif action == "pause":
+                    cmd = ["systemctl", "--user", "disable", "--now", unit]
+                elif action == "resume":
+                    cmd = ["systemctl", "--user", "enable", "--now", unit]
+                else:
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"unknown action (run|pause|resume)"}')
+                    return
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    ok = result.returncode == 0
+                    self._respond(200 if ok else 500, "application/json", json.dumps({
+                        "ok": ok,
+                        "unit": unit,
+                        "action": action,
+                        "output": (result.stdout or "").strip() or ("ok" if ok else ""),
+                        "error": (result.stderr or "").strip() if not ok else "",
+                    }, ensure_ascii=False).encode())
+                except subprocess.TimeoutExpired:
+                    self._respond(504, "application/json",
+                                  b'{"ok":false,"error":"systemctl timed out"}')
+                except Exception as exc:
+                    self._respond(500, "application/json",
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+            elif len(parts) == 3 and parts[0] == "api" and parts[1] == "workspace" and parts[2] == "import":
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                descriptor = qs.get("descriptor", [""])[0].strip()
+                target = qs.get("target", [""])[0].strip()
+                if not descriptor:
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"missing descriptor"}')
+                    return
+                try:
+                    content = ""
+                    inferred_target = ""
+                    if descriptor.startswith("http://") or descriptor.startswith("https://"):
+                        content = _read_remote_descriptor_url(descriptor)
+                    else:
+                        path = Path(descriptor)
+                        if not path.is_absolute():
+                            path = (brain / path).resolve()
+                        if not path.exists() or not path.is_file():
+                            self._respond(400, "application/json",
+                                          b'{"ok":false,"error":"local descriptor file does not exist"}')
+                            return
+                        inferred_target = str(path.parent)
+                        content = path.read_text(encoding="utf-8")
+                    
+                    from brain_workspace import convert_folder_to_workspace, parse_local_tasks, parse_project_descriptor
+                    parsed_desc = parse_project_descriptor(content)
+
+                    result_payload = {
+                        "ok": True,
+                        "name": parsed_desc["name"],
+                        "goal": parsed_desc["goal"],
+                        "tasks": parsed_desc["tasks"],
+                        "roles": parsed_desc["roles"],
+                    }
+                    target_folder = target or inferred_target
+                    if not target_folder:
+                        self._respond(400, "application/json",
+                                      b'{"ok":false,"error":"target folder is required for URL descriptors"}')
+                        return
+                    folder = Path(target_folder)
+                    if not folder.is_absolute():
+                        folder = (brain / folder).resolve()
+                    if not folder.exists() or not folder.is_dir():
+                        self._respond(400, "application/json",
+                                      b'{"ok":false,"error":"target folder does not exist"}')
+                        return
+                    tasks_path = folder / "TASKS.md"
+                    before_count = len(parse_local_tasks(tasks_path))
+                    workspace_info = convert_folder_to_workspace(folder, parsed_desc)
+                    after_count = len(parse_local_tasks(tasks_path))
+                    result_payload.update({
+                        "workspace": str(workspace_info.path),
+                        "created_tasks": max(after_count - before_count, 0),
+                    })
+
+                    payload = json.dumps(result_payload, ensure_ascii=False)
+                    self._respond(200, "application/json", payload.encode())
+                except Exception as exc:
+                    self._respond(400, "application/json",
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+            elif len(parts) == 3 and parts[0] == "api" and parts[1] == "tasks":
+                task_id = parts[2]
+                if self.headers.get("X-Brain-Confirm", "") != "1":
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"missing X-Brain-Confirm header"}')
+                    return
+                if not self._authorized(parsed):
+                    self._respond(403, "application/json",
+                                  b'{"ok":false,"error":"invalid or missing dashboard auth token"}')
+                    return
+                agents = qs.get("as", [])
+                if not agents:
+                    self._respond(400, "application/json",
+                                  b'{"ok":false,"error":"missing ?as=<agent-id>"}')
+                    return
+                agent_id = agents[0]
+                action = self.headers.get("X-Brain-Action", "")
+                if not action:
+                    action = qs.get("action", ["take"])[0]
+                if action not in ("take", "release", "complete", "block"):
+                    self._respond(400, "application/json",
+                                  json.dumps({"ok": False,
+                                              "error": f"unknown action: {action}"}).encode())
+                    return
+                bt = shutil.which("brain-task") or str(Path.home() / ".local" / "bin" / "brain-task")
+                if action == "block":
+                    reason = qs.get("reason", ["blocked via dashboard"])[0].strip()
+                    if not reason:
+                        reason = "blocked via dashboard"
+                    cmd = [bt, "block", task_id, reason]
+                else:
+                    cmd = [bt, action, task_id, "--as", agent_id]
+                    model = qs.get("model", [""])[0].strip()
+                    if action == "complete" and model:
+                        cmd += ["--model", model]
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True, text=True,
+                        env={**os.environ, "BRAIN_PATH": str(brain)},
+                    )
+                    ok = result.returncode == 0
+                    payload = json.dumps({
+                        "ok": ok,
+                        "task_id": task_id,
+                        "action": action,
+                        "agent": agent_id,
+                        "output": result.stdout.strip(),
+                        "error": result.stderr.strip() if not ok else "",
+                    }, ensure_ascii=False)
+                    self._respond(200 if ok else 500, "application/json", payload.encode())
+                except Exception as exc:
+                    self._respond(500, "application/json",
+                                  json.dumps({"ok": False, "error": str(exc)}).encode())
+            else:
+                self._respond(404, "text/plain", b"Not found")
+
+        def _read_auth_required(self, path: str) -> bool:
+            if not auth_token:
+                return False
+            return path in ("/", "/index.html", "/events") or path.startswith("/api/")
+
+        def _authorized(self, parsed: object | None = None) -> bool:
+            if not auth_token:
+                return True
+            supplied = self.headers.get("X-Brain-Token", "")
+            if not supplied and parsed is not None:
+                query = getattr(parsed, "query", "")
+                supplied = urllib.parse.parse_qs(query).get("token", [""])[0]
+            return hmac.compare_digest(supplied, auth_token)
+
+        def _respond(self, code: int, ctype: str, body: bytes) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ANN002
+            pass
+
+    server = http.server.ThreadingHTTPServer((host, port), Handler)
+    print(f"Brain dashboard serving at http://{host}:{port}/")
+    if getattr(args, "open_browser", False):
+        try:
+            import webbrowser
+            webbrowser.open(f"http://{host}:{port}/")
+        except Exception:
+            pass
+    print("  /                       — HTML dashboard (SSE live counters)")
+    print("  /?task=<id>             — HTML dashboard filtered by task-id")
+    print("  /events                 — SSE stream (status updates every 5s)")
+    print("  /api/status             — JSON status")
+    print("  /api/index              — JSON index manifest")
+    print("  /api/tasks              — JSON active task list")
+    print("  /api/queue-proposals    — JSON daily queue-cycle launch proposals")
+    print("  /api/audit[?task=<id>]  — JSON audit log (last 20 write actions)")
+    print("  /api/learning           — JSON learning loop stats (counts + recent incidents)")
+    print("  /api/providers          — JSON role/provider matrix and cached health")
+    print("  /api/tokens             — JSON token economy metrics from brain-compact")
+    print("  /api/metrics            — JSON flat counters (orchestration/learning/webhook/policy)")
+    print("  POST /api/tasks/<id>?as=<agent>&action=take|release|complete|block")
+    print("  POST /api/launch?workspace=<path>&task=<id>&role=<role>&client=<cli>[&dry_run=1]")
+    print("  POST /api/queue-proposals/<id>/launch[?dry_run=1]")
+    print("Press Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    brain = brain_path(getattr(args, "brain", None))
+    if not brain.exists():
+        print(f"ERROR: Brain path does not exist: {brain}", file=sys.stderr)
+        return 1
+    out_path = (
+        Path(args.out) if getattr(args, "out", None)
+        else brain / "wiki" / "_views" / "brain-dashboard.html"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    status = collect_status(brain)
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old_snapshot = load_snapshot(brain)
+    delta = compute_delta(old_snapshot, status)
+    html_content = build_html(status, brain, generated_at, delta=delta,
+                              audit_entries=read_audit_log(brain, limit=20))
+    save_snapshot(brain, status)
+    out_path.write_text(html_content, encoding="utf-8")
+    print(f"Dashboard exported: {out_path}")
+    return 0
+
+
+def _dashboard_html(brain: Path) -> str:
+    status = collect_status(brain)
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return build_html(status, brain, generated_at,
+                      audit_entries=read_audit_log(brain, limit=20))
+
+
+def _run_playwright_check(html_path: Path, out_dir: Path) -> tuple[bool, str]:
+    script = r"""
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('playwright');
+
+const htmlPath = process.argv[2];
+const outDir = process.argv[3];
+const required = [
+  'activity', 'operator-console', 'tasks', 'locks', 'council', 'index',
+  'release-gates', 'handoff-limits', 'providers', 'token-metrics',
+  'learning', 'audit-log'
+];
+
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const results = [];
+  for (const vp of [{name: 'desktop', width: 1366, height: 900}, {name: 'mobile', width: 390, height: 844}]) {
+    await page.setViewportSize({ width: vp.width, height: vp.height });
+    await page.goto('file://' + path.resolve(htmlPath));
+    const data = await page.evaluate((required) => {
+      const missing = required.filter(id => !document.getElementById(id));
+      const sections = [...document.querySelectorAll('section')].map(s => {
+        const r = s.getBoundingClientRect();
+        return { id: s.id, top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height };
+      });
+      const overlaps = [];
+      for (let i = 1; i < sections.length; i++) {
+        if (sections[i].top < sections[i - 1].bottom - 1) {
+          overlaps.push(`${sections[i - 1].id}->${sections[i].id}`);
+        }
+      }
+      return {
+        missing,
+        overlaps,
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        blank: document.body.innerText.trim().length === 0
+      };
+    }, required);
+    const screenshot = path.join(outDir, `dashboard-${vp.name}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    results.push({ viewport: vp, screenshot, ...data });
+  }
+  await browser.close();
+  const bad = results.flatMap(r => [
+    ...r.missing.map(x => `${r.viewport.name}: missing #${x}`),
+    ...r.overlaps.map(x => `${r.viewport.name}: overlap ${x}`),
+    ...(r.blank ? [`${r.viewport.name}: blank body`] : []),
+    ...(r.scrollWidth > r.clientWidth + 4 ? [`${r.viewport.name}: horizontal overflow ${r.scrollWidth}/${r.clientWidth}`] : []),
+  ]);
+  fs.writeFileSync(path.join(outDir, 'visual-check.json'), JSON.stringify({ ok: bad.length === 0, results, errors: bad }, null, 2));
+  if (bad.length) {
+    console.error(bad.join('\n'));
+    process.exit(1);
+  }
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+"""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as f:
+        f.write(script)
+        script_path = Path(f.name)
+    try:
+        res = subprocess.run(
+            ["node", str(script_path), str(html_path), str(out_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    finally:
+        try:
+            script_path.unlink()
+        except OSError:
+            pass
+    if res.returncode == 0:
+        return True, "browser screenshots OK"
+    return False, (res.stderr or res.stdout or "").strip()
+
+
+def _run_chrome_check(html_path: Path, out_dir: Path) -> tuple[bool, str]:
+    chrome = None
+    for candidate in ("google-chrome", "chromium", "chromium-browser"):
+        chrome = shutil.which(candidate)
+        if chrome:
+            break
+    if not chrome:
+        return False, "chrome executable not available"
+
+    results: list[dict[str, object]] = []
+    errors: list[str] = []
+    for name, size in (("desktop", "1366,900"), ("mobile", "390,844")):
+        screenshot = out_dir / f"dashboard-{name}.png"
+        res = subprocess.run(
+            [
+                chrome,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                f"--window-size={size}",
+                f"--screenshot={screenshot}",
+                str(html_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if res.returncode != 0:
+            errors.append((res.stderr or res.stdout or f"{name}: chrome failed").strip())
+        if not screenshot.exists() or screenshot.stat().st_size == 0:
+            errors.append(f"{name}: missing screenshot")
+        results.append({"viewport": name, "screenshot": str(screenshot)})
+
+    report = {
+        "ok": not errors,
+        "adapter": "chrome-cli",
+        "results": results,
+        "errors": errors,
+    }
+    (out_dir / "visual-check.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if errors:
+        return False, "; ".join(errors)
+    return True, f"chrome screenshots OK ({chrome})"
+
+
+def cmd_visual_check(args: argparse.Namespace) -> int:
+    brain = brain_path(getattr(args, "brain", None))
+    out_dir = Path(args.out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    html_path = out_dir / "brain-dashboard.html"
+    html_content = _dashboard_html(brain)
+    html_path.write_text(html_content, encoding="utf-8")
+
+    required_sections = [
+        "activity", "operator-console", "task-operations", "locks", "council", "index",
+        "release-gates", "handoff-limits", "providers", "token-metrics",
+        "learning", "audit-log",
+    ]
+    errors: list[str] = []
+    for section_id in required_sections:
+        if f'id="{section_id}"' not in html_content and f"id='{section_id}'" not in html_content:
+            errors.append(f"missing section #{section_id}")
+    if '<meta name="viewport"' not in html_content:
+        errors.append("missing viewport meta")
+    if "overflow-x: auto" not in html_content:
+        errors.append("missing table horizontal overflow guard")
+    # Базовый кегль либо фиксирован, либо задан clamp с явными границами.
+    # Запрет на «кегль, зависящий от окна» остаётся в силе для произвольных
+    # объявлений: беда не в текучести, а в безграничности — на чистых vw
+    # пользовательская настройка размера шрифта перестаёт действовать.
+    # Границы clamp заданы в rem, поэтому настройка продолжает работать.
+    fs_base_fixed = re.search(r"--fs-base:\s*\d+(?:\.\d+)?px", html_content)
+    fs_base_clamped = re.search(
+        r"--fs-base:\s*clamp\(\s*[\d.]+rem\s*,[^,]+,\s*[\d.]+rem\s*\)", html_content)
+    if not (fs_base_fixed or fs_base_clamped):
+        errors.append("missing stable body font-size")
+    if "font-size: calc(" in html_content or "font-size: clamp(" in html_content:
+        errors.append("viewport-scaled font-size detected")
+
+    browser_status = "skipped"
+    browser_detail = "no browser adapter available"
+    has_node = subprocess.run(["node", "-e", "require('playwright')"], capture_output=True, text=True).returncode == 0
+    if has_node:
+        ok, detail = _run_playwright_check(html_path, out_dir)
+        browser_status = "ok" if ok else "failed"
+        browser_detail = detail
+        if not ok:
+            errors.append(f"browser check failed: {detail[:500]}")
+    else:
+        ok, detail = _run_chrome_check(html_path, out_dir)
+        browser_status = "ok" if ok else "skipped"
+        browser_detail = detail
+        if not ok and args.require_browser:
+            errors.append(f"browser check failed: {detail[:500]}")
+
+    report = {
+        "ok": not errors,
+        "html": str(html_path),
+        "browser": browser_status,
+        "browser_detail": browser_detail,
+        "errors": errors,
+    }
+    report_path = out_dir / "visual-check.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Dashboard visual check: {'OK' if not errors else 'FAILED'}")
+        print(f"  html: {html_path}")
+        print(f"  browser: {browser_status} ({browser_detail})")
+        print(f"  report: {report_path}")
+        for error in errors:
+            print(f"  ERROR: {error}")
+    return 0 if not errors else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Read-only Brain orchestration dashboard.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Commands:\n"
+            "  export   Generate static HTML dashboard\n"
+            "  serve    Serve live dashboard over HTTP (localhost only)\n\n"
+            "  visual-check  Export dashboard and run visual/layout checks\n\n"
+            "Examples:\n"
+            "  brain-dashboard export\n"
+            "  brain-dashboard export --out /tmp/dashboard.html\n"
+            "  brain-dashboard serve --port 8765\n"
+            "  brain-dashboard --brain ~/brain export\n"
+        ),
+    )
+    parser.add_argument(
+        "--brain", default=None,
+        help="Brain path. Defaults to BRAIN_PATH env var or ~/brain.",
+    )
+    sub = parser.add_subparsers(dest="command")
+    exp = sub.add_parser("export", help="Generate static HTML dashboard.")
+    exp.add_argument(
+        "--out", default=None,
+        help="Output file (default: $BRAIN_PATH/wiki/_views/brain-dashboard.html).",
+    )
+    srv = sub.add_parser("serve", help="Serve live dashboard on localhost.")
+    srv.add_argument(
+        "--port", type=int, default=8765,
+        help="Port to listen on (default: 8765).",
+    )
+    srv.add_argument(
+        "--host", default="127.0.0.1",
+        help="Host to listen on (default: 127.0.0.1). Non-loopback requires BRAIN_DASHBOARD_AUTH_TOKEN.",
+    )
+    srv.add_argument(
+        "--open-browser", action="store_true",
+        help="Open default browser after server starts (default: off — keeps headless tests quiet).",
+    )
+    vis = sub.add_parser("visual-check", help="Run static and optional browser dashboard visual checks.")
+    vis.add_argument(
+        "--out-dir", default="/tmp/brain-dashboard-visual",
+        help="Artifact directory for HTML, report and optional screenshots.",
+    )
+    vis.add_argument(
+        "--require-browser", action="store_true",
+        help="Fail if neither Node Playwright nor headless Chrome is available.",
+    )
+    vis.add_argument("--json", action="store_true", help="Output JSON report.")
+    args = parser.parse_args()
+    if not args.command:
+        args.command = "serve"
+        args.port = 8765
+        args.host = "127.0.0.1"
+
+    if args.command == "export":
+        return cmd_export(args)
+    if args.command == "serve":
+        return cmd_serve(args)
+    if args.command == "visual-check":
+        return cmd_visual_check(args)
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

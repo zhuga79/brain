@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Пересборка поискового индекса, когда он устарел.
+
+Логика живёт в `brain_app.cycles.index_refresh`, здесь — только точка входа.
+"""
+
+from __future__ import annotations
+
+from brain_app.cycles import index_refresh, runner
+
+
+def main(argv: list[str] | None = None) -> int:
+    return runner.dispatch(index_refresh.SPEC, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

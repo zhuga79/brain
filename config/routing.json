@@ -1,0 +1,361 @@
+{
+  "version": 2,
+  "updated": "2026-08-10",
+  "source": "$BRAIN/config/routing.json",
+  "manual_override_priority": [
+    "--cli / BRAIN_CLI_OVERRIDE",
+    "клиент, закреплённый скиллом за задачей",
+    "$BRAIN/config/routing.json",
+    "defaults.cli"
+  ],
+  "health_policy": {
+    "live_probe_default": false,
+    "reason": "provider probes can consume quota; dashboard reads config and cached status only",
+    "cache_file": ".provider-health.json"
+  },
+  "roles": {
+    "accountant": {
+      "profile": "analysis-with-code"
+    },
+    "arbiter": {
+      "profile": "synthesis",
+      "diversify_from_author": true
+    },
+    "architect": {
+      "profile": "architecture"
+    },
+    "cfo": {
+      "profile": "analysis-with-code"
+    },
+    "compliance": {
+      "profile": "heavy-legal"
+    },
+    "copywriter": {
+      "profile": "strategy"
+    },
+    "delivery": {
+      "profile": "strategy"
+    },
+    "designer": {
+      "profile": "strategy"
+    },
+    "developer": {
+      "profile": "implementation"
+    },
+    "growth-analyst": {
+      "profile": "analysis-with-code"
+    },
+    "impeccable-reviewer": {
+      "profile": "independent-review",
+      "diversify_from_author": true
+    },
+    "lawyer": {
+      "profile": "heavy-legal"
+    },
+    "linter": {
+      "profile": "wiki-maintenance"
+    },
+    "maintainer": {
+      "profile": "strategy"
+    },
+    "negotiator": {
+      "profile": "strategy"
+    },
+    "paralegal": {
+      "profile": "linear-legal"
+    },
+    "pm": {
+      "profile": "strategy"
+    },
+    "product": {
+      "profile": "strategy"
+    },
+    "qa": {
+      "profile": "verification"
+    },
+    "renovation-planner": {
+      "profile": "strategy"
+    },
+    "researcher": {
+      "profile": "deep-research"
+    },
+    "reviewer": {
+      "profile": "independent-review",
+      "diversify_from_author": true
+    },
+    "security": {
+      "profile": "independent-review",
+      "diversify_from_author": true
+    },
+    "skill-curator": {
+      "profile": "wiki-maintenance"
+    },
+    "sre": {
+      "profile": "ops"
+    },
+    "strategist": {
+      "profile": "strategy"
+    },
+    "taste-reviewer": {
+      "profile": "independent-review",
+      "diversify_from_author": true
+    },
+    "tax-advisor": {
+      "profile": "heavy-legal"
+    },
+    "tech-writer": {
+      "profile": "wiki-maintenance"
+    },
+    "triage": {
+      "profile": "wiki-maintenance"
+    }
+  },
+  "schema": "routing/v2",
+  "note": "Единственный источник маршрутизации роль → команда. Роль указывает профиль, профиль — упорядоченный список кандидатов. Читается через brain_provider.resolve_for_role; bash-слой зовёт brain-provider cli.",
+  "providers": {
+    "claude": {
+      "command": "claude",
+      "model_flag": "--model {model}",
+      "enabled": true
+    },
+    "opencode": {
+      "command": "opencode run",
+      "model_flag": "-m opencode/{model}",
+      "enabled": true
+    },
+    "codex": {
+      "command": "codex",
+      "model_flag": "",
+      "enabled": true,
+      "note": "квота исчерпана до 2026-09-07 — факт записан в .provider-health.json, не в политике"
+    },
+    "gemini": {
+      "command": "gemini",
+      "model_flag": "-m {model}",
+      "enabled": false,
+      "note": "отключён решением оператора 2026-08-10"
+    }
+  },
+  "defaults": {
+    "cli": "claude"
+  },
+  "profiles": {
+    "architecture": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "проектирование, ADR, декомпозиция"
+      },
+      {
+        "rank": 2,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "структурный разбор",
+        "effort": "xhigh"
+      },
+      {
+        "rank": 3,
+        "provider": "gemini",
+        "model": "gemini-3.1-pro",
+        "use_for": "независимая длинноконтекстная альтернатива"
+      }
+    ],
+    "implementation": [
+      {
+        "rank": 1,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "быстрая реализация по плану"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "реализация, когда opencode недоступен"
+      },
+      {
+        "rank": 3,
+        "provider": "codex",
+        "model": "gpt-5.3",
+        "use_for": "правки кода",
+        "effort": "medium"
+      }
+    ],
+    "independent-review": [
+      {
+        "rank": 1,
+        "provider": "opencode",
+        "model": "deepseek-v4-pro",
+        "use_for": "иная модельная семья, чем у автора"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "глубокая критика"
+      },
+      {
+        "rank": 3,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "контрактный разбор",
+        "effort": "high"
+      }
+    ],
+    "synthesis": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "синтез мнений совета"
+      },
+      {
+        "rank": 2,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "запасной синтез иной семьёй"
+      },
+      {
+        "rank": 3,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "синтез с учётом архитектуры",
+        "effort": "xhigh"
+      }
+    ],
+    "deep-research": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "нужен web-поиск и сопоставление источников"
+      },
+      {
+        "rank": 2,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "сбор без веб-поиска"
+      },
+      {
+        "rank": 3,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "упаковка источников",
+        "effort": "medium"
+      }
+    ],
+    "wiki-maintenance": [
+      {
+        "rank": 1,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "поддержка wiki и схем"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "чистка документации"
+      },
+      {
+        "rank": 3,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "проверка схем",
+        "effort": "medium"
+      }
+    ],
+    "verification": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "прогон сценариев и проверка результата"
+      },
+      {
+        "rank": 2,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "запасная проверка"
+      }
+    ],
+    "ops": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "эксплуатация, инциденты, скрипты"
+      },
+      {
+        "rank": 2,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "запасной исполнитель"
+      }
+    ],
+    "heavy-legal": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "договоры, споры, налоговые режимы"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "тот же провайдер, модель попроще"
+      }
+    ],
+    "linear-legal": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "шаблоны, практика, проверка контрагентов"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "если задача оказалась сложнее"
+      }
+    ],
+    "analysis-with-code": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "юнит-экономика, расчёты, исполнение кода"
+      },
+      {
+        "rank": 2,
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "use_for": "счётные задачи",
+        "effort": "high"
+      },
+      {
+        "rank": 3,
+        "provider": "opencode",
+        "model": "",
+        "use_for": "запасной счёт"
+      }
+    ],
+    "strategy": [
+      {
+        "rank": 1,
+        "provider": "claude",
+        "model": "opus",
+        "use_for": "позиционирование, приоритизация, переговоры"
+      },
+      {
+        "rank": 2,
+        "provider": "claude",
+        "model": "sonnet",
+        "use_for": "линейные задачи того же класса"
+      }
+    ]
+  }
+}
