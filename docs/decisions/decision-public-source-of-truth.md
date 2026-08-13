@@ -14,7 +14,7 @@ visibility: public
 
 # Decision: инверсия направления публикации
 
-**Статус:** предложено
+**Статус:** принято
 **Задача:** `t-2026-08-10-pr`
 **Роль:** architect (`operator-architect-1474212`)
 **Родитель:** [[decision-runtime-core-boundaries]]
@@ -296,9 +296,10 @@ CLA нет, inbound=outbound, Apache-2.0 — как записано в CONTRIBU
 | 9 | `t-2026-08-10-repo-protection-github-pr` — настройки GitHub, squash off | maintainer | P1 |
 | 10 | `t-2026-08-10-legal-ru-intake-claude-for-leg` — приём во втором репозитории | maintainer | P2 |
 
-Ранее заведённая `t-2026-08-10-wiki-opt-in-glob` (opt-in публикации по
-frontmatter) остаётся промежуточной мерой на время миграции и снимается
-вместе с `brain-publish` в пункте 8.
+`t-2026-08-10-wiki-opt-in-glob` (opt-in публикации по frontmatter) была
+промежуточной мерой на время миграции. После раздела граница структурная:
+страница не публикуется по пометке, потому что `wiki/` живёт только в
+приватном дереве. Задача закрыта вместе с пунктом 8.
 
 ## GitHub Free: что нельзя включить, пока репозиторий приватный
 

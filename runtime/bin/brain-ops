@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# brain-ops {watch|refresh} — Background operational maintenance.
+# brain-ops {watch|refresh|update} — Background operational maintenance.
 #
 # watch   : run a loop that refreshes provider health, metrics and gates.
 # refresh : run one-shot refresh of all data supply components.
+# update  : git pull the system checkout, reinstall CLI, run tests.
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
@@ -25,12 +26,41 @@ refresh() {
   echo ">>> [brain-ops] Done."
 }
 
+resolve_system_checkout() {
+  local cand
+  for cand in "${BRAIN_SYSTEM_PATH:-}" "$BRAIN"; do
+    [ -n "$cand" ] || continue
+    if [ -f "$cand/setup-brain-v2.sh" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  echo "brain-ops update: cannot find system checkout (set BRAIN_SYSTEM_PATH)" >&2
+  return 1
+}
+
+update() {
+  local root
+  root="$(resolve_system_checkout)"
+  if [ ! -d "$root/.git" ]; then
+    echo "brain-ops update: $root is not a git checkout" >&2
+    exit 1
+  fi
+  echo ">>> [brain-ops] pull $root"
+  git -C "$root" pull
+  echo ">>> [brain-ops] install"
+  bash "$root/setup-brain-v2.sh"
+  echo ">>> [brain-ops] tests"
+  bash "$root/tests/run.sh"
+}
+
 usage() {
   cat <<USAGE
 brain-ops — фоновое обслуживание и актуализация данных
 
   brain-ops refresh       актуализировать здоровье провайдеров, метрики и политики
   brain-ops watch         запустить цикл фонового обновления (300с)
+  brain-ops update        git pull системного чекаута, install, тесты
 
 USAGE
 }
@@ -38,6 +68,7 @@ USAGE
 cmd="${1:-help}"
 case "$cmd" in
   refresh) refresh ;;
+  update) update ;;
   watch)
     interval="${BRAIN_OPS_INTERVAL:-300}"
     echo ">>> [brain-ops] Starting ops watch loop (interval: ${interval}s)"

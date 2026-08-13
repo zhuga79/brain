@@ -1,15 +1,24 @@
-# Владелец по умолчанию.
+# Владелец по умолчанию. Default branch is master, not main.
 *                       @Blqd
 
-# Контракты системы: меняются только вместе с обоснованием.
+# Branch protection / rulesets (block direct push to master, require green CI
+# before merge) are unavailable on this private Free-plan repository.
+# GET /repos/Blqd/brain/branches/master/protection and /rulesets → 403
+# «Upgrade to GitHub Pro or make this repository public».
+# Do not make the repo public to unlock this. Re-apply after GitHub Pro,
+# or after the repo is public following a clean-history recreate.
+# If history rewrite recreates Blqd/brain, re-apply labels, merge settings
+# (squash off; merge-commit and rebase on) and this .github/ tree.
+
+# Контракты системы: меняются только вместе с ADR.
 /MEMORY.md              @Blqd
+/AGENTS.md              @Blqd
 /tasks/SCHEMA.md        @Blqd
 /spec/                  @Blqd
 /roles/                 @Blqd
+/teams/                 @Blqd
 /doctrine/              @Blqd
-
-# Публикация: ошибка здесь выносит приватные данные наружу.
-/runtime/bin/brain-publish   @Blqd
+/docs/decisions/        @Blqd
 
 # Условия участия и безопасность.
 /CONTRIBUTING.md        @Blqd

@@ -68,6 +68,18 @@ def test_autocommit_stages_only_data_layer():
         assert not any(system in ln for ln in staged), f"автокоммит снова трогает {system}"
 
 
+def test_mcp_git_commit_stages_only_data_layer():
+    """MCP-копия git_commit() — тот же контракт, что и у shell-хелпера."""
+    text = (REPO / "runtime" / "mcp" / "common.py").read_text(encoding="utf-8")
+    body = text.split("def git_commit", 1)[1].split("\ndef ", 1)[0]
+    for system in ('"roles/"', '"doctrine/"', '"teams/"', '"MEMORY.md"'):
+        assert system not in body, f"MCP git_commit still stages {system}"
+    for data in ('"tasks/"', '"wiki/"', '"council/"', '"raw/"', '"prd/"'):
+        assert data in body or "DATA_PATHS" in body, (
+            f"MCP git_commit dropped data path {data}"
+        )
+
+
 def test_guard_hook_exists_and_is_wired():
     guard = REPO / "runtime" / "hooks" / "pre-commit-system-guard"
     assert guard.is_file()

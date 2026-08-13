@@ -47,10 +47,15 @@ def git_commit(msg: str):
     if not (BRAIN / ".git").exists():
         return
     try:
+        try:
+            from brain_core.layers import DATA_PATHS
+        except ImportError:
+            DATA_PATHS = ("tasks/", "wiki/", "council/", "raw/", "prd/")
+        existing = [p for p in DATA_PATHS if (BRAIN / p).exists()]
+        if not existing:
+            return
         add = subprocess.run(
-            ["git", "-C", str(BRAIN), "add",
-             "tasks/", "wiki/", "council/", "raw/", "doctrine/",
-             "prd/", "roles/", "teams/", "MEMORY.md"],
+            ["git", "-C", str(BRAIN), "add", *existing],
             check=False, capture_output=True, text=True,
         )
         if add.returncode != 0 and add.stderr.strip():
@@ -99,7 +104,8 @@ def expand_council(items: list[str]) -> list[str]:
         item = item.strip()
         if item.startswith("team:"):
             tname = item[5:]
-            tfile = BRAIN / "teams" / f"{tname}.md"
+            from brain_core.paths import resolve_system_asset
+            tfile = resolve_system_asset(f"teams/{tname}.md", brain=BRAIN)
             if tfile.exists():
                 if m := re.search(r"^roles:\s*\[([^\]]*)\]", tfile.read_text(), re.M):
                     out.extend([r.strip() for r in m.group(1).split(",") if r.strip()])
