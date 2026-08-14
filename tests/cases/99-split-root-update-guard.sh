@@ -44,23 +44,32 @@ roles: [developer]
 ---
 EOF
 
-export BRAIN_SYSTEM_PATH="$system"
-
-echo ">>> setup preserves private MEMORY and skips system shadows"
+echo ">>> direct setup auto-detects split-root without BRAIN_SYSTEM_PATH"
+unset BRAIN_SYSTEM_PATH
 bash "$system/setup-brain-v2.sh" >/dev/null
 grep -q '^# private marker$' "$data/MEMORY.md" || {
-  echo "FAILED: setup overwrote data MEMORY.md"
+  echo "FAILED: direct setup overwrote data MEMORY.md"
   cat "$data/MEMORY.md"
   exit 1
 }
 for d in roles doctrine skills config; do
   [ ! -e "$data/$d" ] || {
-    echo "FAILED: setup restored $d/ into data root"
+    echo "FAILED: direct setup restored $d/ into data root"
     exit 1
   }
 done
 [ -f "$data/teams/insurance-fraud.md" ] || {
-  echo "FAILED: setup removed allowed data teams asset"
+  echo "FAILED: direct setup removed allowed data teams asset"
+  exit 1
+}
+
+export BRAIN_SYSTEM_PATH="$system"
+
+echo ">>> setup still preserves private MEMORY with explicit BRAIN_SYSTEM_PATH"
+bash "$system/setup-brain-v2.sh" >/dev/null
+grep -q '^# private marker$' "$data/MEMORY.md" || {
+  echo "FAILED: explicit split-root setup overwrote data MEMORY.md"
+  cat "$data/MEMORY.md"
   exit 1
 }
 
@@ -86,7 +95,26 @@ echo "$shadow_out" | grep -q "config/" || {
 }
 rm -rf "$data/config"
 
+echo ">>> legacy single-root setup remains working"
+single="$BRAIN_FACTORY_TMP/single-root"
+mkdir -p "$single"
+cp "$PROJECT_ROOT/setup-brain-v2.sh" "$single/"
+cp -R "$PROJECT_ROOT/runtime" "$single/"
+unset BRAIN_SYSTEM_PATH
+BRAIN_PATH="$single" bash "$single/setup-brain-v2.sh" >/dev/null
+for d in roles teams doctrine skills; do
+  [ -d "$single/$d" ] || {
+    echo "FAILED: single-root setup did not create $d/"
+    exit 1
+  }
+done
+[ -f "$single/MEMORY.md" ] || {
+  echo "FAILED: single-root setup did not create MEMORY.md"
+  exit 1
+}
+
 echo ">>> brain-ops update keeps data MEMORY and skips system shadows"
+export BRAIN_SYSTEM_PATH="$system"
 mkdir -p "$BRAIN_FACTORY_TMP/bin"
 cat > "$BRAIN_FACTORY_TMP/bin/git" <<'EOF'
 #!/usr/bin/env bash

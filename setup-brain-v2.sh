@@ -72,8 +72,16 @@ same_path() {
     "$(readlink -f "$right" 2>/dev/null || printf '%s' "$right")" ]
 }
 
+has_existing_data_root() {
+  [ -e "$BRAIN/MEMORY.md" ] || \
+  [ -e "$BRAIN/tasks/active.md" ] || \
+  [ -e "$BRAIN/tasks/done.md" ] || \
+  [ -d "$BRAIN/wiki" ] || \
+  [ -d "$BRAIN/raw" ]
+}
+
 SPLIT_ROOT=0
-if [ -n "${BRAIN_SYSTEM_PATH:-}" ] && ! same_path "$BRAIN" "$SYSTEM_ROOT"; then
+if ! same_path "$BRAIN" "$SYSTEM_ROOT" && { [ -n "${BRAIN_SYSTEM_PATH:-}" ] || has_existing_data_root; }; then
   SPLIT_ROOT=1
 fi
 
