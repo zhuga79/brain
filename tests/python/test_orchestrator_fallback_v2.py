@@ -82,6 +82,39 @@ def _console_args(brain: Path, task_id: str, *, primary: str = "", fallback: str
     )
 
 
+def test_command_match_requires_normalized_full_argv() -> None:
+    assert brain_orchestrator._command_matches("python3 /tmp/a.py --x", "python3 /tmp/a.py --x")
+    assert not brain_orchestrator._command_matches("python3 /tmp/a.py", "python3 /tmp/b.py")
+    assert not brain_orchestrator._command_matches("python3 /tmp/a.py --mode fast", "python3 /tmp/a.py --mode slow")
+    assert not brain_orchestrator._command_matches("/tmp/tool.sh --flag", "/tmp/tool.sh")
+
+
+def test_get_candidate_by_command_does_not_alias_same_executable(tmp_path) -> None:
+    matrix = {
+        "roles": {
+            "developer": {"profile": "implementation"},
+        },
+        "profiles": {
+            "implementation": [
+                {"rank": 1, "provider": "a", "model": "one"},
+                {"rank": 2, "provider": "b", "model": "two"},
+            ]
+        },
+        "providers": {
+            "a": {"command": "python3 /tmp/a.py", "model_flag": "", "enabled": True},
+            "b": {"command": "python3 /tmp/b.py", "model_flag": "", "enabled": True},
+        },
+    }
+    match = brain_orchestrator.get_candidate_by_command(matrix, "python3 /tmp/a.py")
+    miss = brain_orchestrator.get_candidate_by_command(matrix, "python3 /tmp/c.py")
+
+    assert match["provider"] == "a"
+    assert match["command"] == "python3 /tmp/a.py"
+    assert miss["provider"] == "python3"
+    assert miss["command"] == "python3 /tmp/c.py"
+    assert miss["model"] == "unknown"
+
+
 def test_console_auto_fallback_uses_next_v2_candidate(monkeypatch, tmp_path, capsys):
     _patch_prompt(monkeypatch)
     brain = tmp_path / "brain"
@@ -190,3 +223,33 @@ def test_console_explicit_primary_still_auto_selects_routed_fallback(monkeypatch
 
     assert rc == 0
     assert marker.read_text(encoding="utf-8") == "explicit-ok"
+
+
+def test_console_explicit_override_without_exact_routed_match_uses_synthetic_metadata(monkeypatch, tmp_path):
+    _patch_prompt(monkeypatch)
+    brain = tmp_path / "brain"
+    task_id = "t-explicit-override"
+    marker = tmp_path / "fallback.synthetic"
+    primary = _make_executable(
+        tmp_path / "primary.sh",
+        "#!/usr/bin/env bash\n"
+        "echo 'HTTP 429 Too Many Requests RESOURCE_EXHAUSTED' >&2\n"
+        "exit 42\n",
+    )
+    fallback = _make_executable(
+        tmp_path / "fallback.sh",
+        f"#!/usr/bin/env bash\nprintf 'synthetic-ok' > {marker}\nexit 0\n",
+    )
+    _write_task(brain, task_id)
+    _write_live_v2_routing(brain, primary, fallback)
+
+    override = f"{primary} --override-flag"
+    rc = brain_orchestrator.cmd_console(_console_args(brain, task_id, primary=override))
+
+    assert rc == 0
+    assert marker.read_text(encoding="utf-8") == "synthetic-ok"
+    handoff = (brain / "handoff" / "ORCHESTRATOR_HANDOFF.md").read_text(encoding="utf-8")
+    assert '--override-flag' in handoff
+    assert '"provider": "bash"' in handoff
+    assert '"provider": "fake-primary"' not in handoff
+    assert '"model": "unknown"' in handoff

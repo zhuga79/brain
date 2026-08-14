@@ -544,22 +544,19 @@ def _command_text(cmd: str | list[str]) -> str:
     return " ".join(str(part) for part in cmd).strip()
 
 
-def _command_matches(candidate_command: str, actual_command: str) -> bool:
-    candidate_command = (candidate_command or "").strip()
-    actual_command = (actual_command or "").strip()
-    if not candidate_command or not actual_command:
-        return False
-    if candidate_command == actual_command or actual_command.startswith(candidate_command):
-        return True
+def _normalized_command_parts(command: str | list[str]) -> tuple[str, ...]:
+    if isinstance(command, list):
+        return tuple(str(part) for part in command)
     try:
-        candidate_parts = shlex.split(candidate_command)
-        actual_parts = shlex.split(actual_command)
+        return tuple(shlex.split(command))
     except ValueError:
-        candidate_parts = candidate_command.split()
-        actual_parts = actual_command.split()
-    if not candidate_parts or not actual_parts:
-        return False
-    return candidate_parts[0] == actual_parts[0]
+        return tuple(str(command).split())
+
+
+def _command_matches(candidate_command: str, actual_command: str) -> bool:
+    candidate_parts = _normalized_command_parts(candidate_command)
+    actual_parts = _normalized_command_parts(actual_command)
+    return bool(candidate_parts) and candidate_parts == actual_parts
 
 
 def get_candidate_by_command(matrix, cmd):
@@ -606,9 +603,7 @@ def candidate_for_role_command(
     for candidate in (preferred, fallback):
         if isinstance(candidate, dict) and _command_matches(str(candidate.get("command", "")), actual_command):
             return candidate
-    matrix = brain_provider.load_provider_matrix(brain)
-    candidate = get_candidate_by_command(matrix, actual_command)
-    return candidate if isinstance(candidate, dict) else None
+    return None
 
 
 def create_fallback_handoff(
