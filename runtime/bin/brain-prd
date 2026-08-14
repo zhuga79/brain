@@ -158,9 +158,7 @@ if do_commit:
     p_path = pathlib.Path(prd_path)
     active = pathlib.Path(active_path)
     done = pathlib.Path(done_path)
-    prd_text = p_path.read_text()
-    p_path.write_text(prdfile.replace_subtasks_section(prd_text, out_blocks))
-    result = prdfile.commit(p_path, active, done, parent_id)
+    result = prdfile.commit_prepared(p_path, active, done, parent_id, out_blocks)
     # log — intentionally brief: no prompt content, no secrets
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(log_path, "a") as fh:

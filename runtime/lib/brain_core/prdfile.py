@@ -55,6 +55,8 @@ def normalize_subtasks(parent_id: str, sub_text: str) -> list[NormalizedSubtask]
 
     normalized: list[tuple[str, str, str, str, dict[str, object]]] = []
     local_to_full: dict[str, str] = {}
+    seen_full_ids: set[str] = set()
+    duplicate_full_ids: set[str] = set()
 
     for block in blocks:
         parsed = brain_task_parser.parse_block(block)
@@ -64,11 +66,18 @@ def normalize_subtasks(parent_id: str, sub_text: str) -> list[NormalizedSubtask]
         local_id = str(parsed["id"])
         title = str(parsed["title"])
         full_id = local_id if local_id.startswith("t-") else f"{parent_id}-{local_id}"
+        if full_id in seen_full_ids:
+            duplicate_full_ids.add(full_id)
+        seen_full_ids.add(full_id)
         local_to_full[local_id] = full_id
         normalized.append((prio, full_id, title, block, parsed))
 
     if not normalized:
         raise PRDError("no subtasks found")
+    if duplicate_full_ids:
+        raise PRDError(
+            "duplicate normalized PRD subtask ids: " + ", ".join(sorted(duplicate_full_ids))
+        )
 
     out: list[NormalizedSubtask] = []
     for prio, full_id, title, original, _parsed in normalized:
@@ -106,6 +115,10 @@ def replace_subtasks_section(prd_text: str, blocks: list[str], *, status: str | 
     return updated
 
 
+def normalize_prepared_blocks(parent_id: str, blocks: list[str]) -> list[NormalizedSubtask]:
+    return normalize_subtasks(parent_id, "\n\n".join(blocks))
+
+
 def _queue_counts(*texts: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for text in texts:
@@ -136,6 +149,49 @@ def _append_blocks(active_text: str, parent_id: str, blocks: list[str]) -> str:
     return prefix + header + "\n\n" + body + "\n"
 
 
+def _commit_locked(
+    prd_path: Path,
+    active_path: Path,
+    done_path: Path,
+    parent_id: str,
+    prd_text: str,
+    subtasks: list[NormalizedSubtask],
+) -> CommitResult:
+    expected_ids = [item.task_id for item in subtasks]
+
+    active_text = _read(active_path) or "# Active tasks\n"
+    done_text = _read(done_path)
+    counts = _queue_counts(active_text, done_text)
+    duplicates = [task_id for task_id in expected_ids if counts.get(task_id, 0) > 1]
+    if duplicates:
+        raise PRDError(f"duplicate PRD subtasks in queue: {', '.join(sorted(duplicates))}")
+
+    missing_ids = [task_id for task_id in expected_ids if counts.get(task_id, 0) == 0]
+    missing_blocks = [item.block for item in subtasks if item.task_id in missing_ids]
+
+    committed = bool(re.search(r"^status:\s*committed\s*$", prd_text, re.M))
+    recovered = committed != (not missing_ids)
+    changed = False
+
+    committed_text = replace_subtasks_section(prd_text, [item.block for item in subtasks], status="committed")
+
+    if missing_blocks:
+        taskfile.atomic_write(active_path, _append_blocks(active_text, parent_id, missing_blocks))
+        changed = True
+
+    if committed_text != prd_text:
+        _write_prd(prd_path, committed_text)
+        changed = True
+
+    return CommitResult(
+        parent_id=parent_id,
+        subtasks=subtasks,
+        appended_ids=missing_ids,
+        recovered=recovered,
+        changed=changed,
+    )
+
+
 def commit(prd_path: Path, active_path: Path, done_path: Path, parent_id: str) -> CommitResult:
     tasks_dir = active_path.parent
     with taskfile.queue_lock(tasks_dir):
@@ -143,35 +199,20 @@ def commit(prd_path: Path, active_path: Path, done_path: Path, parent_id: str) -
         if not prd_text:
             raise PRDError(f"no PRD at {prd_path}")
         subtasks = normalize_subtasks(parent_id, _extract_subtasks(prd_text))
-        expected_ids = [item.task_id for item in subtasks]
+        return _commit_locked(prd_path, active_path, done_path, parent_id, prd_text, subtasks)
 
-        active_text = _read(active_path) or "# Active tasks\n"
-        done_text = _read(done_path)
-        counts = _queue_counts(active_text, done_text)
-        duplicates = [task_id for task_id in expected_ids if counts.get(task_id, 0) > 1]
-        if duplicates:
-            raise PRDError(f"duplicate PRD subtasks in queue: {', '.join(sorted(duplicates))}")
 
-        missing_ids = [task_id for task_id in expected_ids if counts.get(task_id, 0) == 0]
-        missing_blocks = [item.block for item in subtasks if item.task_id in missing_ids]
-
-        committed = bool(re.search(r"^status:\s*committed\s*$", prd_text, re.M))
-        recovered = committed != (not missing_ids)
-        changed = False
-
-        if missing_blocks:
-            taskfile.atomic_write(active_path, _append_blocks(active_text, parent_id, missing_blocks))
-            changed = True
-
-        committed_text = replace_subtasks_section(prd_text, [item.block for item in subtasks], status="committed")
-        if committed_text != prd_text:
-            _write_prd(prd_path, committed_text)
-            changed = True
-
-        return CommitResult(
-            parent_id=parent_id,
-            subtasks=subtasks,
-            appended_ids=missing_ids,
-            recovered=recovered,
-            changed=changed,
-        )
+def commit_prepared(
+    prd_path: Path,
+    active_path: Path,
+    done_path: Path,
+    parent_id: str,
+    prepared_blocks: list[str],
+) -> CommitResult:
+    tasks_dir = active_path.parent
+    with taskfile.queue_lock(tasks_dir):
+        prd_text = _read(prd_path)
+        if not prd_text:
+            raise PRDError(f"no PRD at {prd_path}")
+        subtasks = normalize_prepared_blocks(parent_id, prepared_blocks)
+        return _commit_locked(prd_path, active_path, done_path, parent_id, prd_text, subtasks)

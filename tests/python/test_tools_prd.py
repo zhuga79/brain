@@ -134,6 +134,32 @@ def test_commit_prd_recovers_committed_prd_with_missing_queue(tp):
     active = (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
     assert active.count("t-1-sub1") == 1
 
+
+def test_commit_prd_rejects_duplicate_normalized_ids_without_writes(tp):
+    p, tmp, common = tp
+    prd = tmp / "prd" / "t-1.md"
+    prd.write_text(
+        """status: draft
+## Subtasks
+
+- [ ] [P1] sub1 — First
+      acceptance: ok
+
+- [ ] [P1] t-1-sub1 — Duplicate
+      acceptance: ok
+""",
+        encoding="utf-8",
+    )
+    active = tmp / "tasks" / "active.md"
+    active_before = active.read_bytes()
+    prd_before = prd.read_bytes()
+
+    res = p.commit_prd("t-1")
+    assert res["status"] == "error"
+    assert "duplicate normalized PRD subtask ids" in res["error"]
+    assert active.read_bytes() == active_before
+    assert prd.read_bytes() == prd_before
+
 def test_get_prd_status(tp):
     p, tmp, common = tp
     (tmp / "prd" / "t-1.md").write_text("status: committed")

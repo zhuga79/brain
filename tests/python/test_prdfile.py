@@ -126,3 +126,55 @@ def test_concurrent_add_complete_and_prd_commit_preserve_all_mutations(tmp_path:
     assert "Concurrent add" in active_text
     assert "t-live" not in active_text
     assert done_text.count("t-live") == 1
+
+
+def test_commit_rejects_duplicate_normalized_ids_without_writing(tmp_path: Path):
+    prd_path, active, done = _setup_brain(tmp_path)
+    prd_path.write_text(
+        """---
+id: t-parent
+status: draft
+---
+## Subtasks
+
+- [ ] [P1] s1 — First
+      acceptance: ok
+
+- [ ] [P1] t-parent-s1 — Duplicate
+      acceptance: ok
+""",
+        encoding="utf-8",
+    )
+    active_before = active.read_bytes()
+    prd_before = prd_path.read_bytes()
+
+    try:
+        prdfile.commit(prd_path, active, done, "t-parent")
+    except prdfile.PRDError as exc:
+        assert "duplicate normalized PRD subtask ids" in str(exc)
+        assert "t-parent-s1" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected duplicate normalized ids to be rejected")
+
+    assert active.read_bytes() == active_before
+    assert prd_path.read_bytes() == prd_before
+
+
+def test_commit_prepared_rejects_duplicates_without_writing(tmp_path: Path):
+    prd_path, active, done = _setup_brain(tmp_path)
+    prepared = [
+        "- [ ] [P1] t-parent-s1 — First\n      parent: t-parent\n      acceptance: ok",
+        "- [ ] [P1] t-parent-s1 — Duplicate\n      parent: t-parent\n      acceptance: ok",
+    ]
+    active_before = active.read_bytes()
+    prd_before = prd_path.read_bytes()
+
+    try:
+        prdfile.commit_prepared(prd_path, active, done, "t-parent", prepared)
+    except prdfile.PRDError as exc:
+        assert "duplicate normalized PRD subtask ids" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected duplicate prepared ids to be rejected")
+
+    assert active.read_bytes() == active_before
+    assert prd_path.read_bytes() == prd_before
