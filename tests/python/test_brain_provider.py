@@ -67,15 +67,58 @@ class TestEnrichCandidate:
         item = brain_provider._enrich_candidate(
             {"provider": "x", "model": "m", "command": "doesnotexist"}, {}
         )
-        assert item["status"] == "unknown"
+        assert item["status"] == "unavailable"
         assert item["command_present"] is False
+        assert item["reason"] == "command not found: doesnotexist"
 
     def test_no_health_empty_command(self) -> None:
         item = brain_provider._enrich_candidate(
             {"provider": "x", "model": "m", "command": ""}, {}
         )
+        assert item["status"] == "unavailable"
+        assert item["command_present"] is False
+        assert item["reason"] == "empty provider command"
+
+    def test_declared_virtual_command_stays_eligible_without_local_binary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(shutil, "which", lambda c: None)
+        item = brain_provider._enrich_candidate(
+            {
+                "provider": "x",
+                "model": "m",
+                "command": "virtual-runner --model m",
+                "execution": "virtual",
+            },
+            {},
+        )
         assert item["status"] == "unknown"
         assert item["command_present"] is False
+        assert item["reason"] == "virtual command declared"
+
+    def test_path_assignment_in_command_is_used_for_lookup(self, tmp_path: Path) -> None:
+        tool = tmp_path / "bin" / "custom-cli"
+        tool.parent.mkdir()
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        command = f"PATH={tool.parent}:$PATH custom-cli --flag"
+        item = brain_provider._enrich_candidate(
+            {"provider": "x", "model": "m", "command": command},
+            {},
+        )
+        assert item["status"] == "unknown"
+        assert item["command_present"] is True
+
+    def test_non_executable_explicit_path_is_unavailable(self, tmp_path: Path) -> None:
+        tool = tmp_path / "custom-cli"
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        item = brain_provider._enrich_candidate(
+            {"provider": "x", "model": "m", "command": f"{tool} --flag"},
+            {},
+        )
+        assert item["status"] == "unavailable"
+        assert item["command_present"] is False
+        assert item["reason"] == f"command path is not executable: {tool}"
 
     def test_health_within_ttl_available_becomes_healthy(self) -> None:
         h = {"items": {"x/m": {

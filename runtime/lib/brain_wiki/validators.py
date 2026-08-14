@@ -388,13 +388,17 @@ def validate_routing(brain: Path) -> list[Issue]:
     seen: set[str] = set()
     for candidates in profiles.values():
         for cand in candidates or []:
+            if brain_provider.candidate_declares_nonlocal(cand):
+                continue
             command = brain_provider.candidate_command(matrix, cand)
-            executable = command.split()[0] if command else ""
             key = f"{cand.get('provider', '')}/{cand.get('model', '')}"
-            if not executable or key in seen:
+            if key in seen:
                 continue
             seen.add(key)
-            if shutil.which(executable) is None and key not in health:
+            command_present, _reason, executable = brain_provider._command_probe(command)
+            if not executable:
+                continue
+            if not command_present and key not in health:
                 issues.append(Issue("WARN", "config/routing.json",
                                     f"{key}: команда {executable!r} не найдена и нет записи о здоровье"))
     return issues

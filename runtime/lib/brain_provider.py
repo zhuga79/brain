@@ -6,6 +6,7 @@ import json
 import datetime as dt
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -197,6 +198,7 @@ _MODELS_CACHE_TTL_SECONDS = 300
 _models_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+NONLOCAL_EXECUTIONS = {"remote", "virtual"}
 UNHEALTHY_STATUSES = ("unavailable", "rate-limited", "model-not-found", "quota-exhausted", "error")
 """Состояния, при которых кандидат не берётся: провайдер не ответит или откажет."""
 
@@ -280,6 +282,63 @@ def _pinned_client(brain: Path, role: str, task: str) -> str:
         # Закрепление — подсказка, а не обязательство: сломанный скилл не
         # должен мешать запуску роли.
         return ""
+
+
+def candidate_declares_nonlocal(candidate: dict[str, Any]) -> str:
+    execution = str(candidate.get("execution", "")).strip().lower()
+    return execution if execution in NONLOCAL_EXECUTIONS else ""
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _expand_env_value(value: str, env: dict[str, str]) -> str:
+    for key, current in env.items():
+        value = value.replace(f"${{{key}}}", current)
+        value = value.replace(f"${key}", current)
+    return os.path.expanduser(value)
+
+
+def _command_probe(command: str) -> tuple[bool, str, str]:
+    command = command.strip()
+    if not command:
+        return False, "empty provider command", ""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    if not parts:
+        return False, "empty provider command", ""
+
+    env = dict(os.environ)
+    idx = 0
+    if parts and parts[0] == "env":
+        idx = 1
+    while idx < len(parts) and _ENV_NAME_RE.match(parts[idx]):
+        name, value = parts[idx].split("=", 1)
+        env[name] = _expand_env_value(value, env)
+        idx += 1
+    if idx >= len(parts):
+        return False, "empty provider command", ""
+
+    executable = parts[idx]
+    if "/" in executable or executable.startswith("."):
+        path = Path(os.path.expanduser(executable))
+        if not path.exists():
+            return False, f"command path not found: {path}", executable
+        if not path.is_file():
+            return False, f"command path is not a file: {path}", executable
+        if not os.access(path, os.X_OK):
+            return False, f"command path is not executable: {path}", executable
+        return True, f"local command found: {path}", executable
+
+    try:
+        resolved = shutil.which(executable, path=env.get("PATH"))
+    except TypeError:
+        resolved = shutil.which(executable)
+    if not resolved:
+        return False, f"command not found: {executable}", executable
+    return True, f"local command found: {resolved}", executable
 
 
 def resolve_for_role(
@@ -574,8 +633,8 @@ def list_client_models(brain: Path, client: str, timeout: int = 10) -> dict[str,
 def _enrich_candidate(candidate: dict[str, Any], health: dict[str, Any]) -> dict[str, Any]:
     item = dict(candidate)
     command = str(item.get("command", "")).strip()
-    executable = command.split()[0] if command else ""
-    command_present = bool(executable and shutil.which(executable))
+    nonlocal_execution = candidate_declares_nonlocal(item)
+    command_present, local_reason, executable = _command_probe(command)
     key = f"{item.get('provider', '')}/{item.get('model', '')}"
     health_item = health.get("items", {}).get(key, {})
     cached_status = str(health_item.get("status", "")).strip()
@@ -595,7 +654,40 @@ def _enrich_candidate(candidate: dict[str, Any], health: dict[str, Any]) -> dict
             if (dt.datetime.now(dt.timezone.utc) - checked_at).total_seconds() <= ttl:
                 is_within_ttl = True
 
-    if checked_at_str:
+    if nonlocal_execution:
+        if checked_at_str:
+            if is_within_ttl:
+                if cached_status == "available":
+                    status = "healthy"
+                elif cached_status in ("unavailable", "rate-limited", "model-not-found", "quota-exhausted", "error"):
+                    status = cached_status
+                else:
+                    status = cached_status
+            else:
+                status = "stale"
+            reason = str(health_item.get("reason", "cached health")).strip()
+        else:
+            status = "unknown"
+            reason = f"{nonlocal_execution} command declared"
+    elif not command:
+        if checked_at_str:
+            if is_within_ttl:
+                if cached_status == "available":
+                    status = "healthy"
+                elif cached_status in ("unavailable", "rate-limited", "model-not-found", "quota-exhausted", "error"):
+                    status = cached_status
+                else:
+                    status = cached_status
+            else:
+                status = "stale"
+            reason = str(health_item.get("reason", "cached health")).strip()
+        else:
+            status = "unavailable"
+            reason = local_reason
+    elif command and not command_present:
+        status = "unavailable"
+        reason = local_reason
+    elif checked_at_str:
         if is_within_ttl:
             if cached_status == "available":
                 status = "healthy"
@@ -608,12 +700,16 @@ def _enrich_candidate(candidate: dict[str, Any], health: dict[str, Any]) -> dict
         reason = str(health_item.get("reason", "cached health")).strip()
     else:
         status = "unknown"
-        reason = "local command found" if command_present else "command not found"
+        reason = local_reason
 
     item["key"] = key
     item["command_present"] = command_present
+    if executable:
+        item["executable"] = executable
     item["status"] = status
     item["reason"] = reason
+    if nonlocal_execution:
+        item["execution"] = nonlocal_execution
     if checked_at_str:
         item["checked_at"] = checked_at_str
         item["cached_status"] = cached_status

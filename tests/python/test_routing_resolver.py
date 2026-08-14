@@ -89,6 +89,60 @@ class TestHealthAndEnabled:
         assert r["command"] == "claude --model sonnet"
         assert any("quota-exhausted" in s for s in r["skipped"])
 
+    def test_missing_local_candidate_is_skipped_for_installed_fallback(self, brain, monkeypatch):
+        write_routing(brain, {"developer": [
+            cand(1, "ghost", "v1", "missing-local-cli --model v1"),
+            cand(2, "claude", "sonnet", "claude --model sonnet"),
+        ]})
+
+        def fake_which(cmd: str, path: str | None = None) -> str | None:
+            if cmd == "claude":
+                return "/usr/bin/claude"
+            return None
+
+        monkeypatch.setattr(brain_provider.shutil, "which", fake_which)
+        r = brain_provider.resolve_for_role(brain, "developer")
+        assert r["command"] == "claude --model sonnet"
+        assert any("command not found: missing-local-cli" in s for s in r["skipped"])
+
+    @pytest.mark.parametrize(
+        ("execution", "reason"),
+        [("virtual", "virtual command declared"), ("remote", "remote command declared")],
+    )
+    def test_declared_nonlocal_candidate_remains_eligible(self, brain, monkeypatch, execution, reason):
+        write_routing(brain, {"developer": [
+            {
+                "rank": 1,
+                "provider": "ghost",
+                "model": "v1",
+                "command": "missing-nonlocal-cli --model v1",
+                "execution": execution,
+            },
+            cand(2, "claude", "sonnet", "claude --model sonnet"),
+        ]})
+        monkeypatch.setattr(brain_provider.shutil, "which", lambda cmd, path=None: None)
+        r = brain_provider.resolve_for_role(brain, "developer")
+        assert r["command"] == "missing-nonlocal-cli --model v1"
+        assert r["reason"] == reason
+
+    def test_non_executable_explicit_path_is_skipped_with_precise_reason(self, brain, tmp_path, monkeypatch):
+        tool = tmp_path / "custom-cli"
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        write_routing(brain, {"developer": [
+            cand(1, "ghost", "v1", f"{tool} --model v1"),
+            cand(2, "claude", "sonnet", "claude --model sonnet"),
+        ]})
+
+        def fake_which(cmd: str, path: str | None = None) -> str | None:
+            if cmd == "claude":
+                return "/usr/bin/claude"
+            return None
+
+        monkeypatch.setattr(brain_provider.shutil, "which", fake_which)
+        r = brain_provider.resolve_for_role(brain, "developer")
+        assert r["command"] == "claude --model sonnet"
+        assert any(f"command path is not executable: {tool}" in s for s in r["skipped"])
+
     def test_disabled_provider_is_skipped_even_when_healthy(self, brain):
         """enabled — решение оператора, оно сильнее «сейчас отвечает»."""
         write_routing(
@@ -171,6 +225,16 @@ class TestCliCommand:
         payload = json.loads(res.stdout)
         assert payload["command"] == "opencode run"
         assert payload["source"] == "config"
+
+    def test_explain_reports_precise_missing_command_reason(self, brain):
+        write_routing(brain, {"developer": [
+            cand(1, "ghost", "v1", "missing-local-cli --model v1"),
+            cand(2, "claude", "sonnet", "claude --model sonnet"),
+        ]})
+        res = self._run(brain, "--role", "developer", "--explain")
+        assert res.returncode == 0
+        assert res.stdout.strip() == "claude --model sonnet"
+        assert "command not found: missing-local-cli" in res.stderr
 
 
 def test_cli_mapping_file_is_gone():
