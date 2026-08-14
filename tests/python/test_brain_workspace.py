@@ -522,6 +522,241 @@ def test_take_local_task_serializes_parallel_writers(tmp_path):
     assert len(took_entries) == 6
 
 
+def test_recover_workspace_transaction_accepts_mixed_crash_state(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    tasks_before = """# Local Tasks
+
+- [ ] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+"""
+    tasks_after = """# Local Tasks
+
+- [~] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+"""
+    log_before = "# Local Log\n"
+    log_after = """# Local Log
+
+## 2026-08-14T10:00:00Z | agent-a | took local-001
+
+- Moved local-001 to in-progress.
+"""
+    tasks_path.write_text(tasks_after, encoding="utf-8")
+    log_path.write_text(log_before, encoding="utf-8")
+
+    _W._write_workspace_journal(
+        workspace,
+        operation="take",
+        task_id="local-001",
+        tasks_before=tasks_before,
+        log_before=log_before,
+        tasks_after=tasks_after,
+        log_after=log_after,
+    )
+
+    _W._recover_workspace_transaction(workspace)
+
+    assert tasks_path.read_text(encoding="utf-8") == tasks_after
+    assert log_path.read_text(encoding="utf-8") == log_after
+    assert not (workspace / ".workspace-queue-journal.json").exists()
+
+
+def test_recover_workspace_transaction_accepts_newer_log_if_tasks_match_after(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    tasks_before = """# Local Tasks
+
+- [~] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+"""
+    tasks_after = """# Local Tasks
+
+- [x] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+      model: openai-gpt-5.4
+      completed: 2026-08-14T10:05:00Z
+"""
+    log_before = "# Local Log\n"
+    log_after = """# Local Log
+
+## 2026-08-14T10:05:00Z | agent-a | completed local-001
+
+- Moved local-001 to done.
+"""
+    newer_log = log_after + "\n## 2026-08-14T10:06:00Z | agent-b | later\n\n- Follow-up.\n"
+    tasks_path.write_text(tasks_after, encoding="utf-8")
+    log_path.write_text(newer_log, encoding="utf-8")
+
+    _W._write_workspace_journal(
+        workspace,
+        operation="complete",
+        task_id="local-001",
+        tasks_before=tasks_before,
+        log_before=log_before,
+        tasks_after=tasks_after,
+        log_after=log_after,
+    )
+
+    try:
+        _W._recover_workspace_transaction(workspace)
+    except ValueError as exc:
+        assert "conflict" in str(exc).lower()
+    else:
+        raise AssertionError("stale newer log unexpectedly overwritten")
+
+    assert tasks_path.read_text(encoding="utf-8") == tasks_after
+    assert log_path.read_text(encoding="utf-8") == newer_log
+    assert (workspace / ".workspace-queue-journal.json").exists()
+
+
+def test_recover_workspace_transaction_accepts_newer_tasks_if_log_matches_after(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    tasks_before = """# Local Tasks
+
+- [ ] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+"""
+    tasks_after = """# Local Tasks
+
+- [~] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+"""
+    newer_tasks = tasks_after + """
+- [ ] [P2] local-002 - Later task
+      role: developer
+      acceptance: Later.
+"""
+    log_before = "# Local Log\n"
+    log_after = """# Local Log
+
+## 2026-08-14T10:00:00Z | agent-a | took local-001
+
+- Moved local-001 to in-progress.
+"""
+    tasks_path.write_text(newer_tasks, encoding="utf-8")
+    log_path.write_text(log_after, encoding="utf-8")
+
+    _W._write_workspace_journal(
+        workspace,
+        operation="take",
+        task_id="local-001",
+        tasks_before=tasks_before,
+        log_before=log_before,
+        tasks_after=tasks_after,
+        log_after=log_after,
+    )
+
+    try:
+        _W._recover_workspace_transaction(workspace)
+    except ValueError as exc:
+        assert "conflict" in str(exc).lower()
+    else:
+        raise AssertionError("stale newer tasks unexpectedly overwritten")
+
+    assert tasks_path.read_text(encoding="utf-8") == newer_tasks
+    assert log_path.read_text(encoding="utf-8") == log_after
+    assert (workspace / ".workspace-queue-journal.json").exists()
+
+
+def test_recover_workspace_transaction_preserves_files_on_conflict(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    journal_path = workspace / ".workspace-queue-journal.json"
+    tasks_before = "# Local Tasks\n"
+    tasks_after = "# Local Tasks\n\n- [ ] [P1] local-001 - Draft local rules\n"
+    log_before = "# Local Log\n"
+    log_after = "# Local Log\n\n## 2026-08-14T10:00:00Z | agent-a | took local-001\n"
+    tasks_conflict = "# Local Tasks\n\n- [!] [P1] local-001 - Diverged\n"
+    log_conflict = "# Local Log\n\n## 2026-08-14T11:00:00Z | agent-b | diverged\n"
+    tasks_path.write_text(tasks_conflict, encoding="utf-8")
+    log_path.write_text(log_conflict, encoding="utf-8")
+
+    _W._write_workspace_journal(
+        workspace,
+        operation="take",
+        task_id="local-001",
+        tasks_before=tasks_before,
+        log_before=log_before,
+        tasks_after=tasks_after,
+        log_after=log_after,
+    )
+    journal_before = journal_path.read_bytes()
+
+    try:
+        _W._recover_workspace_transaction(workspace)
+    except ValueError as exc:
+        assert "conflict" in str(exc).lower()
+    else:
+        raise AssertionError("conflict unexpectedly recovered")
+
+    assert tasks_path.read_text(encoding="utf-8") == tasks_conflict
+    assert log_path.read_text(encoding="utf-8") == log_conflict
+    assert journal_path.read_bytes() == journal_before
+
+
+def test_recover_workspace_transaction_rejects_forged_journal_without_mutation(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    journal_path = workspace / ".workspace-queue-journal.json"
+    tasks_text = "# Local Tasks\n"
+    log_text = "# Local Log\n"
+    tasks_path.write_text(tasks_text, encoding="utf-8")
+    log_path.write_text(log_text, encoding="utf-8")
+    journal_path.write_text(
+        """{
+  "version": "1",
+  "operation": "take",
+  "task_id": "local-001",
+  "tasks_before_hash": "abc",
+  "log_before_hash": "def",
+  "tasks_after_hash": "mismatch",
+  "log_after_hash": "mismatch",
+  "tasks_after": "# Local Tasks\\nforged\\n",
+  "log_after": "# Local Log\\nforged\\n"
+}
+""",
+        encoding="utf-8",
+    )
+    journal_before = journal_path.read_bytes()
+
+    try:
+        _W._recover_workspace_transaction(workspace)
+    except ValueError as exc:
+        assert "invalid workspace journal" in str(exc).lower()
+    else:
+        raise AssertionError("forged journal unexpectedly accepted")
+
+    assert tasks_path.read_text(encoding="utf-8") == tasks_text
+    assert log_path.read_text(encoding="utf-8") == log_text
+    assert journal_path.read_bytes() == journal_before
+
+
 def test_convert_folder_to_workspace(tmp_path):
     from brain_workspace import convert_folder_to_workspace, parse_local_tasks
     

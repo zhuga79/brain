@@ -504,17 +504,49 @@ def _recover_workspace_transaction(workspace: Path) -> None:
     log_path = workspace / "LOG.md"
     tasks_text = _task_file_text(tasks_path)
     log_text = _task_file_text(log_path)
+    tasks_before_hash = str(payload.get("tasks_before_hash", ""))
+    log_before_hash = str(payload.get("log_before_hash", ""))
     tasks_after = str(payload.get("tasks_after", ""))
     log_after = str(payload.get("log_after", ""))
     if str(payload.get("tasks_after_hash", "")) != _sha256_text(tasks_after):
         raise ValueError(f"Invalid workspace journal: {journal_path}")
     if str(payload.get("log_after_hash", "")) != _sha256_text(log_after):
         raise ValueError(f"Invalid workspace journal: {journal_path}")
-    if tasks_text != tasks_after:
+    tasks_state = _journal_file_state(
+        label="TASKS.md",
+        current_text=tasks_text,
+        before_hash=tasks_before_hash,
+        after_hash=str(payload.get("tasks_after_hash", "")),
+        journal_path=journal_path,
+    )
+    log_state = _journal_file_state(
+        label="LOG.md",
+        current_text=log_text,
+        before_hash=log_before_hash,
+        after_hash=str(payload.get("log_after_hash", "")),
+        journal_path=journal_path,
+    )
+    if tasks_state == "before":
         _atomic_write(tasks_path, tasks_after)
-    if log_text != log_after:
+    if log_state == "before":
         _atomic_write(log_path, log_after)
     journal_path.unlink(missing_ok=True)
+
+
+def _journal_file_state(
+    *,
+    label: str,
+    current_text: str,
+    before_hash: str,
+    after_hash: str,
+    journal_path: Path,
+) -> str:
+    current_hash = _sha256_text(current_text)
+    if current_hash == after_hash:
+        return "after"
+    if current_hash == before_hash:
+        return "before"
+    raise ValueError(f"Workspace recovery conflict for {label}: current file matches neither before nor after in {journal_path}")
 
 
 def _run_workspace_transaction(
