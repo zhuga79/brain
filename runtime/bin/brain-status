@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -97,11 +98,13 @@ def _sha256(path: Path) -> str:
 
 IGNORED_RUNTIME_BIN = {
     "launch-dashboard.sh": "wrapper-or-generated",
+    "brain-mcp": "mcp-managed-launcher",
 }
 
 # Reverse-scan exceptions must stay narrow: only justified generated/managed
 # installed brain-* entrypoints belong here.
 IGNORED_INSTALLED_BRAIN_EXTRAS: dict[str, str] = {}
+IGNORED_INSTALLED_BRAIN_EXTRAS["brain-mcp"] = "mcp-managed-launcher"
 
 
 def detect_cli_parity(brain: Path) -> dict[str, Any]:
@@ -130,9 +133,10 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
     canonical_names: set[str] = set()
     for source in sorted(path for path in runtime_bin.iterdir() if path.is_file()):
         name = source.name
+        if name in IGNORED_RUNTIME_BIN:
+            ignored.append({"name": name, "reason": IGNORED_RUNTIME_BIN[name]})
+            continue
         if not name.startswith("brain-"):
-            if name in IGNORED_RUNTIME_BIN:
-                ignored.append({"name": name, "reason": IGNORED_RUNTIME_BIN[name]})
             continue
         canonical_names.add(name)
         installed = installed_bin / name
@@ -170,6 +174,106 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
     }
 
 
+def _load_mcp_packaging(packaging_tool: Path):
+    spec = importlib.util.spec_from_file_location("brain_mcp_packaging", packaging_tool)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {packaging_tool}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def detect_mcp_parity(brain: Path) -> dict[str, Any]:
+    system = brain_system_path(brain=brain)
+    install_root = Path(os.environ.get("BRAIN_MCP_DIR", str(Path.home() / ".local" / "share" / "brain-mcp"))).expanduser()
+    launcher = Path(os.environ.get("BRAIN_MCP_LAUNCHER", str(Path.home() / ".local" / "bin" / "brain-mcp"))).expanduser()
+    installer = system / "install-brain-mcp.sh"
+    packaging_tool = system / "runtime" / "mcp" / "packaging.py"
+    remediation_cmd = f"bash {installer}" if installer.is_file() else "install-brain-mcp.sh unavailable"
+    present_tree = any(
+        path.exists()
+        for path in (
+            install_root / "manifest.json",
+            install_root / ".venv",
+            install_root / "runtime",
+        )
+    )
+    launcher_present = launcher.exists()
+    if not present_tree and not launcher_present:
+        return {
+            "status": "missing",
+            "install_root": str(install_root),
+            "launcher": str(launcher),
+            "launcher_present": False,
+            "file_count": 0,
+            "matched": 0,
+            "missing": [],
+            "extras": [],
+            "mismatches": [],
+            "drift_count": 0,
+            "remediation": f"optional install absent; run {remediation_cmd}",
+        }
+    if not present_tree and launcher_present:
+        return {
+            "status": "drift",
+            "install_root": str(install_root),
+            "launcher": str(launcher),
+            "launcher_present": True,
+            "file_count": 0,
+            "matched": 0,
+            "missing": [{"path": "runtime/"}],
+            "extras": [],
+            "mismatches": [],
+            "drift_count": 1,
+            "remediation": f"stale launcher without installed runtime; run {remediation_cmd}",
+        }
+    if not packaging_tool.is_file():
+        return {
+            "status": "unavailable",
+            "install_root": str(install_root),
+            "launcher": str(launcher),
+            "launcher_present": launcher_present,
+            "file_count": 0,
+            "matched": 0,
+            "missing": [],
+            "extras": [],
+            "mismatches": [],
+            "drift_count": 0,
+            "remediation": f"missing packaging tool: {packaging_tool}",
+        }
+    try:
+        packaging = _load_mcp_packaging(packaging_tool)
+        verify = packaging.verify_install(system, install_root)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "install_root": str(install_root),
+            "launcher": str(launcher),
+            "launcher_present": launcher_present,
+            "file_count": 0,
+            "matched": 0,
+            "missing": [],
+            "extras": [],
+            "mismatches": [],
+            "drift_count": 0,
+            "remediation": f"verify failed: {exc}",
+        }
+
+    verify["install_root"] = str(install_root)
+    verify["launcher"] = str(launcher)
+    verify["launcher_present"] = launcher_present
+    if not launcher_present:
+        verify["status"] = "drift"
+        verify["missing"] = [{"path": "launcher"}] + verify.get("missing", [])
+        verify["drift_count"] = verify.get("drift_count", 0) + 1
+    verify["matched"] = verify.get("file_count", 0) - len(verify.get("missing", [])) - len(verify.get("mismatches", []))
+    if verify.get("status") == "ok":
+        verify["remediation"] = ""
+    else:
+        verify["remediation"] = f"refresh existing install via {remediation_cmd}"
+    return verify
+
+
 def collect_status(brain: Path) -> dict[str, Any]:
     active = parse_tasks(brain / "tasks" / "active.md")
     done = parse_tasks(brain / "tasks" / "done.md")
@@ -195,6 +299,7 @@ def collect_status(brain: Path) -> dict[str, Any]:
         "index": read_index(brain),
         "providers": brain_provider.collect_provider_status(brain),
         "cli_parity": detect_cli_parity(brain),
+        "mcp_parity": detect_mcp_parity(brain),
     }
 
 
@@ -261,6 +366,34 @@ def print_text(status: dict[str, Any]) -> None:
                     cli_parity.get("mismatches", [])
                     + cli_parity.get("missing", [])
                     + cli_parity.get("extras", [])
+                )
+            ]
+            print(f"  drifted: {', '.join(offenders[:8])}" + (" ..." if len(offenders) > 8 else ""))
+    mcp_parity = status.get("mcp_parity", {})
+    if mcp_parity:
+        parity_status = mcp_parity.get("status", "unknown")
+        drift_count = mcp_parity.get("drift_count", 0)
+        extras_count = len(mcp_parity.get("extras", []))
+        if parity_status == "missing":
+            suffix = " [INFO: optional install absent]"
+        elif parity_status in ("drift", "error", "unavailable"):
+            suffix = " [WARN: refresh via install-brain-mcp.sh]"
+        else:
+            suffix = ""
+        print(
+            "MCP parity: "
+            f"status={parity_status} matched={mcp_parity.get('matched', 0)}"
+            f" drift={drift_count} extras={extras_count}{suffix}"
+        )
+        if mcp_parity.get("remediation"):
+            print(f"  remediation: {mcp_parity['remediation']}")
+        if drift_count:
+            offenders = [
+                item["path"]
+                for item in (
+                    mcp_parity.get("mismatches", [])
+                    + mcp_parity.get("missing", [])
+                    + mcp_parity.get("extras", [])
                 )
             ]
             print(f"  drifted: {', '.join(offenders[:8])}" + (" ..." if len(offenders) > 8 else ""))

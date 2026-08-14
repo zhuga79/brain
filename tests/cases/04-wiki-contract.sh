@@ -61,6 +61,7 @@ brain-shell --help > /dev/null
 brain-status | grep -q "^Brain: " || { echo "FAILED: brain-status text output missing Brain header"; exit 1; }
 brain-status --json | grep -q '"tasks"' || { echo "FAILED: brain-status json output missing tasks"; exit 1; }
 brain-status --json | grep -q '"cli_parity"' || { echo "FAILED: brain-status json output missing cli_parity"; exit 1; }
+brain-status --json | grep -q '"mcp_parity"' || { echo "FAILED: brain-status json output missing mcp_parity"; exit 1; }
 
 echo ">>> Verifying split-root doctrine and skill listing from data cwd"
 split_td=$(mktemp -d)

@@ -117,3 +117,34 @@ def test_installed_tree_supports_server_import_and_help(tmp_path):
     help_result = subprocess.run(help_cmd, capture_output=True, text=True, env=env, check=False)
     assert help_result.returncode == 0, help_result.stderr
     assert "Brain MCP server" in help_result.stdout
+
+
+def test_brain_status_reports_missing_optional_mcp_parity(tmp_path):
+    brain = tmp_path / "brain"
+    for rel in ("wiki", "tasks", "council", "raw"):
+        (brain / rel).mkdir(parents=True, exist_ok=True)
+    (brain / "tasks" / "active.md").write_text("# Active\n", encoding="utf-8")
+    (brain / "tasks" / "done.md").write_text("# Done\n", encoding="utf-8")
+    (brain / "wiki" / "index.md").write_text("# Index\n", encoding="utf-8")
+    (brain / "wiki" / "log.md").write_text("# Log\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["BRAIN_PATH"] = str(brain)
+    env["BRAIN_SYSTEM_PATH"] = str(PROJECT_ROOT)
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "runtime" / "lib")
+
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "runtime" / "bin" / "brain-status"), "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    parity = payload["mcp_parity"]
+    assert parity["status"] == "missing"
+    assert parity["drift_count"] == 0
+    assert "install-brain-mcp.sh" in parity["remediation"]

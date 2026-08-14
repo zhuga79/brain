@@ -80,6 +80,27 @@ has_existing_data_root() {
   [ -d "$BRAIN/raw" ]
 }
 
+mcp_install_present() {
+  local mcp_dir="${BRAIN_MCP_DIR:-$HOME/.local/share/brain-mcp}"
+  [ -e "$mcp_dir/manifest.json" ] || \
+  [ -e "$mcp_dir/.venv" ] || \
+  [ -e "$mcp_dir/runtime" ]
+}
+
+sync_existing_mcp_install() {
+  local installer="$SCRIPT_DIR/install-brain-mcp.sh"
+  if ! mcp_install_present; then
+    echo "✓ MCP: не установлен (opt-in)"
+    return 0
+  fi
+  [ -f "$installer" ] || {
+    echo "MCP installer not found: $installer" >&2
+    exit 1
+  }
+  echo ">>> MCP: синхронизирую существующую установку"
+  BRAIN_SYSTEM_PATH="$SYSTEM_ROOT" bash "$installer"
+}
+
 SPLIT_ROOT=0
 if ! same_path "$BRAIN" "$SYSTEM_ROOT" && { [ -n "${BRAIN_SYSTEM_PATH:-}" ] || has_existing_data_root; }; then
   SPLIT_ROOT=1
@@ -189,9 +210,17 @@ done
 mkdir -p "$HOME/.local/bin"
 # Снятые команды: install копирует только то, что есть в дереве, и не
 # убирает лишнее. Без этой зачистки старая копия остаётся на PATH.
+_mcp_present=0
+if mcp_install_present; then
+  _mcp_present=1
+fi
 for _old in "$HOME/.local/bin"/brain-*; do
   [ -e "$_old" ] || continue
   _name="$(basename "$_old")"
+  if [ "$_name" = "brain-mcp" ] && [ "$_mcp_present" -eq 0 ]; then
+    rm -f "$_old"
+    continue
+  fi
   [ -f "$SCRIPT_DIR/runtime/bin/$_name" ] || rm -f "$_old"
 done
 
@@ -204,7 +233,7 @@ _installed=0
 for _cmd_path in "$SCRIPT_DIR"/runtime/bin/*; do
   [ -f "$_cmd_path" ] || continue
   case "$(basename "$_cmd_path")" in
-    *.pyc|__pycache__) continue;;
+    *.pyc|__pycache__|brain-mcp) continue;;
   esac
   install -m 755 "$_cmd_path" "$HOME/.local/bin/$(basename "$_cmd_path")"
   _installed=$((_installed + 1))
@@ -250,6 +279,10 @@ fi
 # Старые копии удаляем: пока они лежат на месте, они участвуют в разрешении
 # импорта и способны перебить дерево.
 rm -rf "$HOME/.local/lib/brain" "$HOME/.local/share/brain/lib"
+
+# MCP остаётся opt-in: fresh setup его не ставит. Но если оператор уже
+# подключал MCP, canonical setup обязан обновлять ту же установленную копию.
+sync_existing_mcp_install
 
 
 

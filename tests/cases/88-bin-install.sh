@@ -14,6 +14,7 @@ count=0
 for f in "$PROJECT_ROOT"/runtime/bin/*; do
   [ -f "$f" ] || continue
   b="$(basename "$f")"
+  [ "$b" = "brain-mcp" ] && continue
   count=$((count + 1))
   if [ ! -x "$HOME/.local/bin/$b" ]; then
     missing="$missing $b"

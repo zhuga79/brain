@@ -11,6 +11,7 @@ system="$BRAIN_FACTORY_TMP/system"
 mkdir -p "$system"
 
 cp "$PROJECT_ROOT/setup-brain-v2.sh" "$system/"
+cp "$PROJECT_ROOT/install-brain-mcp.sh" "$system/"
 cp "$PROJECT_ROOT/pyproject.toml" "$system/"
 cp -R "$PROJECT_ROOT/runtime" "$system/"
 cp -R "$PROJECT_ROOT/roles" "$system/"
@@ -99,6 +100,7 @@ echo ">>> legacy single-root setup remains working"
 single="$BRAIN_FACTORY_TMP/single-root"
 mkdir -p "$single"
 cp "$PROJECT_ROOT/setup-brain-v2.sh" "$single/"
+cp "$PROJECT_ROOT/install-brain-mcp.sh" "$single/"
 cp -R "$PROJECT_ROOT/runtime" "$single/"
 unset BRAIN_SYSTEM_PATH
 BRAIN_PATH="$single" bash "$single/setup-brain-v2.sh" >/dev/null
@@ -129,6 +131,52 @@ EOF
 chmod +x "$BRAIN_FACTORY_TMP/bin/git"
 export PATH="$BRAIN_FACTORY_TMP/bin:$PATH"
 
+echo ">>> setup/update refresh an existing MCP install but keep absent MCP opt-in"
+cp "$PROJECT_ROOT/install-brain-mcp.sh" "$system/"
+mkdir -p "$HOME/.local/bin"
+python3 -m venv "$HOME/.local/share/brain-mcp/.venv"
+site_dir="$("$HOME/.local/share/brain-mcp/.venv/bin/python" - <<'PY'
+import sysconfig
+print(sysconfig.get_path("purelib"))
+PY
+)"
+mkdir -p "$site_dir/mcp/server"
+printf '' > "$site_dir/mcp/__init__.py"
+printf '' > "$site_dir/mcp/server/__init__.py"
+cat > "$site_dir/mcp/server/fastmcp.py" <<'PY'
+class FastMCP:
+    def __init__(self, name):
+        self.name = name
+        self._tools = []
+
+    def tool(self):
+        def decorator(func):
+            self._tools.append(func)
+            return func
+        return decorator
+
+    def resource(self, *args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+    def run(self, *args, **kwargs):
+        return None
+PY
+cat > "$HOME/.local/share/brain-mcp/.venv/bin/pip" <<'EOF'
+#!/usr/bin/env bash
+echo "pip should not run during existing MCP refresh" >&2
+exit 97
+EOF
+chmod +x "$HOME/.local/share/brain-mcp/.venv/bin/pip"
+mkdir -p "$HOME/.local/share/brain-mcp/runtime/mcp"
+printf 'legacy\n' > "$HOME/.local/share/brain-mcp/runtime/mcp/server.py"
+cat > "$HOME/.local/bin/brain-mcp" <<'EOF'
+#!/usr/bin/env bash
+echo stale launcher
+EOF
+chmod +x "$HOME/.local/bin/brain-mcp"
+
 "$PROJECT_ROOT/runtime/bin/brain-ops" update >/dev/null
 grep -q '^# private marker$' "$data/MEMORY.md" || {
   echo "FAILED: update overwrote data MEMORY.md"
@@ -143,6 +191,22 @@ for d in roles doctrine skills config; do
 done
 [ -f "$data/teams/insurance-fraud.md" ] || {
   echo "FAILED: update removed allowed data teams asset"
+  exit 1
+}
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$system" --install-root "$HOME/.local/share/brain-mcp" >/tmp/mcp-refresh-verify.out || {
+  cat /tmp/mcp-refresh-verify.out
+  echo "FAILED: update did not refresh the existing MCP install"
+  exit 1
+}
+
+rm -rf "$HOME/.local/share/brain-mcp" "$HOME/.local/bin/brain-mcp"
+"$PROJECT_ROOT/runtime/bin/brain-ops" update >/dev/null
+[ ! -e "$HOME/.local/share/brain-mcp" ] || {
+  echo "FAILED: update installed MCP even though it was absent"
+  exit 1
+}
+[ ! -e "$HOME/.local/bin/brain-mcp" ] || {
+  echo "FAILED: update recreated the MCP launcher even though MCP was absent"
   exit 1
 }
 

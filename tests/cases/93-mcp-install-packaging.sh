@@ -82,7 +82,20 @@ manifest = json.loads(Path(os.environ["HOME"]).joinpath(".local/share/brain-mcp/
 assert manifest["file_count"] == len(manifest["files"]) > 10
 assert "runtime/mcp/server.py" in manifest["files"]
 assert "runtime/lib/brain_core/paths.py" in manifest["files"]
+assert "runtime/lib/brain_core/prdfile.py" in manifest["files"]
 print("manifest ok")
 PY
+
+cat > "$MCP_DIR/.venv/bin/pip" <<'EOF'
+#!/usr/bin/env bash
+echo "pip should not run for existing MCP refresh" >&2
+exit 97
+EOF
+chmod +x "$MCP_DIR/.venv/bin/pip"
+env -u BRAIN_MCP_SKIP_PIP bash "$PROJECT_ROOT/install-brain-mcp.sh" >/tmp/mcp-reinstall.out 2>/tmp/mcp-reinstall.err || {
+  cat /tmp/mcp-reinstall.out
+  cat /tmp/mcp-reinstall.err
+  fail_case "existing MCP refresh unexpectedly depended on pip"
+}
 
 echo ">>> MCP installer packaging checks passed"
