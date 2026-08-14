@@ -42,6 +42,12 @@ def test_workflow_runs_tests_run_sh():
     assert "tests/run.sh" in _combined()
 
 
+def test_workflow_runs_full_pytest_suite():
+    text = _combined()
+    assert "pytest" in text
+    assert "PYTHONPATH=runtime/lib" in text
+
+
 def test_workflow_runs_brain_guard_generic_only():
     text = _combined()
     assert "brain-guard" in text

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   tests:
-    name: tests/run.sh
+    name: smoke-and-pytest
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -25,6 +25,9 @@ jobs:
         # Isolated runner: TMP_HOME + BRAIN_PATH. Do not invoke tests/cases
         # directly — they inherit the working tree and rewrite live data.
         run: bash tests/run.sh
+
+      - name: Run pytest
+        run: PYTHONPATH=runtime/lib python3 -m pytest -q
 
   guard:
     name: brain-guard

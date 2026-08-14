@@ -36,6 +36,7 @@ skip_dirs = {
 }
 skip_files = {
     "docs/decisions/decision-public-source-of-truth.md",
+    "docs/decisions/decision-post-inversion-cycle.md",
     "tests/cases/80-retire-publish.sh",
 }
 needles = (

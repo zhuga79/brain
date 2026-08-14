@@ -17,7 +17,7 @@ from brain_dashboard import data
 
 REPO = Path(__file__).resolve().parents[2]
 HTML = REPO / "runtime/lib/brain_dashboard/render/html.py"
-DECISION = REPO / "wiki/decision-runtime-core-boundaries.md"
+DECISION = REPO / "docs/decisions/decision-runtime-core-boundaries.md"
 
 
 def test_orphan_parse_tasks_removed_from_dashboard_collect():

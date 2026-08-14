@@ -41,19 +41,16 @@ for s in "\${PROJECT_ROOT}"/*.sh "\${PROJECT_ROOT}"/runtime/bin/*; do
     fi
 done
 
+if [ -f "\${PROJECT_ROOT}/tests/run.sh" ]; then
+    echo ">>> [pre-commit] Running smoke suite (tests/run.sh)"
+    bash "\${PROJECT_ROOT}/tests/run.sh"
+fi
+
 echo ">>> [pre-commit] Running unit tests (pytest)"
 # Use a relative path to avoid path issues
 cd "\${PROJECT_ROOT}"
 if [ -d tests/python ] && ls tests/python/*.py >/dev/null 2>&1; then
-    # Run pytest and capture the exit code. Exit code 5 (no tests collected)
-    # is not a failure. Other non-zero codes are failures.
-    set +e
     PYTHONPATH="./runtime/lib" python3 -m pytest tests/python/ --quiet
-    PYTEST_EXIT_CODE=\$?
-    set -e
-    if [[ \$PYTEST_EXIT_CODE -ne 0 && \$PYTEST_EXIT_CODE -ne 5 ]]; then
-        echo "WARN: pytest failed (ignoring for now)"
-    fi
 else
     echo ">>> [pre-commit] No tests/python suite — skipping pytest"
 fi
