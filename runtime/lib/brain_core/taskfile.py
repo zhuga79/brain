@@ -17,6 +17,7 @@ os.replace подставляет новый inode, так что блокиро
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -27,6 +28,8 @@ from brain_core.clock import utc_now  # noqa: F401  (переэкспорт дл
 
 LOCK_NAME = ".taskfile.lock"
 COMPLETE_JOURNAL_DIR = ".taskfile-complete"
+COMPLETE_JOURNAL_VERSION = "2"
+TASK_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def queue_lock(tasks_dir: Path):
@@ -51,6 +54,12 @@ def _lock_owner_path(active: Path, tid: str) -> Path:
     return active.parent.parent / ".locks" / tid / "owner"
 
 
+def _validate_task_id(tid: str) -> str:
+    if not TASK_ID_SAFE_RE.fullmatch(tid):
+        raise TaskError(f"invalid task id: {tid}")
+    return tid
+
+
 def _parse_lock_owner(raw: str) -> tuple[str, int, int]:
     parts = raw.strip().split("|")
     if len(parts) != 3:
@@ -70,6 +79,17 @@ def _extract_owner(body: str) -> str:
     return ""
 
 
+def _ensure_lock_owner(active: Path, tid: str, agent: str) -> None:
+    owner_file = _lock_owner_path(active, tid)
+    if not owner_file.is_file():
+        raise TaskError(f"task lock missing: {tid}")
+    lock_owner, started, ttl = _parse_lock_owner(_read(owner_file))
+    if lock_owner != agent:
+        raise TaskError(f"lock owned by {lock_owner}, not {agent}")
+    if int(time.time()) - started > ttl:
+        raise TaskError(f"task lock is stale: {tid}")
+
+
 def _ensure_in_progress_owner(active: Path, tid: str, body: str, agent: str | None) -> None:
     owner = _extract_owner(body)
     if not owner:
@@ -85,11 +105,7 @@ def _ensure_in_progress_owner(active: Path, tid: str, body: str, agent: str | No
         # lock-файл. Там всё ещё есть смысл сверить `by:` до записи, а строгую
         # проверку owner/stale выполнять только когда lock реально присутствует.
         return
-    lock_owner, started, ttl = _parse_lock_owner(_read(owner_file))
-    if lock_owner != agent:
-        raise TaskError(f"lock owned by {lock_owner}, not {agent}")
-    if int(time.time()) - started > ttl:
-        raise TaskError(f"task lock is stale: {tid}")
+    _ensure_lock_owner(active, tid, agent)
 
 
 def _pattern(tid: str, state: str) -> re.Pattern:
@@ -103,7 +119,7 @@ class TaskError(RuntimeError):
 
 def complete_journal_path(tasks_dir: Path, tid: str) -> Path:
     """Локальный recovery-файл для конкретного complete-перехода."""
-    return tasks_dir / COMPLETE_JOURNAL_DIR / f"{tid}.json"
+    return tasks_dir / COMPLETE_JOURNAL_DIR / f"{_validate_task_id(tid)}.json"
 
 
 def cleanup_complete_journal(path: Path) -> None:
@@ -119,6 +135,41 @@ def _done_count(text: str, tid: str) -> int:
     return len(_pattern(tid, "x").findall(text))
 
 
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _done_block_pattern(tid: str) -> re.Pattern:
+    return grammar.block_re_for(tid, "x")
+
+
+def _build_done_entry(task_block: str, agent: str, model: str, completed: str) -> str:
+    lines = task_block.splitlines(keepends=True)
+    if not lines:
+        raise TaskError("invalid completion journal source block")
+    head = grammar.parse_head(lines[0].rstrip("\n"))
+    if not head:
+        raise TaskError("invalid completion journal source block")
+    body = "".join(lines[1:])
+    machine = "".join(
+        line for line in body.splitlines(keepends=True)
+        if not re.match(r"\s+(by|model|completed):", line)
+    )
+    return (
+        grammar.format_head(head._replace(state="x")) + "\n"
+        + machine
+        + f"      by: {agent}\n      model: {model}\n      completed: {completed}\n"
+    )
+
+
+def _active_block_fingerprint(task_block: str) -> str:
+    return _sha256_text(task_block)
+
+
+def _entry_fingerprint(entry: str) -> str:
+    return _sha256_text(entry.rstrip("\n"))
+
+
 def _load_complete_journal(path: Path) -> dict[str, str] | None:
     if not path.exists():
         return None
@@ -126,11 +177,24 @@ def _load_complete_journal(path: Path) -> dict[str, str] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise TaskError(f"invalid completion journal: {path}") from exc
-    required = {"task_id", "agent", "model", "completed", "entry"}
+    required = {
+        "version",
+        "task_id",
+        "owner",
+        "model",
+        "model_signature",
+        "completed",
+        "source_active",
+        "source_active_fingerprint",
+        "final_entry_fingerprint",
+    }
     if not isinstance(payload, dict) or any(not isinstance(payload.get(key), str) for key in required):
         raise TaskError(f"invalid completion journal: {path}")
-    if payload["task_id"] not in path.name:
+    if payload["version"] != COMPLETE_JOURNAL_VERSION:
         raise TaskError(f"invalid completion journal: {path}")
+    if payload["task_id"] != path.stem:
+        raise TaskError(f"invalid completion journal: {path}")
+    _validate_task_id(payload["task_id"])
     return payload
 
 
@@ -145,7 +209,50 @@ def _remove_active_task(active_text: str, tid: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", _any_state_pattern(tid).sub("", active_text, count=1))
 
 
-def _recover_complete(active: Path, done: Path, tid: str) -> None:
+def _validate_recovery_payload(
+    active: Path,
+    tid: str,
+    agent: str,
+    model: str,
+    payload: dict[str, str],
+    active_match: re.Match[str] | None,
+    done_match: re.Match[str] | None,
+) -> str:
+    if payload["task_id"] != tid:
+        raise TaskError(f"invalid completion journal: {complete_journal_path(active.parent, tid)}")
+    if payload["owner"] != agent:
+        raise TaskError(f"completion journal owner mismatch: {tid}")
+    if payload["model"] != model:
+        raise TaskError(f"completion journal model mismatch: {tid}")
+    if payload["model_signature"] != _sha256_text(model):
+        raise TaskError(f"invalid completion journal: {complete_journal_path(active.parent, tid)}")
+    if payload["source_active_fingerprint"] != _active_block_fingerprint(payload["source_active"]):
+        raise TaskError(f"invalid completion journal: {complete_journal_path(active.parent, tid)}")
+    expected_entry = _build_done_entry(
+        payload["source_active"], payload["owner"], payload["model"], payload["completed"],
+    )
+    if payload["final_entry_fingerprint"] != _entry_fingerprint(expected_entry):
+        raise TaskError(f"invalid completion journal: {complete_journal_path(active.parent, tid)}")
+
+    if active_match:
+        active_block = active_match.group(0)
+        head = grammar.parse_head(active_block.splitlines()[0])
+        if head and head.state == "~":
+            _ensure_in_progress_owner(active, tid, active_match.group(3), agent)
+        elif head and head.state == " ":
+            if _lock_owner_path(active, tid).exists():
+                raise TaskError(f"task lock missing owner/body match: {tid}")
+        if _active_block_fingerprint(active_block) != payload["source_active_fingerprint"]:
+            raise TaskError(f"completion journal fingerprint mismatch: {tid}")
+    else:
+        _ensure_lock_owner(active, tid, agent)
+
+    if done_match and _entry_fingerprint(done_match.group(1)) != payload["final_entry_fingerprint"]:
+        raise TaskError(f"completion journal entry mismatch: {tid}")
+    return expected_entry
+
+
+def _recover_complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None:
     journal_path = complete_journal_path(active.parent, tid)
     payload = _load_complete_journal(journal_path)
     if not payload:
@@ -154,14 +261,16 @@ def _recover_complete(active: Path, done: Path, tid: str) -> None:
     active_text = _read(active)
     done_text = _read(done)
     active_match = _any_state_pattern(tid).search(active_text)
+    done_match = _done_block_pattern(tid).search(done_text)
     done_hits = _done_count(done_text, tid)
     if done_hits > 1:
         raise TaskError(f"completion journal inconsistent: duplicate done entries for {tid}")
     if not active_match and done_hits == 0:
         raise TaskError(f"completion journal inconsistent: {tid} missing in active.md and done.md")
+    expected_entry = _validate_recovery_payload(active, tid, agent, model, payload, active_match, done_match)
 
     if done_hits == 0:
-        atomic_write(done, _prepend_done_entry(done_text, payload["entry"]))
+        atomic_write(done, _prepend_done_entry(done_text, expected_entry))
         done_text = _read(done)
     if active_match:
         atomic_write(active, _remove_active_task(active_text, tid))
@@ -256,8 +365,9 @@ def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None
     Оба файла меняются под одной блокировкой: иначе задача может исчезнуть из
     active.md, не появившись в done.md.
     """
+    _validate_task_id(tid)
     with queue_lock(active.parent):
-        _recover_complete(active, done, tid)
+        _recover_complete(active, done, tid, agent, model)
         txt = _read(active)
         pat = _pattern(tid, "[ ~]")
         m = pat.search(txt)
@@ -270,19 +380,23 @@ def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None
             _ensure_in_progress_owner(active, tid, m.group(3), agent)
 
         ts = utc_now()
-        machine = "".join(
-            line for line in m.group(3).splitlines(keepends=True)
-            if not re.match(r"\s+(by|model|completed):", line)
-        )
-        entry = (
-            "- [x]" + m.group(2) + machine
-            + f"      by: {agent}\n      model: {model}\n      completed: {ts}\n"
-        )
+        source_block = m.group(0)
+        entry = _build_done_entry(source_block, agent, model, ts)
 
         journal_path = complete_journal_path(active.parent, tid)
         atomic.write_json(
             journal_path,
-            {"task_id": tid, "agent": agent, "model": model, "completed": ts, "entry": entry},
+            {
+                "version": COMPLETE_JOURNAL_VERSION,
+                "task_id": tid,
+                "owner": agent,
+                "model": model,
+                "model_signature": _sha256_text(model),
+                "completed": ts,
+                "source_active": source_block,
+                "source_active_fingerprint": _active_block_fingerprint(source_block),
+                "final_entry_fingerprint": _entry_fingerprint(entry),
+            },
         )
         dtxt = _read(done)
         if _done_count(dtxt, tid) == 0:
