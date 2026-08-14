@@ -34,7 +34,8 @@ H
 done
 
 [ -z "$role" ] && { echo "--role required" >&2; exit 1; }
-[ ! -f "$BRAIN/roles/$role.md" ] && { echo "no such role: $role" >&2; exit 1; }
+role_file="$(brain_resolve_system "roles/$role.md")"
+[ ! -f "$role_file" ] && { echo "no such role: $role" >&2; exit 1; }
 [ -z "$agent" ] && agent="${role}-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 workspace_path=""
 if [ -n "$workspace" ]; then
@@ -67,8 +68,13 @@ from pathlib import Path
 def inject_skills():
     role = os.environ.get("_BRAIN_RUN_ROLE", "")
     client = os.environ.get("_BRAIN_RUN_CLIENT", "claude")
-    brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
-    skills_dir = brain_path / "skills"
+    try:
+        from brain_core.paths import iter_system_files
+        skills_dir = None
+    except ImportError:
+        brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
+        skills_dir = brain_path / "skills"
+        iter_system_files = None
     
     try:
         from brain_skill_parser import get_skills_for_role
@@ -76,7 +82,10 @@ def inject_skills():
         print(f"JIT Injection Error: missing brain_skill_parser - {e}", file=sys.stderr)
         return
         
-    skills = get_skills_for_role(role, client, skills_dir)
+    if skills_dir is None and iter_system_files is not None:
+        skills = get_skills_for_role(role, client, None)
+    else:
+        skills = get_skills_for_role(role, client, skills_dir)
     mcp_servers = {}
     knowledge_blocks = []
     
@@ -222,7 +231,7 @@ PYEOF
 # не подгружает файл — только явное машиночитаемое поле, которое
 # проверяется brain-validate (роль без frontmatter = ошибка).
 doctrine_files=$(
-  python3 - "$BRAIN/roles/$role.md" <<'PY'
+  python3 - "$role_file" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -296,7 +305,7 @@ except Exception as exc:
 
 # === ROLE: $role ===
 
-$(cat "$BRAIN/roles/$role.md")
+$(cat "$role_file")
 
 $(
   if [ -f "$BRAIN/.identities/${agent}_ed25519.pub" ]; then
@@ -317,7 +326,7 @@ if [ -n "$doctrine_files" ]; then
   echo "# === DOCTRINE (mandatory reading for your role) ==="
   echo
   for df in $doctrine_files; do
-    fpath="$BRAIN/$df"
+    fpath="$(brain_resolve_system "$df")"
     if [ -f "$fpath" ]; then
       echo "## $df"
       echo

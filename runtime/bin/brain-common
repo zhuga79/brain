@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # brain-common — shared functions and variables for Brain CLI
 
+# Operator roots. Existing environment wins when the file uses ${VAR:-default}.
+# Tests isolate via HOME=tmpdir; BRAIN_SKIP_OPERATOR_ENV disables the file.
+_brain_source_operator_env() {
+  [ -z "${BRAIN_SKIP_OPERATOR_ENV:-}" ] || return 0
+  local f
+  for f in ${BRAIN_ENV_FILE:+"$BRAIN_ENV_FILE"} \
+           "$HOME/.config/brain/env" \
+           "${BRAIN_PATH:-${BRAIN:-$HOME/brain}}/.brain/env"; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+    return 0
+  done
+}
+
+_brain_source_operator_env
+
 # Dynamic BRAIN_PATH resolution:
 # 1. If BRAIN_PATH env is set, use it.
 # 2. If current directory looks like a Brain repo (has wiki/ and tasks/), use it.
@@ -20,9 +39,44 @@ export A="$BRAIN/tasks/active.md"
 export D="$BRAIN/tasks/done.md"
 export LOG="$BRAIN/wiki/log.md"
 export COUNCIL="$BRAIN/council"
-export TEAMS="$BRAIN/teams"
 export PRD_DIR="$BRAIN/prd"
 export LOCKS="$BRAIN/.locks"
+
+# Повторно: теперь известен $BRAIN, можно взять $BRAIN/.brain/env.
+if [ -z "${BRAIN_SYSTEM_PATH:-}" ]; then
+  _brain_source_operator_env
+fi
+
+# Системный корень: публичный чекаут. Пусто → один корень (legacy).
+if [ -z "${BRAIN_SYSTEM_PATH:-}" ]; then
+  export BRAIN_SYSTEM="$BRAIN"
+else
+  export BRAIN_SYSTEM="$BRAIN_SYSTEM_PATH"
+fi
+
+# Резолв системного ассета: сначала $BRAIN (локальный оверрайд), затем SYSTEM.
+# Каталог целиком не тень: пустой $BRAIN/roles не должен прятать SYSTEM/roles.
+brain_resolve_system() {
+  local rel="${1:-}"
+  if [ -z "$rel" ]; then
+    echo "error: пустой путь системного ассета" >&2
+    return 2
+  fi
+  if [ -e "$BRAIN/$rel" ]; then
+    printf '%s\n' "$BRAIN/$rel"
+  else
+    printf '%s\n' "$BRAIN_SYSTEM/$rel"
+  fi
+}
+
+# TEAMS — каталог для листинга. Файл команды всегда через brain_resolve_system:
+# иначе пустой локальный teams/ перекрыл бы системный.
+export TEAMS
+if [ -e "$BRAIN/teams" ]; then
+  TEAMS="$BRAIN/teams"
+else
+  TEAMS="$BRAIN_SYSTEM/teams"
+fi
 
 CLI_DEFAULT="${CLI_DEFAULT:-claude}"
 

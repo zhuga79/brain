@@ -20,7 +20,7 @@ import brain_provider
 TASK_RE = brain_tasks.TASK_RE  # re-export for backward compat
 
 
-from brain_core.paths import brain_path
+from brain_core.paths import brain_path, brain_system_path
 from brain_core.version import core_location, core_version  # одна реализация на всю систему
 
 
@@ -97,6 +97,7 @@ def collect_status(brain: Path) -> dict[str, Any]:
     councils = read_council(brain)
     return {
         "brain": str(brain),
+        "system": str(brain_system_path(brain=brain)),
         "tasks": {
             "summary": summarize_tasks(active, done),
             "active": active,
@@ -128,6 +129,7 @@ def print_text(status: dict[str, Any]) -> None:
     index = status["index"]
 
     print(f"Brain: {status['brain']}")
+    print(f"System: {status.get('system', status['brain'])}")
     # Версия и путь ядра: без них «правка не действует» неотличимо от
     # «исполняется другая копия» — за этим мы и гонялись всю дорогу.
     print(f"Core: {core_version()} ({core_location()})")

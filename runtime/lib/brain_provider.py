@@ -68,11 +68,24 @@ def matrix_path(brain: Path) -> Path:
     Старое расположение поддерживается как фолбэк, чтобы дерево, не прошедшее
     миграцию, продолжало работать.
     """
+    from brain_core.paths import brain_system_path
+
     new = brain / "config" / "routing.json"
     if new.exists():
         return new
     legacy = brain / "wiki" / "provider-matrix.json"
-    return legacy if legacy.exists() else new
+    if legacy.exists():
+        return legacy
+    try:
+        system = brain_system_path(brain=brain)
+        same = system.resolve() == Path(brain).resolve()
+    except OSError:
+        same = True
+    if not same:
+        syscfg = system / "config" / "routing.json"
+        if syscfg.exists():
+            return syscfg
+    return new
 
 
 def health_path(brain: Path) -> Path:

@@ -2,7 +2,7 @@
 title: Decisions Log
 type: decision
 created: 2026-05-03
-updated: 2026-08-13
+updated: 2026-08-14
 curation: agent
 protected: false
 source_policy: advisory
@@ -25,5 +25,6 @@ visibility: public
 - [[decision-role-model-routing]] — маршрутизация «роль → модель»: один машинный источник вне wiki/, политика отделена от доступности (2026-08-10)
 - [[decision-public-source-of-truth]] — инверсия публикации: системный код живёт в публичном репозитории и является источником, приватное дерево — слой данных; PR принимаются напрямую (2026-08-10)
 - [[decision-corrective-recurrence]] — рецидив корректирующей задачи после закрытия заводит новую; воскрешение в окне 72ч невозможно (2026-08-13)
+- [[decision-post-inversion-cycle]] — следующий цикл: живая инверсия двух корней, без новых продуктовых функций (2026-08-14)
 
 Связанные страницы: [[about-brain]], [[roles-overview]].

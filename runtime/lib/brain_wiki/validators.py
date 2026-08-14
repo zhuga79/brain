@@ -11,15 +11,17 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from brain_core.paths import iter_system_files, resolve_system_asset, system_asset_rel
+
 from .frontmatter import as_list, parse_frontmatter, validate_date
 from .pages import (
     Issue,
+    all_page_slugs,
     extract_wikilinks,
     iter_wiki_pages,
     raw_ref_to_path,
     read_text,
     source_refs,
-    wiki_slugs,
     extract_task_refs,
 )
 
@@ -38,6 +40,9 @@ EXPECTED_FILES = (
     "wiki/index.md",
     "wiki/log.md",
 )
+# После раздела эти каталоги живут только в системном корне.
+# Локальный оверрайд roles/teams/doctrine/skills — не восстановление.
+EXCLUSIVE_SYSTEM_DIRS = ("runtime", "tests", "spec", "docs")
 
 
 def validate_staged_write_path(brain: Path) -> list[Issue]:
@@ -85,7 +90,8 @@ def validate_paths(brain: Path) -> list[Issue]:
         if not (brain / d).is_dir():
             issues.append(Issue("ERROR", d + "/", "missing required directory"))
     for d in EXPECTED_DIRS:
-        if not (brain / d).is_dir():
+        exists = (brain / d).is_dir() or resolve_system_asset(d, brain=brain).is_dir()
+        if not exists:
             issues.append(Issue("WARN", d + "/", "expected directory missing"))
     for f in EXPECTED_FILES:
         if not (brain / f).exists():
@@ -111,9 +117,36 @@ def validate_raw_source(brain: Path, path: Path) -> list[Issue]:
     return issues
 
 
+def validate_system_paths_not_restored(brain: Path) -> list[Issue]:
+    """Запрет вернуть системный каталог в приватное дерево.
+
+    Срабатывает только при двух корнях. Иначе раскладка «один корень»
+    остаётся рабочей, и откат не ломается.
+    """
+    from brain_core.paths import brain_system_path
+
+    system = brain_system_path(brain=brain)
+    try:
+        same_root = system.resolve() == Path(brain).resolve()
+    except OSError:
+        same_root = Path(system) == Path(brain)
+    if same_root:
+        return []
+
+    issues: list[Issue] = []
+    for name in EXCLUSIVE_SYSTEM_DIRS:
+        if (brain / name).is_dir():
+            issues.append(Issue(
+                "ERROR",
+                f"{name}/",
+                "системный путь восстановлен в приватном дереве",
+            ))
+    return issues
+
+
 def validate_wiki_page(brain: Path, path: Path, slugs: set[str] | None = None) -> list[Issue]:
     rel = str(path.relative_to(brain))
-    slugs = slugs if slugs is not None else wiki_slugs(brain)
+    slugs = slugs if slugs is not None else all_page_slugs(brain)
     fm, body = parse_frontmatter(read_text(path))
     issues = []
     if not fm:
@@ -264,21 +297,21 @@ def validate_routing(brain: Path) -> list[Issue]:
     import brain_provider
 
     issues: list[Issue] = []
-    roles_dir = brain / "roles"
-    config = brain / "config" / "routing.json"
+    role_files = iter_system_files("roles", "*.md", brain=brain)
+    config = resolve_system_asset("config/routing.json", brain=brain)
 
     # Файлы, оставшиеся от прежних источников: пока они лежат на месте, они
     # участвуют в разрешении маршрута и тихо перебивают конфигурацию.
-    for stale, why in (
-        (brain / "wiki" / "provider-matrix.json", "политика переехала в config/routing.json"),
-        (brain / ".cli-mapping.sh", "bash-маршрутизация удалена, её читатели переведены на brain-provider cli"),
+    for rel, why in (
+        ("wiki/provider-matrix.json", "политика переехала в config/routing.json"),
+        (".cli-mapping.sh", "bash-маршрутизация удалена, её читатели переведены на brain-provider cli"),
     ):
+        stale = brain / rel if rel.startswith("wiki/") else resolve_system_asset(rel, brain=brain)
         if stale.exists():
-            issues.append(Issue("ERROR", str(stale.relative_to(brain)),
-                                f"остался после миграции: {why}"))
+            issues.append(Issue("ERROR", rel, f"остался после миграции: {why}"))
 
     if not config.exists():
-        if roles_dir.is_dir():
+        if role_files:
             issues.append(Issue("ERROR", "config/routing.json", "нет файла маршрутизации"))
         return issues
 
@@ -315,14 +348,13 @@ def validate_routing(brain: Path) -> list[Issue]:
             issues.append(Issue("ERROR", "config/routing.json",
                                 f"роль {role}: профиль {profile!r} не существует"))
 
-    if roles_dir.is_dir():
-        for path in sorted(roles_dir.glob("*.md")):
-            role = path.stem
-            candidates, _ = brain_provider.role_candidates(matrix, role)
-            if not candidates:
-                issues.append(Issue("ERROR", f"roles/{path.name}",
-                                    "роль без разрешимой записи в config/routing.json — "
-                                    "запуск уйдёт в defaults.cli без модели"))
+    for path in role_files:
+        role = path.stem
+        candidates, _ = brain_provider.role_candidates(matrix, role)
+        if not candidates:
+            issues.append(Issue("ERROR", f"roles/{path.name}",
+                                "роль без разрешимой записи в config/routing.json — "
+                                "запуск уйдёт в defaults.cli без модели"))
 
     # Проза страницы решения обязана совпадать с конфигурацией. Раньше она
     # держала собственные списки и разошлась по пяти ролям из шести — сравнить
@@ -369,11 +401,11 @@ def validate_roles(brain: Path) -> list[Issue]:
     что данные на месте и ссылки на доктрины не битые.
     """
     issues: list[Issue] = []
-    roles_dir = brain / "roles"
-    if not roles_dir.is_dir():
+    role_files = iter_system_files("roles", "*.md", brain=brain)
+    if not role_files:
         return issues
 
-    for path in sorted(roles_dir.glob("*.md")):
+    for path in role_files:
         rel = f"roles/{path.name}"
         fm, _body = parse_frontmatter(read_text(path))
 
@@ -393,7 +425,7 @@ def validate_roles(brain: Path) -> list[Issue]:
                                     f"отсутствует поле {field} в frontmatter роли"))
 
         for slug in as_list(fm.get("doctrine")):
-            if not (brain / "doctrine" / f"{slug}.md").is_file():
+            if not resolve_system_asset(f"doctrine/{slug}.md", brain=brain).is_file():
                 issues.append(Issue("ERROR", rel,
                                     f"doctrine: {slug} — нет файла doctrine/{slug}.md"))
     return issues
@@ -411,13 +443,12 @@ def validate_escalation_matrix(brain: Path) -> list[Issue]:
     from .escalation import load_escalation_matrix
 
     issues: list[Issue] = []
-    doctrine_dir = brain / "doctrine"
-    if not doctrine_dir.is_dir():
-        return issues
-
     rel = "doctrine/escalation-matrix.yaml"
-    path = doctrine_dir / "escalation-matrix.yaml"
-    if not path.exists():
+    path = resolve_system_asset(rel, brain=brain)
+    has_doctrine = path.parent.is_dir() or (brain / "doctrine").is_dir()
+    if not has_doctrine:
+        return issues
+    if not path.is_file():
         return [Issue("ERROR", rel,
                       "нет файла: escalation matrix должна жить в "
                       "doctrine/escalation-matrix.yaml, а не прозой в MEMORY.md")]
@@ -431,8 +462,7 @@ def validate_escalation_matrix(brain: Path) -> list[Issue]:
     if data.get("version") is None:
         issues.append(Issue("ERROR", rel, "отсутствует обязательное поле version"))
 
-    roles_dir = brain / "roles"
-    known_roles = {p.stem for p in roles_dir.glob("*.md")} if roles_dir.is_dir() else set()
+    known_roles = {p.stem for p in iter_system_files("roles", "*.md", brain=brain)}
 
     for section in ("zones", "tax_stages"):
         entries = data.get(section)
@@ -489,8 +519,14 @@ def validate_escalation_matrix(brain: Path) -> list[Issue]:
 
 def validate_role_uiux_routing(brain: Path) -> list[Issue]:
     issues = []
-    roles_dir = brain / "roles"
-    if not roles_dir.is_dir() or not (brain / "skills" / "uiux").is_dir():
+    has_roles = bool(iter_system_files("roles", "*.md", brain=brain)) \
+        or (brain / "roles").is_dir() \
+        or resolve_system_asset("roles", brain=brain).is_dir()
+    if not has_roles:
+        return issues
+    has_uiux = bool(iter_system_files("skills/uiux", "**/*.md", brain=brain)) \
+        or resolve_system_asset("skills/uiux", brain=brain).is_dir()
+    if not has_uiux:
         return issues
 
     checks = [
@@ -503,7 +539,7 @@ def validate_role_uiux_routing(brain: Path) -> list[Issue]:
     ]
 
     for filename, patterns in checks:
-        path = roles_dir / filename
+        path = resolve_system_asset(f"roles/{filename}", brain=brain)
         rel = f"roles/{filename}"
         if not path.exists():
             issues.append(Issue("WARN", rel, "missing role file for UI/UX routing check"))
@@ -650,21 +686,30 @@ def _check_skill_status(rel: str, slug: str, group: str, status: str) -> list[Is
 def validate_uiux_skill_pack(brain: Path) -> list[Issue]:
     """Validate the full skills/uiux/ skill pack structure and contents."""
     issues: list[Issue] = []
-    uiux_dir = brain / "skills" / "uiux"
-    if not uiux_dir.is_dir():
+    pack_files = iter_system_files("skills/uiux", "**/*.md", brain=brain)
+    if not pack_files and not resolve_system_asset("skills/uiux", brain=brain).is_dir():
         return issues
 
+    files_by_group: dict[str, list[Path]] = {"core": [], "brain": [], "handoff": []}
+    for path in pack_files:
+        group = path.parent.name
+        if group in files_by_group:
+            files_by_group[group].append(path)
+
     for group in ("core", "brain", "handoff"):
-        dir_issues = _check_group_dir_exists(uiux_dir, group)
-        if dir_issues:
-            issues.extend(dir_issues)
+        if not files_by_group[group] and not resolve_system_asset(f"skills/uiux/{group}", brain=brain).is_dir():
+            issues.extend(_check_group_dir_exists(
+                resolve_system_asset("skills/uiux", brain=brain), group))
             continue
 
-        group_dir = uiux_dir / group
-        issues.extend(_check_required_skills_present(group_dir, group))
+        present = {p.stem for p in files_by_group[group]}
+        for slug in _REQUIRED_BY_GROUP[group]:
+            if slug not in present:
+                issues.append(Issue("ERROR", f"skills/uiux/{group}/{slug}.md",
+                                    "missing required UI/UX skill"))
 
-        for path in sorted(group_dir.glob("*.md")):
-            rel = str(path.relative_to(brain))
+        for path in files_by_group[group]:
+            rel = system_asset_rel(path, brain=brain)
             slug = path.stem
             content = read_text(path)
             fm, _body = parse_frontmatter(content)
@@ -684,14 +729,8 @@ def validate_uiux_skill_pack(brain: Path) -> list[Issue]:
 
 def get_uiux_skill_slugs(brain: Path) -> set[str]:
     slugs: set[str] = set()
-    uiux_dir = brain / "skills" / "uiux"
-    if not uiux_dir.is_dir():
-        return slugs
-    for group in ("core", "brain", "handoff"):
-        group_dir = uiux_dir / group
-        if group_dir.is_dir():
-            for path in group_dir.glob("*.md"):
-                slugs.add(path.stem)
+    for path in iter_system_files("skills/uiux", "**/*.md", brain=brain):
+        slugs.add(path.stem)
     return slugs
 
 
@@ -702,12 +741,10 @@ def validate_uiux_stale_references(brain: Path) -> list[Issue]:
         return issues
 
     group_slugs: dict[str, set[str]] = {"core": set(), "brain": set(), "handoff": set()}
-    uiux_dir = brain / "skills" / "uiux"
-    for group in group_slugs:
-        gd = uiux_dir / group
-        if gd.is_dir():
-            for p in gd.glob("*.md"):
-                group_slugs[group].add(p.stem)
+    for path in iter_system_files("skills/uiux", "**/*.md", brain=brain):
+        group = path.parent.name
+        if group in group_slugs:
+            group_slugs[group].add(path.stem)
 
     search_dirs = ["roles", "spec", "handoff"]
     skill_prefixes = (
@@ -718,11 +755,13 @@ def validate_uiux_stale_references(brain: Path) -> list[Issue]:
     )
 
     for dir_name in search_dirs:
-        d = brain / dir_name
-        if not d.is_dir():
-            continue
-        for path in d.glob("**/*.md"):
-            rel = str(path.relative_to(brain))
+        if dir_name == "roles":
+            paths = iter_system_files("roles", "*.md", brain=brain)
+        else:
+            d = brain / dir_name
+            paths = list(d.glob("**/*.md")) if d.is_dir() else []
+        for path in paths:
+            rel = system_asset_rel(path, brain=brain)
             content = read_text(path)
 
             for match in re.finditer(r"skills/uiux/([a-z0-9/-]+)", content):
@@ -758,7 +797,8 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     if any(issue.severity == "ERROR" for issue in issues):
         return issues
 
-    slugs = wiki_slugs(brain)
+    issues.extend(validate_system_paths_not_restored(brain))
+    slugs = all_page_slugs(brain)
     for raw in sorted((brain / "raw").glob("*.md")):
         issues.extend(validate_raw_source(brain, raw))
     for page in iter_wiki_pages(brain):
