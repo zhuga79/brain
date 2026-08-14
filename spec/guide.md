@@ -376,8 +376,26 @@ brain-launch <task-id> [--session NAME] [--dry-run] [--watch] [--auto-next] [--h
 - `--watch --auto-next --dry-run` — вывести план auto-next без side effects: текущую задачу, критерии завершения, lock plan, следующий тикет.
 - `--handoff-on-limit` — обернуть CLI-команду через `brain-handoff run`; при 429/quota/resource/context-limit ошибке создаётся handoff для следующего оркестратора.
 
+`--dry-run` в любой комбинации с `--watch` / `--auto-next` не пишет ничего: ни
+в `active.md`, ни в `council/`, ни в `.locks/`, ни в git, ни в tmux. Это
+контракт, а не свойство реализации — он закреплён кейсом
+`tests/cases/100-launch-watch-safety-stop.sh` после инцидента 2026-08-14, когда
+«показать план» пометило `[~]` одиннадцать задач за две минуты.
+
+Standalone watch-loop (`brain-launch --watch` без task-id):
+
+- берёт только `surface: headless` — interactive-задача идёт в видимое окно
+  (`docs/decisions/decision-interactive-surface.md`);
+- `--wip N` — сколько задач держать в работе одновременно (default 1);
+- `--max-failures N` — стоп после N подряд неудачных запусков (default 3);
+- `--max-tasks N` — жёсткий предел задач за прогон (default 0 = без предела);
+- задача, чей запуск не удался, возвращается в очередь (`[~]` → `[ ]`), а не
+  остаётся висеть в работе.
+
 Env-переменные для watch:
 - `BRAIN_WATCH_POLL_SEC` — интервал опроса в секундах (default: 5).
+- `BRAIN_WATCH_WIP`, `BRAIN_WATCH_MAX_FAILURES`, `BRAIN_WATCH_MAX_TASKS` —
+  умолчания для одноимённых флагов watch-loop.
 
 Mapping роль → CLI задаётся в `~/brain/.cli-mapping.sh`:
 

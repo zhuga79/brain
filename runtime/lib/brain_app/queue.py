@@ -252,6 +252,11 @@ def block(task_id: str, brain: Path | None = None, *, agent: str | None = None) 
     taskfile.block(paths.active_file(brain), task_id, agent)
 
 
+def reconcile(brain: Path | None = None, *, fix: bool = False) -> list[dict[str, Any]]:
+    """Расхождения «владелец задачи ≠ владелец лока»; с fix=True — их устранение."""
+    return taskfile.reconcile_locks(paths.active_file(brain), fix=fix)
+
+
 def complete(task_id: str, agent: str, model: str, brain: Path | None = None) -> None:
     if not str(agent).strip():
         raise ValueError("agent_id required")
@@ -361,6 +366,26 @@ def print_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_reconcile(args: argparse.Namespace) -> int:
+    findings = reconcile(args.brain, fix=args.fix)
+    if args.json:
+        print(json.dumps({"ok": True, "fixed": bool(args.fix), "findings": findings}, ensure_ascii=False, indent=2))
+        return 0 if (args.fix or not findings) else 1
+    if not findings:
+        print("очередь и локи согласованы")
+        return 0
+    for item in findings:
+        line = f"{item['id']}  {item['kind']}  task={item['task_owner'] or '—'}  lock={item['lock_owner'] or '—'}"
+        if item.get("action"):
+            line += f"  → {item['action']}"
+        print(line)
+    if not args.fix:
+        print()
+        print("исправить: brain-task reconcile --fix")
+        return 1
+    return 0
+
+
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -400,6 +425,11 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("--council", default="", type=_csv, help="роли через запятую")
     new.add_argument("--depends-on", dest="depends_on", default="", type=_csv, help="id через запятую")
     new.set_defaults(func=print_add)
+
+    fixup = sub.add_parser("reconcile", help="расхождения между `by:` задачи и владельцем лока")
+    fixup.add_argument("--fix", action="store_true", help="устранить расхождения")
+    fixup.add_argument("--json", action="store_true")
+    fixup.set_defaults(func=print_reconcile)
     return parser
 
 

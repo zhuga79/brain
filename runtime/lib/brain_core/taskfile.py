@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ LOCK_NAME = ".taskfile.lock"
 COMPLETE_JOURNAL_DIR = ".taskfile-complete"
 COMPLETE_JOURNAL_VERSION = "2"
 TASK_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+LOCK_TTL_DEFAULT = 600
 
 
 def queue_lock(tasks_dir: Path):
@@ -50,8 +52,67 @@ def _read(path: Path) -> str:
     return atomic.read_text(path)
 
 
+def _locks_root(active: Path) -> Path:
+    return active.parent.parent / ".locks"
+
+
+def _lock_dir(active: Path, tid: str) -> Path:
+    return _locks_root(active) / tid
+
+
 def _lock_owner_path(active: Path, tid: str) -> Path:
-    return active.parent.parent / ".locks" / tid / "owner"
+    return _lock_dir(active, tid) / "owner"
+
+
+def _write_lock_owner(path: Path, agent: str, ttl: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{agent}|{int(time.time())}|{int(ttl)}\n", encoding="utf-8")
+
+
+def claim_lock(active: Path, tid: str, agent: str, ttl: int = LOCK_TTL_DEFAULT) -> bool:
+    """Захватить лок задачи под тем же agent-id, что попадёт в `by:`.
+
+    Формат owner-файла тот же, что у brain-lock (`agent|epoch|ttl`), и каталог
+    создаётся тем же atomically-mkdir. Смысл в том, что перевод `[ ]`→`[~]`
+    теперь не может состояться без лока: раньше запись состояния и захват лока
+    были двумя независимыми шагами, и очередь оказывалась в состоянии, где
+    владелец задачи и владелец лока — разные агенты.
+
+    Возвращает True, если лок был создан этим вызовом (нужно для отката).
+    """
+    if not str(agent).strip():
+        raise TaskError("agent id required")
+    directory = _lock_dir(active, tid)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        pass
+    else:
+        _write_lock_owner(directory / "owner", agent, ttl)
+        return True
+
+    owner_file = directory / "owner"
+    if not owner_file.is_file():
+        # Каталог без owner-файла — обрывок предыдущего запуска, не лок.
+        _write_lock_owner(owner_file, agent, ttl)
+        return True
+    try:
+        lock_owner, started, current_ttl = _parse_lock_owner(_read(owner_file))
+    except TaskError:
+        _write_lock_owner(owner_file, agent, ttl)
+        return True
+    if lock_owner == agent:
+        _write_lock_owner(owner_file, agent, ttl)  # продление своего лока
+        return False
+    if int(time.time()) - started > current_ttl:
+        _write_lock_owner(owner_file, agent, ttl)  # перехват протухшего
+        return False
+    raise TaskError(f"task locked by {lock_owner}, not {agent}: {tid}")
+
+
+def _drop_lock(active: Path, tid: str) -> None:
+    shutil.rmtree(_lock_dir(active, tid), ignore_errors=True)
 
 
 def _validate_task_id(tid: str) -> str:
@@ -287,8 +348,17 @@ def add(active: Path, entry: str) -> None:
         atomic_write(active, txt + entry)
 
 
-def take(active: Path, tid: str, agent: str) -> None:
-    """Перевести задачу в работу: [ ] → [~], дописать started/by."""
+def take(active: Path, tid: str, agent: str, *, ttl: int = LOCK_TTL_DEFAULT) -> None:
+    """Перевести задачу в работу: [ ] → [~], дописать started/by.
+
+    Лок захватывается здесь же, тем же agent-id, что уходит в `by:`. Раньше
+    захват был отдельным шагом вызывающего (brain-task делал его, MCP делал,
+    а прямой вызов brain_app.queue.take — нет), поэтому существовал путь, на
+    котором задача уходила в работу вообще без лока.
+    """
+    _validate_task_id(tid)
+    if not str(agent).strip():
+        raise TaskError("agent id required")
     with queue_lock(active.parent):
         txt = _read(active)
         pat = _pattern(tid, " ")
@@ -298,9 +368,11 @@ def take(active: Path, tid: str, agent: str) -> None:
             # brain-task take) и просто повторный запуск после обрыва связи
             # иначе упирались бы в отказ на задаче, которую агент уже держит.
             in_progress = _pattern(tid, "~").search(txt)
-            if in_progress and f"by: {agent}" in in_progress.group(3):
+            if in_progress and _extract_owner(in_progress.group(3)) == agent:
+                claim_lock(active, tid, agent, ttl)
                 return
             raise TaskError(f"task not found or not open: {tid}")
+        created = claim_lock(active, tid, agent, ttl)
         ts = utc_now()
 
         def repl(m: re.Match) -> str:
@@ -309,7 +381,25 @@ def take(active: Path, tid: str, agent: str) -> None:
                 + f"      started: {ts}\n      by: {agent}\n"
             )
 
-        atomic_write(active, pat.sub(repl, txt, count=1))
+        try:
+            atomic_write(active, pat.sub(repl, txt, count=1))
+        except BaseException:
+            # Лок без записи в очереди — тот же рассинхрон, только зеркальный.
+            if created:
+                _drop_lock(active, tid)
+            raise
+
+
+def _released_text(txt: str, tid: str) -> str:
+    """Текст очереди с задачей, возвращённой в open: [~] → [ ] без started/by."""
+    def repl(m: re.Match) -> str:
+        body = "".join(
+            line for line in m.group(3).splitlines(keepends=True)
+            if not line.lstrip().startswith(("started:", "by:"))
+        )
+        return m.group(1) + " ]" + m.group(2) + body
+
+    return _pattern(tid, "~").sub(repl, txt, count=1)
 
 
 def release(active: Path, tid: str, agent: str | None = None) -> None:
@@ -327,15 +417,7 @@ def release(active: Path, tid: str, agent: str | None = None) -> None:
                 return
             raise TaskError(f"task not in progress: {tid}")
         _ensure_in_progress_owner(active, tid, match.group(3), agent)
-
-        def repl(m: re.Match) -> str:
-            body = "".join(
-                line for line in m.group(3).splitlines(keepends=True)
-                if not line.lstrip().startswith(("started:", "by:"))
-            )
-            return m.group(1) + " ]" + m.group(2) + body
-
-        atomic_write(active, pat.sub(repl, txt, count=1))
+        atomic_write(active, _released_text(txt, tid))
 
 
 def block(active: Path, tid: str, agent: str | None = None) -> None:
@@ -358,6 +440,111 @@ def block(active: Path, tid: str, agent: str | None = None) -> None:
             return m.group(1) + "!]" + m.group(2) + m.group(3)
 
         atomic_write(active, pat.sub(repl, txt, count=1))
+
+
+def _in_progress_owners(txt: str) -> dict[str, str]:
+    """id задачи в работе → значение её `by:` (пустая строка, если поля нет)."""
+    out: dict[str, str] = {}
+    for match in grammar.BLOCK_RE.finditer(txt):
+        block = match.group(1)
+        head = grammar.parse_head(block.splitlines()[0])
+        if not head or head.state != "~":
+            continue
+        out[head.task_id] = _extract_owner("\n".join(block.splitlines()[1:]))
+    return out
+
+
+def _lock_state(active: Path, tid: str) -> tuple[str, bool] | None:
+    """(владелец лока, протух ли). None — лока нет или он нечитаем."""
+    owner_file = _lock_owner_path(active, tid)
+    if not owner_file.is_file():
+        return None
+    try:
+        owner, started, ttl = _parse_lock_owner(_read(owner_file))
+    except TaskError:
+        return ("", True)
+    return (owner, int(time.time()) - started > ttl)
+
+
+def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object]]:
+    """Свести владельца задачи и владельца лока к одному агенту.
+
+    Инцидент t-2026-08-14: `by:` называл одного агента, лок принадлежал
+    другому, и `brain-task release` отвергался обеими сторонами — задачу не мог
+    отпустить ни владелец лока, ни владелец задачи. Разбор такого расхождения
+    должен быть штатной командой, а не ручным `rm -rf .locks/<id>`.
+
+    Виды расхождений:
+
+    * `owner_mismatch` — `[~] by: A`, лок принадлежит B;
+    * `lock_missing`   — `[~] by: A`, лока нет;
+    * `owner_missing`  — `[~]` вообще без `by:`;
+    * `lock_stale`     — `[~] by: A`, лок A протух;
+    * `orphan_lock`    — лок есть, задача не в работе.
+
+    С `fix=True` расхождение устраняется: задача возвращается в `[ ]`, а лок
+    снимается — кроме `lock_missing`, где лок восстанавливается на владельца
+    задачи, потому что работа, скорее всего, идёт.
+    """
+    findings: list[dict[str, object]] = []
+    queue_changed = False
+    with queue_lock(active.parent):
+        txt = _read(active)
+        owners = _in_progress_owners(txt)
+
+        locked_ids: set[str] = set()
+        root = _locks_root(active)
+        if root.is_dir():
+            for entry in sorted(root.iterdir()):
+                if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+                    continue
+                locked_ids.add(entry.name)
+
+        for tid in sorted(set(owners) | locked_ids):
+            task_owner = owners.get(tid)
+            lock = _lock_state(active, tid) if tid in locked_ids else None
+            lock_owner = lock[0] if lock else ""
+            stale = bool(lock and lock[1])
+
+            if task_owner is None:
+                kind = "orphan_lock"
+            elif lock is None:
+                kind = "lock_missing"
+            elif not task_owner:
+                kind = "owner_missing"
+            elif lock_owner != task_owner:
+                kind = "owner_mismatch"
+            elif stale:
+                kind = "lock_stale"
+            else:
+                continue
+
+            finding: dict[str, object] = {
+                "id": tid,
+                "kind": kind,
+                "task_owner": task_owner or "",
+                "lock_owner": lock_owner,
+                "stale": stale,
+                "fixed": False,
+            }
+            if fix:
+                if kind == "lock_missing":
+                    claim_lock(active, tid, str(task_owner))
+                    finding["action"] = f"lock restored for {task_owner}"
+                else:
+                    _drop_lock(active, tid)
+                    if task_owner is not None:
+                        txt = _released_text(txt, tid)
+                        queue_changed = True
+                        finding["action"] = "lock dropped, task returned to open"
+                    else:
+                        finding["action"] = "orphan lock dropped"
+                finding["fixed"] = True
+            findings.append(finding)
+
+        if queue_changed:
+            atomic_write(active, txt)
+    return findings
 
 
 def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None:

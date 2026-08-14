@@ -26,6 +26,7 @@ brain-task — управление очередью задач
   brain-task release <id> --as <agent-id>  снять лок + вернуть [ ]
   brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
   brain-task block <id> "reason" [--as <agent-id>]  пометить [!] с причиной
+  brain-task reconcile [--fix] [--json]    свести владельца задачи и владельца лока
   brain-task log [N]                  последние N (default 30) записей лога
   brain-task webhook-replay           переотправить все записи из dead-letter.jsonl
 USAGE
@@ -239,6 +240,32 @@ case "$cmd" in
     git_commit "task-block: $id ($reason)"
     _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
     echo "blocked: $id ($reason)"
+    ;;
+
+  reconcile)
+    # Расхождение «владелец задачи ≠ владелец лока» разбирается штатно.
+    # 2026-08-14 такое состояние отвергалось и brain-task release, и
+    # brain-lock release, и его снимали вручную через rm -rf .locks/<id>.
+    fix=false; json_out=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --fix) fix=true; shift;;
+        --json) json_out=true; shift;;
+        *) shift;;
+      esac
+    done
+    args=(--brain "$BRAIN" reconcile)
+    $fix && args+=(--fix)
+    $json_out && args+=(--json)
+    set +e
+    _py brain_app.queue "${args[@]}"
+    rc=$?
+    set -e
+    if $fix; then
+      log_op "task-reconcile" "" "" "fix=1"
+      git_commit "task-reconcile: lock/owner divergence"
+    fi
+    exit $rc
     ;;
 
   log)

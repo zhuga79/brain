@@ -14,7 +14,32 @@ from unittest.mock import MagicMock, call
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "runtime" / "lib"))
 
+import brain_launch_watch  # noqa: E402
 from brain_launch_watch import run_watch_loop  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Hermetic guard
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def no_real_commands(monkeypatch):
+    """No test in this file may shell out to a real brain-* command.
+
+    Until t-2026-08-14 the loop's default federation-sync and ops-refresh
+    helpers ran for real in every test that did not inject them, against the
+    operator's live tree. A watch-loop test must never touch live data.
+    """
+    class _Blocked(types.SimpleNamespace):
+        @staticmethod
+        def run(cmd, **kwargs):
+            raise AssertionError(f"test tried to run a real command: {cmd}")
+
+        @staticmethod
+        def Popen(cmd, **kwargs):  # noqa: N802 - mirrors subprocess API
+            raise AssertionError(f"test tried to spawn a real process: {cmd}")
+
+    monkeypatch.setattr(brain_launch_watch, "subprocess", _Blocked)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +427,258 @@ class TestGracefulExit:
             sleep_fn=_sleep,
         )
         assert rc == 0
+
+
+class TestDryRun:
+    """t-2026-08-14: --dry-run must not write anything, in any combination.
+
+    The live incident ran `brain-launch --watch --auto-next --dry-run` and got
+    eleven tasks marked in progress. The flag has to reach the loop itself.
+    """
+
+    def _forbidden(self, name):
+        def _boom(*args, **kwargs):
+            raise AssertionError(f"dry-run called {name}")
+        return _boom
+
+    def test_dry_run_takes_nothing(self, tmp_path):
+        messages = []
+        rc = run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="dry-agent",
+            dry_run=True,
+            interval=1,
+            next_task_fn=lambda r: "t-would-take",
+            take_task_fn=self._forbidden("take"),
+            release_task_fn=self._forbidden("release"),
+            launch_task_fn=self._forbidden("launch"),
+            done_checker_fn=self._forbidden("done"),
+            in_progress_count_fn=lambda a: 0,
+            fed_sync_fn=self._forbidden("fed_sync"),
+            ops_refresh_fn=self._forbidden("ops_refresh"),
+            log_op_fn=self._forbidden("log"),
+            print_fn=messages.append,
+            sleep_fn=self._forbidden("sleep"),
+        )
+        assert rc == 0
+        text = "\n".join(messages)
+        assert "DRY-RUN" in text
+        assert "t-would-take" in text
+        assert "brain-task take t-would-take --as dry-agent" in text
+
+    def test_dry_run_never_writes_to_the_queue(self, tmp_path):
+        """End-to-end on an isolated tree: files are byte-identical afterwards."""
+        (tmp_path / "tasks").mkdir()
+        (tmp_path / "wiki").mkdir()
+        active = tmp_path / "tasks" / "active.md"
+        done = tmp_path / "tasks" / "done.md"
+        log = tmp_path / "wiki" / "log.md"
+        active.write_text(
+            "# Active\n\n- [ ] [P1] t-dry-one — First\n      role: developer   mode: solo\n"
+        )
+        done.write_text("# Done\n")
+        log.write_text("# Log\n")
+        before = {p: p.read_bytes() for p in (active, done, log)}
+
+        rc = run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="dry-agent",
+            dry_run=True,
+            interval=1,
+            next_task_fn=lambda r: "t-dry-one",
+            print_fn=lambda m: None,
+        )
+        assert rc == 0
+        for path, content in before.items():
+            assert path.read_bytes() == content, path
+        assert not (tmp_path / ".locks").exists()
+        assert not (tmp_path / "council").exists()
+
+    def test_dry_run_reports_nothing_to_do_when_wip_is_full(self, tmp_path):
+        messages = []
+        run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="dry-agent",
+            dry_run=True,
+            wip_limit=1,
+            next_task_fn=lambda r: "t-blocked-by-wip",
+            in_progress_count_fn=lambda a: 1,
+            print_fn=messages.append,
+        )
+        text = "\n".join(messages)
+        assert "nothing" in text.lower()
+        assert "brain-task take" not in text
+
+
+class TestHeadlessOnly:
+    """Interactive tasks must not enter headless auto-next by any path."""
+
+    def test_default_next_query_filters_surface(self, monkeypatch):
+        seen = {}
+
+        class _Result:
+            returncode = 0
+            stdout = '{"ok": false, "reason": "no_tasks"}'
+
+        def _fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return _Result()
+
+        monkeypatch.setattr(brain_launch_watch.subprocess, "run", _fake_run)
+        brain_launch_watch._default_next_task("developer")
+        assert "--surface" in seen["cmd"]
+        assert seen["cmd"][seen["cmd"].index("--surface") + 1] == "headless"
+
+    def test_surface_is_used_by_the_default_helper(self, tmp_path, monkeypatch):
+        """The loop's default next helper carries the configured surface."""
+        seen = []
+
+        def _fake_default_next(role, env=None, surface="headless"):
+            seen.append(surface)
+            return None
+
+        monkeypatch.setattr(brain_launch_watch, "_default_next_task", _fake_default_next)
+        run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="surface-agent",
+            exit_on_empty=True,
+            interval=1,
+            in_progress_count_fn=lambda a: 0,
+            take_task_fn=lambda t, a: True,
+            release_task_fn=lambda t, a: None,
+            launch_task_fn=lambda t: _MockProc(),
+            done_checker_fn=lambda t: True,
+            fed_sync_fn=lambda: None,
+            ops_refresh_fn=lambda: None,
+            log_op_fn=lambda *a: None,
+            print_fn=lambda m: None,
+            sleep_fn=lambda s: None,
+        )
+        assert seen == ["headless"]
+
+
+class TestWipAndFailureStop:
+    """The loop must not walk the whole queue when launches fail."""
+
+    def test_failed_launch_stops_after_max_failures(self, tmp_path):
+        taken, released = [], []
+
+        rc = run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="wip-agent",
+            interval=1,
+            max_failures=3,
+            next_task_fn=lambda r: f"t-fail-{len(taken)}",
+            take_task_fn=lambda t, a: (taken.append(t), True)[1],
+            release_task_fn=lambda t, a: released.append(t),
+            launch_task_fn=lambda t: _MockProc(returncode=1),
+            done_checker_fn=lambda t: False,
+            in_progress_count_fn=lambda a: 0,
+            fed_sync_fn=lambda: None,
+            ops_refresh_fn=lambda: None,
+            log_op_fn=lambda *a: None,
+            print_fn=lambda m: None,
+            sleep_fn=lambda s: None,
+        )
+        assert rc == 1
+        assert len(taken) == 3, taken
+        # Every task the loop touched went back to the queue.
+        assert released == taken
+
+    def test_wip_limit_blocks_a_second_take(self, tmp_path):
+        taken = []
+        in_flight = {"n": 0}
+
+        def _take(tid, aid):
+            taken.append(tid)
+            in_flight["n"] += 1
+            return True
+
+        rc = run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="wip-agent",
+            exit_on_empty=True,
+            interval=1,
+            wip_limit=1,
+            next_task_fn=lambda r: f"t-wip-{len(taken)}",
+            take_task_fn=_take,
+            release_task_fn=lambda t, a: None,   # deliberately does NOT clear [~]
+            launch_task_fn=lambda t: _MockProc(),
+            done_checker_fn=lambda t: True,
+            in_progress_count_fn=lambda a: in_flight["n"],
+            fed_sync_fn=lambda: None,
+            ops_refresh_fn=lambda: None,
+            log_op_fn=lambda *a: None,
+            print_fn=lambda m: None,
+            sleep_fn=lambda s: None,
+        )
+        assert rc == 0
+        assert taken == ["t-wip-0"], taken
+
+    def test_max_tasks_caps_one_run(self, tmp_path):
+        taken = []
+        rc = run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="cap-agent",
+            interval=1,
+            max_tasks=2,
+            next_task_fn=lambda r: f"t-cap-{len(taken)}",
+            take_task_fn=lambda t, a: (taken.append(t), True)[1],
+            release_task_fn=lambda t, a: None,
+            launch_task_fn=lambda t: _MockProc(),
+            done_checker_fn=lambda t: True,
+            in_progress_count_fn=lambda a: 0,
+            fed_sync_fn=lambda: None,
+            ops_refresh_fn=lambda: None,
+            log_op_fn=lambda *a: None,
+            print_fn=lambda m: None,
+            sleep_fn=lambda s: None,
+        )
+        assert rc == 0
+        assert taken == ["t-cap-0", "t-cap-1"]
+
+    def test_in_progress_counter_reads_only_own_rows(self, tmp_path):
+        active = tmp_path / "active.md"
+        active.write_text(
+            "# Active\n\n"
+            "- [~] [P1] t-mine-1 — Mine\n      by: watch-agent\n"
+            "- [~] [P1] t-theirs — Theirs\n      by: other-agent\n"
+            "- [ ] [P1] t-open — Open\n      by: watch-agent\n"
+        )
+        assert brain_launch_watch._default_in_progress_count("watch-agent", str(active)) == 1
+
+
+class TestReleaseReturnsTheTask:
+    """Release must return [~] → [ ], not merely drop the lock."""
+
+    def test_default_release_prefers_brain_task_release(self, monkeypatch):
+        calls = []
+
+        class _Result:
+            returncode = 0
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _Result()
+
+        monkeypatch.setattr(brain_launch_watch.subprocess, "run", _fake_run)
+        brain_launch_watch._default_release_task("t-x", "agent-1")
+        assert calls == [["brain-task", "release", "t-x", "--as", "agent-1"]]
+
+    def test_default_release_falls_back_to_lock_release(self, monkeypatch):
+        calls = []
+
+        class _Result:
+            def __init__(self, rc):
+                self.returncode = rc
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _Result(1 if cmd[0] == "brain-task" else 0)
+
+        monkeypatch.setattr(brain_launch_watch.subprocess, "run", _fake_run)
+        brain_launch_watch._default_release_task("t-x", "agent-1")
+        assert calls[-1] == ["brain-lock", "release", "t-x", "--as", "agent-1"]
 
 
 class TestRoleFilter:

@@ -36,6 +36,9 @@ watch_interval="${BRAIN_WATCH_INTERVAL:-30}"
 watch_sync_interval="${BRAIN_WATCH_SYNC_INTERVAL:-300}"
 watch_ops_interval="${BRAIN_WATCH_OPS_INTERVAL:-600}"
 watch_exit_on_empty=0
+watch_wip="${BRAIN_WATCH_WIP:-1}"
+watch_max_failures="${BRAIN_WATCH_MAX_FAILURES:-3}"
+watch_max_tasks="${BRAIN_WATCH_MAX_TASKS:-0}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --session)        session="$2"; shift 2;;
@@ -47,6 +50,9 @@ while [ $# -gt 0 ]; do
     --interval)       watch_interval="$2"; shift 2;;
     --sync-interval)  watch_sync_interval="$2"; shift 2;;
     --ops-interval)   watch_ops_interval="$2"; shift 2;;
+    --wip)            watch_wip="$2"; shift 2;;
+    --max-failures)   watch_max_failures="$2"; shift 2;;
+    --max-tasks)      watch_max_tasks="$2"; shift 2;;
     --exit-on-empty)  watch_exit_on_empty=1; shift;;
     -h|--help)
       cat <<H
@@ -66,10 +72,22 @@ brain-launch — запустить совет задачи в tmux / авто-�
                       override env BRAIN_WATCH_SYNC_INTERVAL)
   --ops-interval N    (watch-loop) интервал обновления данных дашборда в секундах (default: 600;
                       override env BRAIN_WATCH_OPS_INTERVAL)
+  --wip N             (watch-loop) сколько задач держать в работе одновременно
+                      (default 1; override env BRAIN_WATCH_WIP)
+  --max-failures N    (watch-loop) остановиться после N подряд неудачных запусков
+                      (default 3; override env BRAIN_WATCH_MAX_FAILURES)
+  --max-tasks N       (watch-loop) жёсткий предел задач за прогон (default 0 = без предела)
   --exit-on-empty     (watch-loop) завершиться при пустой очереди (иначе — ждать)
   --auto-next         (с task-id) после завершения текущей задачи взять следующую
+                      (без task-id) watch-loop и так работает как auto-next
   --watch --auto-next --dry-run  показать план auto-next без side effects
   --handoff-on-limit  обернуть CLI через brain-handoff run
+
+  --dry-run в любой комбинации с --watch/--auto-next ничего не пишет:
+  ни в active.md, ни в council/, ни в локи, ни в git, ни в tmux.
+
+  Watch-loop берёт только headless-задачи: interactive идёт в видимое окно
+  (docs/decisions/decision-interactive-surface.md).
 
   Маршрутизация роль → CLI: ~/brain/config/routing.json (brain-provider cli)
   Env: BRAIN_WATCH_INTERVAL  (default 30)  — polling interval in seconds
@@ -79,14 +97,20 @@ H
   esac
 done
 
-# Standalone --watch mode (no task-id): run the Python watch loop
+# Standalone --watch mode (no task-id): run the Python watch loop.
+#
+# --dry-run доходит до самого цикла. Раньше он здесь только отключал проверку
+# песочницы и терялся: «показать план» запускало боевой цикл, который за две
+# минуты пометил [~] одиннадцать задач (t-2026-08-14-launch-watch-loop-safety-stop).
 if [ "$watch" = 1 ] && [ -z "$task" ]; then
   [ "$dry_run" = 1 ] || refuse_sandbox_agent_launch
   _LIBPATH="$(dirname "${BASH_SOURCE[0]}")/../lib"
   _agent_id="brain-launch-watch-$$"
   _watch_args=("$BRAIN" "$_agent_id" "--interval" "$watch_interval" "--sync-interval" "$watch_sync_interval" "--ops-interval" "$watch_ops_interval")
+  _watch_args+=("--wip" "$watch_wip" "--max-failures" "$watch_max_failures" "--max-tasks" "$watch_max_tasks")
   [ -n "$watch_role" ] && _watch_args+=("--role" "$watch_role")
   [ "$watch_exit_on_empty" = 1 ] && _watch_args+=("--exit-on-empty")
+  [ "$dry_run" = 1 ] && _watch_args+=("--dry-run")
   PYTHONPATH="${_LIBPATH}:${HOME}/.local/lib/brain:${HOME}/.local/share/brain/lib${PYTHONPATH:+:${PYTHONPATH}}" \
     exec python3 -m brain_launch_watch "${_watch_args[@]}"
 fi
@@ -200,19 +224,9 @@ if [ "$watch" = 1 ] && [ "$dry_run" = 1 ]; then
   exit 0
 fi
 
-# Phase 23: On-the-Fly Skill Generation Fallback
-_skill_check="$(brain_lib_file brain_skill_check.py || true)"
-if [ -n "$_skill_check" ]; then
-  _block_res=$(python3 "$_skill_check" "$task" || true)
-else
-  _block_res=""
-fi
-if [ "$_block_res" = "BLOCKED" ]; then
-  echo "brain-launch: task $task requires missing skills. Spawned generation tasks and blocked current."
-  exit 1
-fi
-
-# dry-run (no --watch)
+# dry-run (no --watch). Стоит до проверки скиллов намеренно: та заводит новые
+# задачи и блокирует текущую, то есть пишет в очередь. «Показать, что бы
+# запустилось» не должно менять очередь ни при какой комбинации флагов.
 if [ "$dry_run" = 1 ]; then
   echo "tmux session: $session"
   cur_surface=$(effective_surface_of "$task")
@@ -229,6 +243,18 @@ if [ "$dry_run" = 1 ]; then
     echo "    cmd: $cmd"
   done
   exit 0
+fi
+
+# Phase 23: On-the-Fly Skill Generation Fallback
+_skill_check="$(brain_lib_file brain_skill_check.py || true)"
+if [ -n "$_skill_check" ]; then
+  _block_res=$(python3 "$_skill_check" "$task" || true)
+else
+  _block_res=""
+fi
+if [ "$_block_res" = "BLOCKED" ]; then
+  echo "brain-launch: task $task requires missing skills. Spawned generation tasks and blocked current."
+  exit 1
 fi
 
 # --watch --auto-next (real): poll until task done, then take next task
@@ -266,7 +292,10 @@ if [ "$watch" = 1 ] && [ "$auto_next" = 1 ]; then
     brain-task take "$next_task" --as "$agent_id"
     log_op "watch-auto-next" "$task" "$agent_id" "took:$next_task"
     echo "[watch] Auto-next: took $next_task"
-    brain-lock release "$next_task" --as "$agent_id" >/dev/null 2>&1 || true
+    # Лок остаётся у того же агента, что записан в by:. Раньше он снимался
+    # сразу после take, и задача висела [~] без лока — ровно то состояние, из
+    # которого получается «владелец задачи ≠ владелец лока».
+    echo "[watch] Lock stays with $agent_id (matches by: in the queue)."
   else
     echo "[watch] Could not acquire lock for $next_task (already taken). Exiting."
     log_op "watch-auto-next" "$task" "$agent_id" "lock-failed:$next_task"

@@ -38,8 +38,19 @@ brain-task complete <id> --as <agent>  # → POST event к webhook
 
 # Auto-next: watch + автопереход
 brain-launch <task-id> --watch --auto-next         # live mode
-brain-launch <task-id> --watch --auto-next --dry-run  # plan only
+brain-launch <task-id> --watch --auto-next --dry-run  # plan only, ноль записей
 export BRAIN_WATCH_POLL_SEC=5          # default: 5
+
+# Standalone watch-loop: только headless-задачи, по одной за раз
+brain-launch --watch --dry-run                     # план без side effects
+brain-launch --watch --wip 1 --max-failures 3 --max-tasks 5
+export BRAIN_WATCH_WIP=1               # default: 1
+export BRAIN_WATCH_MAX_FAILURES=3      # default: 3
+export BRAIN_WATCH_MAX_TASKS=0         # default: 0 (без предела)
+
+# Владелец задачи ≠ владелец лока: разбор без rm -rf .locks/<id>
+brain-task reconcile                   # отчёт, exit 1 при расхождении
+brain-task reconcile --fix             # вернуть задачу в очередь и снять лок
 ```
 
 ## Phase 5 — Learning Loop
