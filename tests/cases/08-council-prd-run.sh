@@ -81,6 +81,144 @@ grep -q "status: FAIL" /tmp/_council_check2.log || { echo "FAILED: brain-council
 rm -rf "$BRAIN_PATH/council/$_ctid" "$BRAIN_PATH/council/$_ctid2"
 echo "brain-council check guardrails OK"
 
+echo ">>> Verifying brain-council resolves split-root teams and roles"
+(
+brain_factory
+export BRAIN_SYSTEM_PATH="$PROJECT_ROOT"
+mkdir -p "$BRAIN_PATH"/{tasks,wiki,council,raw,prd,teams,.locks}
+cat > "$BRAIN_PATH/tasks/active.md" <<'EOF'
+# Active tasks
+
+- [ ] [P1] t-split-system-team — System team
+      role: developer
+      mode: council
+      council: [team:engineering]
+
+- [ ] [P1] t-split-data-team — Data team
+      role: developer
+      mode: council
+      council: [team:insurance-fraud]
+
+- [ ] [P1] t-split-direct — Direct roles
+      role: developer
+      mode: council
+      council: [developer, reviewer]
+
+- [ ] [P1] t-split-unknown-team — Unknown team
+      role: developer
+      mode: council
+      council: [team:no-such-team]
+
+- [ ] [P1] t-split-unknown-role — Unknown role
+      role: developer
+      mode: council
+      council: [developer, no-such-role]
+EOF
+cat > "$BRAIN_PATH/tasks/done.md" <<'EOF'
+# Done tasks
+EOF
+cat > "$BRAIN_PATH/wiki/log.md" <<'EOF'
+# Log
+EOF
+cat > "$BRAIN_PATH/teams/insurance-fraud.md" <<'EOF'
+---
+title: Team insurance-fraud
+type: team
+roles: [reviewer]
+---
+EOF
+
+"$PROJECT_ROOT/runtime/bin/brain-council" start t-split-system-team > /tmp/council-system.log 2>&1 || {
+  echo "FAILED: system team did not resolve from split-root"
+  cat /tmp/council-system.log
+  exit 1
+}
+for role in architect developer reviewer; do
+  [ -f "$BRAIN_PATH/council/t-split-system-team/$role.md" ] || {
+    echo "FAILED: missing system team opinion template for $role"
+    exit 1
+  }
+done
+grep -q "roles: .*architect.*developer.*reviewer" /tmp/council-system.log || {
+  echo "FAILED: system team output did not list resolved roles"
+  cat /tmp/council-system.log
+  exit 1
+}
+
+"$PROJECT_ROOT/runtime/bin/brain-council" start t-split-data-team > /tmp/council-data.log 2>&1 || {
+  echo "FAILED: data team did not resolve with local precedence"
+  cat /tmp/council-data.log
+  exit 1
+}
+[ -f "$BRAIN_PATH/council/t-split-data-team/reviewer.md" ] || {
+  echo "FAILED: data team reviewer template missing"
+  exit 1
+}
+[ ! -f "$BRAIN_PATH/council/t-split-data-team/architect.md" ] || {
+  echo "FAILED: data team incorrectly fell through to system engineering team"
+  exit 1
+}
+
+"$PROJECT_ROOT/runtime/bin/brain-council" start t-split-direct > /tmp/council-direct.log 2>&1 || {
+  echo "FAILED: direct split-root roles did not materialize"
+  cat /tmp/council-direct.log
+  exit 1
+}
+for role in developer reviewer; do
+  [ -f "$BRAIN_PATH/council/t-split-direct/$role.md" ] || {
+    echo "FAILED: missing direct council template for $role"
+    exit 1
+  }
+done
+
+set +e
+unknown_team_out=$("$PROJECT_ROOT/runtime/bin/brain-council" start t-split-unknown-team 2>&1)
+unknown_team_rc=$?
+set -e
+[ "$unknown_team_rc" -ne 0 ] || {
+  echo "FAILED: unknown team should fail closed"
+  exit 1
+}
+echo "$unknown_team_out" | grep -qi "no such team" || {
+  echo "FAILED: unknown team error not surfaced"
+  echo "$unknown_team_out"
+  exit 1
+}
+echo "$unknown_team_out" | grep -qi "council started" && {
+  echo "FAILED: unknown team printed misleading started message"
+  echo "$unknown_team_out"
+  exit 1
+}
+[ ! -d "$BRAIN_PATH/council/t-split-unknown-team" ] || {
+  echo "FAILED: unknown team left partial council directory"
+  exit 1
+}
+
+set +e
+unknown_role_out=$("$PROJECT_ROOT/runtime/bin/brain-council" start t-split-unknown-role 2>&1)
+unknown_role_rc=$?
+set -e
+[ "$unknown_role_rc" -ne 0 ] || {
+  echo "FAILED: unknown role should fail closed"
+  exit 1
+}
+echo "$unknown_role_out" | grep -qi "no role file" || {
+  echo "FAILED: unknown role error not surfaced"
+  echo "$unknown_role_out"
+  exit 1
+}
+echo "$unknown_role_out" | grep -qi "council started" && {
+  echo "FAILED: unknown role printed misleading started message"
+  echo "$unknown_role_out"
+  exit 1
+}
+[ ! -d "$BRAIN_PATH/council/t-split-unknown-role" ] || {
+  echo "FAILED: unknown role left partial council directory"
+  exit 1
+}
+echo "brain-council split-root resolution OK"
+)
+
 echo ">>> Verifying brain-prd init and commit"
 brain-task add "Test PRD" --role architect --mode prd --prio P1 > /dev/null
 pid=$(grep "Test PRD" "$BRAIN_PATH/tasks/active.md" | grep -oE "t-[0-9-]+-test-prd" | head -1)

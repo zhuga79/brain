@@ -15,7 +15,8 @@ expand_teams() {
     [ -z "$token" ] && continue
     if [[ "$token" == team:* ]]; then
       local team_name="${token#team:}"
-      local team_file="$TEAMS/$team_name.md"
+      local team_file
+      team_file="$(brain_resolve_system "teams/$team_name.md")"
       if [ ! -f "$team_file" ]; then
         echo "no such team: $team_name (looked at $team_file)" >&2
         return 1
@@ -30,6 +31,19 @@ expand_teams() {
   done
   # дедуп + trim
   echo "$out" | tr ' ' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ' '
+}
+
+validate_council_roles() {
+  local roles="$1"
+  local r role_file
+  for r in $roles; do
+    [ -z "$r" ] && continue
+    role_file="$(brain_resolve_system "roles/$r.md")"
+    if [ ! -f "$role_file" ]; then
+      echo "no role file for '$r' (looked at $role_file)" >&2
+      return 1
+    fi
+  done
 }
 
 cmd="${1:-}"; id="${2:-}"
@@ -47,10 +61,10 @@ case "$cmd" in
     [ -z "$raw" ] && { echo "no council: field on $id"; exit 1; }
     roles=$(expand_teams "$raw") || exit 1
     [ -z "$roles" ] && { echo "empty council"; exit 1; }
+    validate_council_roles "$roles" || exit 1
     mkdir -p "$COUNCIL/$id"
     for r in $roles; do
       [ -z "$r" ] && continue
-      [ ! -f "$BRAIN/roles/$r.md" ] && { echo "warn: no role file for '$r'"; continue; }
       f="$COUNCIL/$id/$r.md"
       if [ ! -f "$f" ]; then
         cat > "$f" <<TEMPLATE
@@ -94,7 +108,9 @@ TEMPLATE
     done
 
     # Ensure council directory and skeletons exist
-    [ ! -d "$COUNCIL/$id" ] && "$0" start "$id" >/dev/null || true
+    if [ ! -d "$COUNCIL/$id" ]; then
+      "$0" start "$id" >/dev/null
+    fi
 
     # Extract roles
     raw=$(awk -v id="$id" '
@@ -214,8 +230,9 @@ TEMPLATE
     done
     ;;
   teams)
-    [ -z "$(ls "$TEAMS" 2>/dev/null)" ] && { echo "(no teams)"; exit 0; }
-    for f in "$TEAMS"/*.md; do
+    team_root="$(brain_resolve_system "teams")"
+    [ -z "$(ls "$team_root" 2>/dev/null)" ] && { echo "(no teams)"; exit 0; }
+    for f in "$team_root"/*.md; do
       name=$(basename "$f" .md)
       roles=$(grep -E '^roles:' "$f" | sed -E 's/roles: *//')
       echo "$name  $roles"
