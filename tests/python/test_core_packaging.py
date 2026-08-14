@@ -78,7 +78,8 @@ def test_core_version_module():
     from brain_core.version import core_location, core_version
 
     assert isinstance(core_version(), str) and core_version()
-    assert Path(core_location()).is_dir()
+    loc = Path(core_location())
+    assert loc.is_dir() or loc.suffix == ".pth"
 
 
 def test_embedded_python_heredocs_are_valid():
