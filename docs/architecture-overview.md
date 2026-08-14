@@ -57,11 +57,12 @@ single-root lookup.
 - System assets must be changed in the system checkout, then reinstalled.
 - Data root must not mirror live system directories such as `runtime/`,
   `roles/`, `doctrine/`, `skills/`, `spec/`, `docs/`, `tests/`, `config/`.
-- `teams/` is special: data-local case teams are allowed, and `$BRAIN/teams`
+- `teams/` is special: canonical system team catalog stays system-owned, while
+  data-local and case teams are allowed; `$BRAIN/teams`
   takes precedence over `$BRAIN_SYSTEM_PATH/teams` when a team file exists in
   the data root.
-- What is prohibited is using the data root as a second canonical copy of the
-  system team catalog.
+- What is prohibited is using the data root as a mirrored second canonical
+  copy of the system team catalog.
 - `setup-brain-v2.sh`, `brain-validate`, and the write-path pre-commit guard
   enforce that boundary in split-root mode.
 

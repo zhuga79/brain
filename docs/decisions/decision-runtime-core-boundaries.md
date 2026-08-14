@@ -104,8 +104,13 @@ workspace lock, атомарные записи и recovery journal для па�
 ### 7. Split-root границы стали исполняемыми
 
 В двухкорневом режиме системные пути (`runtime/`, `tests/`, `roles/`,
-`teams/`, `doctrine/`, `skills/`, `spec/`, `docs/`, `config/`, `MEMORY.md`)
+`doctrine/`, `skills/`, `spec/`, `docs/`, `config/`, `MEMORY.md`)
 принадлежат system checkout. Data root не должен нести их вторую живую копию.
+
+`teams/` — исключение уровня контракта, а не баг. Canonical system team
+catalog остаётся system-owned и не зеркалируется в data root как вторая
+истина. Но data-local и case teams допустимы, и при наличии одноимённого
+файла precedence у `$BRAIN/teams` перед `$BRAIN_SYSTEM_PATH/teams`.
 
 `setup-brain-v2.sh`, `brain-validate` и pre-commit write-path guard теперь
 рассматривают system shadow в data root как ошибку эксплуатации.

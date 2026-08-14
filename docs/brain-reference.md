@@ -53,8 +53,17 @@ $BRAIN_PATH/roles/developer.md
 ```
 
 Он затеняет одноимённый файл из системного корня. Остальные роли по-прежнему
-берутся из `$BRAIN_SYSTEM_PATH/roles/`. То же правило для `teams/`, `doctrine/`,
-`skills/` и `.cli-mapping.sh`.
+берутся из `$BRAIN_SYSTEM_PATH/roles/`.
+
+Для `teams/` правило нужно читать уже точнее: canonical system team catalog
+остаётся system-owned и не должен зеркалироваться в data root как вторая
+истина. При этом data-local и case team files допустимы; если нужный team file
+лежит в `$BRAIN/teams/`, он берётся раньше одноимённого файла из
+`$BRAIN_SYSTEM_PATH/teams/`.
+
+Для `doctrine/`, `skills/` и `.cli-mapping.sh` действует тот же технический
+резолв `data first -> system fallback`, но split-root contract не разрешает
+возвращать их в data root как вторую canonical копию системного слоя.
 
 `brain-status` печатает оба пути (`Brain:` и `System:`).
 
@@ -81,4 +90,3 @@ $BRAIN_PATH/roles/developer.md
 `json-canvas` для `.canvas`, `obsidian-cli` для открытого vault и `defuddle`
 для очистки web-страниц перед `brain-ingest`. Эти skills не меняют приоритет
 курации: `curation: human` и `protected: true` остаются неперезаписываемыми.
-
