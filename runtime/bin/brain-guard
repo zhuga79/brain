@@ -171,6 +171,50 @@ def scan_paths(paths: list[Path], patterns: dict[str, str], named: str) -> list[
     return problems
 
 
+def _rev_parse(brain: Path, rev: str) -> str:
+    res = subprocess.run(
+        ["git", "-C", str(brain), "rev-parse", "--verify", rev],
+        capture_output=True, text=True, check=False,
+    )
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def _grep_rev(brain: Path, rev: str, pat: str) -> list[str]:
+    """Строки `git grep` по одной ревизии: rev:path:lineno:content."""
+    res = subprocess.run(
+        ["git", "-C", str(brain), "grep", "-I", "-n", "-E", "-e", pat, rev],
+        capture_output=True, text=True, check=False,
+    )
+    # 0 — есть совпадения, 1 — нет; остальное не считаем отказом скана.
+    if res.returncode not in (0, 1):
+        return []
+    return [line for line in res.stdout.splitlines() if line]
+
+
+def _grep_line_content(raw: str) -> str:
+    parts = raw.split(":", 3)
+    return parts[3] if len(parts) == 4 else raw
+
+
+def _history_commit_hits(brain: Path, commit: str, label: str, pat: str, named: str) -> bool:
+    """Те же правила, что у дерева: ALLOW на строке, затем паттерн.
+
+    Смотрим коммит и родителя: pickaxe ловит и удаление, а в новой
+    версии файла следа уже нет.
+    """
+    revs = [commit]
+    parent = _rev_parse(brain, f"{commit}^")
+    if parent:
+        revs.append(parent)
+    patterns = {} if label == "именованная сущность" else {label: pat}
+    named_arg = named if label == "именованная сущность" else ""
+    for rev in revs:
+        for raw in _grep_rev(brain, rev, pat):
+            if scan_text(_grep_line_content(raw), patterns, named_arg):
+                return True
+    return False
+
+
 def scan_history(brain: Path, named: str) -> list[str]:
     """Поиск по всем версиям файлов. История переживает удаление файла."""
     if not is_git_repo(brain):
@@ -182,12 +226,18 @@ def scan_history(brain: Path, named: str) -> list[str]:
     for label, pat in patterns.items():
         res = subprocess.run(
             ["git", "-C", str(brain), "log", "--all", "-S", pat, "--pickaxe-regex",
-             "--format=%h %s", "--max-count=20"],
+             "--format=%h %s"],
             capture_output=True, text=True, check=False,
         )
+        # Часть GENERIC — с lookbehind, git pickaxe их не ест. Пустой stdout
+        # тогда не ошибка: как раньше, паттерн просто не даёт кандидатов.
         for line in res.stdout.splitlines():
-            if line.strip():
-                problems.append(f"{line.strip()} — {label}")
+            summary = line.strip()
+            if not summary:
+                continue
+            commit = summary.split()[0]
+            if _history_commit_hits(brain, commit, label, pat, named):
+                problems.append(f"{summary} — {label}")
     return problems
 
 
