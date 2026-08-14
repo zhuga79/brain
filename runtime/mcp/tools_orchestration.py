@@ -16,10 +16,10 @@ def _require_agent_id(agent_id: str) -> str | None:
 
 
 def _require_model(model: str) -> str | None:
-    cleaned = str(model or "").strip()
-    if not cleaned or cleaned == "unsigned":
+    try:
+        return queue.validate_model_signature(model)
+    except ValueError:
         return None
-    return cleaned
 
 @mcp.tool()
 def acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:

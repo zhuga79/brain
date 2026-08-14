@@ -143,6 +143,32 @@ def test_block_marks_the_state(brain):
     assert queue.find("t-open", brain)[0]["state"] == "!"
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["openai-gpt-5.4", "claude-opus-4-8", "gemini-2.5-pro", "grok-4.6"],
+)
+def test_validate_model_signature_accepts_real_versioned_models(model):
+    assert queue.validate_model_signature(model) == model
+
+
+@pytest.mark.parametrize(
+    ("model", "message_part"),
+    [
+        ("", "real model"),
+        ("unsigned", "real model"),
+        ("placeholder-summary-text", "real model"),
+        ("cleanup", "real model"),
+        ("summary", "real model"),
+        ("openai-gpt", "numeric version"),
+        ("claude-opus", "numeric version"),
+        ("bad model 5.4", "format"),
+    ],
+)
+def test_validate_model_signature_rejects_placeholders_and_unversioned_values(model, message_part):
+    with pytest.raises(ValueError, match=message_part):
+        queue.validate_model_signature(model)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def test_cli_named_arguments_replace_the_positional_abi(brain, capsys):

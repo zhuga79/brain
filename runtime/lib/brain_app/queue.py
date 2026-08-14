@@ -29,6 +29,12 @@ from brain_core import atomic, clock, paths, taskfile
 
 STATE_BY_STATUS = {"open": " ", "in_progress": "~", "blocked": "!", "done": "x"}
 DEPS_MARKERS = {" ": "○", "~": "◐", "x": "●", "!": "✗", "?": "?"}
+MODEL_SIGNATURE_RE = re.compile(r"^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+$")
+MODEL_VERSION_RE = re.compile(r"(?:^|[.-])\d+(?:[.-]\d+)*(?:$|[.-])")
+MODEL_PLACEHOLDER_TOKENS = {
+    "unsigned", "placeholder", "summary", "cleanup", "todo", "unknown",
+    "example", "sample", "dummy", "none", "null", "unset",
+}
 
 
 # ── чтение ───────────────────────────────────────────────────────────────────
@@ -155,6 +161,28 @@ def slugify(text: str, limit: int = 30) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower())[:limit].strip("-")
 
 
+def validate_model_signature(model: str) -> str:
+    """Return a cleaned model signature or raise ValueError.
+
+    Accept provider/model/version identifiers such as `openai-gpt-5.4`,
+    `claude-opus-4-8`, `gemini-2.5-pro`, `grok-4.6`.
+    Reject placeholders, summaries, cleanup markers, and values with no numeric
+    version segment.
+    """
+    cleaned = str(model or "").strip()
+    if not cleaned:
+        raise ValueError("real model required")
+    lowered = cleaned.lower()
+    tokens = {token for token in re.split(r"[.-]+", lowered) if token}
+    if tokens & MODEL_PLACEHOLDER_TOKENS:
+        raise ValueError("real model required")
+    if " " in cleaned or not MODEL_SIGNATURE_RE.match(cleaned):
+        raise ValueError("model signature format invalid")
+    if not MODEL_VERSION_RE.search(cleaned):
+        raise ValueError("model signature must include numeric version")
+    return cleaned
+
+
 def new_task_id(title: str, brain: Path | None = None) -> str:
     """Свободный идентификатор вида t-ГГГГ-ММ-ДД-slug.
 
@@ -227,9 +255,7 @@ def block(task_id: str, brain: Path | None = None, *, agent: str | None = None) 
 def complete(task_id: str, agent: str, model: str, brain: Path | None = None) -> None:
     if not str(agent).strip():
         raise ValueError("agent_id required")
-    clean_model = str(model).strip()
-    if not clean_model or clean_model == "unsigned":
-        raise ValueError("real model required")
+    clean_model = validate_model_signature(model)
     taskfile.complete(paths.active_file(brain), paths.done_file(brain), task_id, agent, clean_model)
 
 
