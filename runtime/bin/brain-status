@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -90,6 +91,58 @@ def read_index(brain: Path) -> dict[str, Any]:
     return status
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def detect_cli_parity(brain: Path) -> dict[str, Any]:
+    system = brain_system_path(brain=brain)
+    runtime_bin = system / "runtime" / "bin"
+    installed_bin = Path.home() / ".local" / "bin"
+    ignored: list[dict[str, str]] = []
+    mismatches: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = []
+    matched = 0
+
+    if not runtime_bin.is_dir():
+        return {
+            "status": "unavailable",
+            "runtime_bin": str(runtime_bin),
+            "installed_bin": str(installed_bin),
+            "matched": 0,
+            "ignored": [],
+            "mismatches": [],
+            "missing": [],
+            "drift_count": 0,
+        }
+
+    for source in sorted(path for path in runtime_bin.iterdir() if path.is_file()):
+        name = source.name
+        if not name.startswith("brain-"):
+            ignored.append({"name": name, "reason": "wrapper-or-generated"})
+            continue
+        installed = installed_bin / name
+        if not installed.exists():
+            missing.append({"name": name, "source": str(source), "installed": str(installed)})
+            continue
+        if _sha256(source) != _sha256(installed):
+            mismatches.append({"name": name, "source": str(source), "installed": str(installed)})
+            continue
+        matched += 1
+
+    drift_count = len(mismatches) + len(missing)
+    return {
+        "status": "ok" if drift_count == 0 else "drift",
+        "runtime_bin": str(runtime_bin),
+        "installed_bin": str(installed_bin),
+        "matched": matched,
+        "ignored": ignored,
+        "mismatches": mismatches,
+        "missing": missing,
+        "drift_count": drift_count,
+    }
+
+
 def collect_status(brain: Path) -> dict[str, Any]:
     active = parse_tasks(brain / "tasks" / "active.md")
     done = parse_tasks(brain / "tasks" / "done.md")
@@ -114,6 +167,7 @@ def collect_status(brain: Path) -> dict[str, Any]:
         },
         "index": read_index(brain),
         "providers": brain_provider.collect_provider_status(brain),
+        "cli_parity": detect_cli_parity(brain),
     }
 
 
@@ -163,6 +217,19 @@ def print_text(status: dict[str, Any]) -> None:
     if index.get("stale_files"):
         print(f"  stale files ({len(index['stale_files'])}): {', '.join(index['stale_files'][:5])}"
               + (" ..." if len(index["stale_files"]) > 5 else ""))
+    cli_parity = status.get("cli_parity", {})
+    if cli_parity:
+        parity_status = cli_parity.get("status", "unknown")
+        drift_count = cli_parity.get("drift_count", 0)
+        warn = " [WARN: reinstall from canonical source]" if drift_count else ""
+        print(
+            "CLI parity: "
+            f"status={parity_status} matched={cli_parity.get('matched', 0)}"
+            f" drift={drift_count} ignored={len(cli_parity.get('ignored', []))}{warn}"
+        )
+        if drift_count:
+            offenders = [item["name"] for item in cli_parity.get("mismatches", []) + cli_parity.get("missing", [])]
+            print(f"  drifted: {', '.join(offenders[:8])}" + (" ..." if len(offenders) > 8 else ""))
 
 
 def main() -> int:

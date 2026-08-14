@@ -123,7 +123,7 @@ for token in $(echo "$raw" | tr ',' ' '); do
   [ -z "$token" ] && continue
   if [[ "$token" == team:* ]]; then
     tn="${token#team:}"
-    tf="$TEAMS/$tn.md"
+    tf="$(brain_resolve_system "teams/$tn.md")"
     [ ! -f "$tf" ] && { echo "no team: $tn"; exit 1; }
     tr=$(grep -E '^roles:' "$tf" | head -1 | sed -E 's/.*\[(.*)\].*/\1/' | tr ',' ' ')
     roles="$roles $tr"

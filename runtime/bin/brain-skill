@@ -9,35 +9,30 @@ from pathlib import Path
 try:
     from brain_skill_parser import parse_skill_file
     from brain_wiki.frontmatter import format_frontmatter
+    from brain_core.paths import iter_system_files, resolve_system_asset
 except ImportError as e:
     print(f"Error importing brain libraries: {e}", file=sys.stderr)
     sys.exit(1)
 
 def get_skills_dir() -> Path:
-    brain_path = Path(os.environ.get("BRAIN_PATH", os.path.expanduser("~/brain")))
-    return brain_path / "skills"
+    return resolve_system_asset("skills")
 
 def find_skill_file(name: str) -> Path | None:
-    d = get_skills_dir()
-    if not d.exists():
-        return None
-    for f in d.rglob("*.md"):
+    for f in iter_system_files("skills", "**/*.md"):
         data = parse_skill_file(f)
         if data.get("name") == name:
             return f
     return None
 
 def cmd_list(args: argparse.Namespace) -> int:
-    d = get_skills_dir()
-    if not d.exists():
-        print("No skills directory found.")
-        return 0
-        
     skills = []
-    for f in d.rglob("*.md"):
+    for f in iter_system_files("skills", "**/*.md"):
         data = parse_skill_file(f)
         if "name" in data:
             skills.append(data)
+    if not skills and not get_skills_dir().exists():
+        print("No skills directory found.")
+        return 0
             
     if not skills:
         print("No skills found.")

@@ -11,26 +11,18 @@ from pathlib import Path
 
 
 
-from brain_core.paths import brain_path  # одна реализация на всю систему
-
-
-def doctrine_dir(brain: Path) -> Path:
-    return brain / "doctrine"
+from brain_core.paths import brain_path, iter_system_files, resolve_system_asset  # одна реализация на всю систему
 
 
 def list_doctrines(brain: Path) -> list[dict[str, str]]:
-    d = doctrine_dir(brain)
-    if not d.exists():
-        return []
     result = []
-    for f in sorted(d.glob("*.md")):
+    for f in iter_system_files("doctrine", "*.md", brain=brain):
         result.append({"slug": f.stem, "path": str(f)})
     return result
 
 
 def show_doctrine(brain: Path, slug: str) -> dict[str, str] | None:
-    d = doctrine_dir(brain)
-    f = d / f"{slug}.md"
+    f = resolve_system_asset(f"doctrine/{slug}.md", brain=brain)
     if not f.exists():
         return None
     return {"slug": slug, "path": str(f), "content": f.read_text(encoding="utf-8", errors="replace")}

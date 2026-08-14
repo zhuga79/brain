@@ -60,6 +60,28 @@ brain-doctrine --help > /dev/null
 brain-shell --help > /dev/null
 brain-status | grep -q "^Brain: " || { echo "FAILED: brain-status text output missing Brain header"; exit 1; }
 brain-status --json | grep -q '"tasks"' || { echo "FAILED: brain-status json output missing tasks"; exit 1; }
+brain-status --json | grep -q '"cli_parity"' || { echo "FAILED: brain-status json output missing cli_parity"; exit 1; }
+
+echo ">>> Verifying split-root doctrine and skill listing from data cwd"
+split_td=$(mktemp -d)
+split_brain="$split_td/data"
+mkdir -p "$split_brain"/{tasks,wiki,council,raw,prd,teams,.locks}
+printf '# active\n' > "$split_brain/tasks/active.md"
+printf '# done\n' > "$split_brain/tasks/done.md"
+printf '# log\n' > "$split_brain/wiki/log.md"
+(
+  export BRAIN_PATH="$split_brain"
+  export BRAIN_SYSTEM_PATH="$PROJECT_ROOT"
+  brain-doctrine list | grep -q '^tax-boundaries$' || {
+    echo "FAILED: brain-doctrine list does not see system doctrine from data cwd"
+    exit 1
+  }
+  brain-skill list | grep -q 'frontend-handoff-spec' || {
+    echo "FAILED: brain-skill list does not see system skills from data cwd"
+    exit 1
+  }
+)
+rm -rf "$split_td"
 
 printf "hello source" | brain-ingest - --slug demo-source --title "Demo Source" --url "https://example.com" > /dev/null
 [ -f "$BRAIN_PATH/raw/demo-source.md" ] || { echo "FAILED: raw source not created"; exit 1; }
