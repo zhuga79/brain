@@ -109,6 +109,36 @@ class TestReleaseLock:
         res = temp_locks.release_lock("t-other", "agent-2")
         assert "error" in res
 
+    @pytest.mark.parametrize("agent_id", ["", "   ", "agent 2", "../escape"])
+    def test_release_existing_lock_requires_valid_agent_id(self, temp_locks, agent_id):
+        temp_locks.acquire_lock("t-guarded", "agent-1", ttl=60)
+
+        res = temp_locks.release_lock("t-guarded", agent_id)
+
+        assert res["status"] == "error"
+        assert (temp_locks.LOCKS / "t-guarded").exists()
+
+    def test_release_force_requires_reason(self, temp_locks):
+        temp_locks.acquire_lock("t-force", "agent-1", ttl=60)
+
+        res = temp_locks.release_lock("t-force", "agent-2", force=True)
+
+        assert res["status"] == "error"
+        assert (temp_locks.LOCKS / "t-force").exists()
+
+    def test_release_force_can_clear_foreign_lock_with_reason(self, temp_locks):
+        temp_locks.acquire_lock("t-force-ok", "agent-1", ttl=60)
+
+        res = temp_locks.release_lock(
+            "t-force-ok",
+            "agent-2",
+            force=True,
+            reason="stale lock cleanup",
+        )
+
+        assert res["status"] == "ok"
+        assert not (temp_locks.LOCKS / "t-force-ok").exists()
+
     def test_acquire_after_release(self, temp_locks):
         temp_locks.acquire_lock("t-cycle", "agent-1", ttl=60)
         temp_locks.release_lock("t-cycle", "agent-1")

@@ -364,6 +364,99 @@ def test_release_lock_reports_no_lock_and_rejects_foreign_owner(tb):
     assert "agent-1" in res["error"]
 
 
+@pytest.mark.parametrize("agent_id", ["", "   ", "agent 2", "../escape"])
+def test_release_lock_rejects_invalid_actor_before_mutation(tb, agent_id):
+    t, _, tmp, _ = tb
+    t.acquire_lock("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = t.release_lock("t-test", agent_id)
+
+    assert res["status"] == "error"
+    assert "agent_id" in res["error"]
+    assert _snapshot(tmp) == before
+
+
+def test_release_lock_force_requires_reason_and_valid_actor(tb):
+    t, _, tmp, _ = tb
+    t.acquire_lock("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    missing_reason = t.release_lock("t-test", "agent-2", force=True)
+    bad_actor = t.release_lock("t-test", "agent 2", force=True, reason="cleanup")
+
+    assert missing_reason["status"] == "error"
+    assert "reason" in missing_reason["error"]
+    assert bad_actor["status"] == "error"
+    assert "agent_id" in bad_actor["error"]
+    assert _snapshot(tmp) == before
+
+
+def test_release_lock_force_can_remove_foreign_or_corrupt_lock_with_audit(tb):
+    t, _, tmp, _ = tb
+    t.acquire_lock("t-foreign", "agent-1")
+
+    foreign = t.release_lock(
+        "t-foreign",
+        "agent-2",
+        force=True,
+        reason="operator stale lock cleanup",
+    )
+
+    assert foreign["status"] == "ok"
+    assert not (tmp / ".locks" / "t-foreign").exists()
+    log = (tmp / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert "force" in log
+    assert "operator stale lock cleanup" in log
+
+    corrupt = tmp / ".locks" / "t-corrupt"
+    corrupt.mkdir()
+    (corrupt / "owner").write_text("|1|60\n", encoding="utf-8")
+
+    force_corrupt = t.release_lock(
+        "t-corrupt",
+        "agent-2",
+        force=True,
+        reason="clear corrupt owner",
+    )
+
+    assert force_corrupt["status"] == "ok"
+    assert not corrupt.exists()
+
+
+def test_release_lock_rejects_invalid_task_id_before_mutation(tb):
+    t, _, tmp, _ = tb
+    t.acquire_lock("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = t.release_lock("../escape", "agent-1")
+
+    assert res["status"] == "error"
+    assert "invalid task id" in res["error"]
+    assert _snapshot(tmp) == before
+
+
+def test_release_lock_symlink_force_refused_without_touching_target(tb):
+    t, _, tmp, _ = tb
+    external = tmp / "external"
+    external.mkdir()
+    important = external / "important.txt"
+    important.write_text("keep", encoding="utf-8")
+    os.symlink(external, tmp / ".locks" / "t-sym")
+
+    res = t.release_lock(
+        "t-sym",
+        "agent-2",
+        force=True,
+        reason="security cleanup",
+    )
+
+    assert res["status"] == "error"
+    assert "symlink" in res["error"]
+    assert important.exists()
+    assert (tmp / ".locks" / "t-sym").is_symlink()
+
+
 def test_refresh_lock_requires_owner(tb):
     t, _, _, _ = tb
 

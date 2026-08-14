@@ -7,12 +7,45 @@ import brain_task_parser
 from brain_app import queue
 from result import ok, error
 
+_LOCK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _require_lock_id(task_id: str) -> str | None:
+    cleaned = str(task_id or "").strip()
+    if not cleaned or not _LOCK_ID_RE.fullmatch(cleaned):
+        return None
+    return cleaned
+
 
 def _require_agent_id(agent_id: str) -> str | None:
     cleaned = str(agent_id or "").strip()
+    if not cleaned or not _LOCK_ID_RE.fullmatch(cleaned):
+        return None
+    return cleaned
+
+
+def _require_force_reason(reason: str) -> str | None:
+    cleaned = str(reason or "").strip()
     if not cleaned:
         return None
     return cleaned
+
+
+def _read_lock_owner(owner_file) -> tuple[str | None, str | None]:
+    if not owner_file.exists():
+        return None, "corrupt lock"
+    parts = owner_file.read_text().strip().split("|")
+    if len(parts) < 3:
+        return None, "corrupt owner"
+    owner = _require_agent_id(parts[0])
+    if not owner:
+        return None, "corrupt owner"
+    try:
+        int(parts[1])
+        int(parts[2])
+    except ValueError:
+        return None, "corrupt owner"
+    return owner, None
 
 
 def _require_model(model: str) -> str | None:
@@ -24,24 +57,29 @@ def _require_model(model: str) -> str | None:
 @mcp.tool()
 def acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
     """Acquire a lock on a task. Returns ok or info about existing owner."""
+    task = _require_lock_id(task_id)
+    if not task:
+        return error(f"invalid task id: {task_id}")
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("valid agent_id required")
     LOCKS.mkdir(parents=True, exist_ok=True)
-    d = LOCKS / task_id
+    d = LOCKS / task
     try:
         d.mkdir()
-        (d / "owner").write_text(f"{agent_id}|{int(time.time())}|{ttl}\n")
-        append_log("lock-acquire", task_id, agent_id)
+        (d / "owner").write_text(f"{agent}|{int(time.time())}|{ttl}\n")
+        append_log("lock-acquire", task, agent)
         return ok()
     except FileExistsError:
         # Symlink-attack guard
         if d.is_symlink():
             return {"status": "locked", "error": "lock path is a symlink — refusing"}
         owner_file = d / "owner"
-        if not owner_file.exists():
-            return {"status": "locked", "error": "corrupt lock"}
+        o_agent, owner_error = _read_lock_owner(owner_file)
+        if owner_error:
+            return {"status": "locked", "error": owner_error}
         parts = owner_file.read_text().strip().split("|")
-        if len(parts) < 3:
-            return {"status": "locked", "error": "corrupt owner"}
-        o_agent, o_ts, o_ttl = parts[0], int(parts[1]), int(parts[2])
+        o_ts, o_ttl = int(parts[1]), int(parts[2])
         age = int(time.time()) - o_ts
         if age > o_ttl:
             # Atomic stale takeover: rename stale dir away, then create fresh one.
@@ -53,59 +91,96 @@ def acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
                 return {"status": "locked", "error": "race: stale lock already taken"}
             try:
                 d.mkdir()
-                (d / "owner").write_text(f"{agent_id}|{int(time.time())}|{ttl}\n")
+                (d / "owner").write_text(f"{agent}|{int(time.time())}|{ttl}\n")
             except Exception:
                 return {"status": "locked", "error": "race: mkdir failed after rename"}
             finally:
                 shutil.rmtree(stale_dir, ignore_errors=True)
-            append_log("lock-acquire", task_id, agent_id, f"took stale from {o_agent}")
+            append_log("lock-acquire", task, agent, f"took stale from {o_agent}")
             return ok(note=f"took stale lock from {o_agent} (age {age}s)")
         return {"status": "locked", "owner": o_agent, "age_seconds": age, "ttl": o_ttl}
 
 @mcp.tool()
-def release_lock(task_id: str, agent_id: str = "") -> dict:
-    """Release a lock. If agent_id given, only release if you own it."""
-    d = LOCKS / task_id
+def release_lock(task_id: str, agent_id: str = "", force: bool = False, reason: str = "") -> dict:
+    """Release a lock. Requires owner match, or explicit audited force."""
+    task = _require_lock_id(task_id)
+    if not task:
+        return error(f"invalid task id: {task_id}")
+    d = LOCKS / task
     if not d.exists():
         return {"status": "no_lock"}
-    if agent_id:
-        owner_file = d / "owner"
-        if owner_file.exists():
-            o_agent = owner_file.read_text().strip().split("|")[0]
-            if o_agent != agent_id:
-                return error(f"lock owned by {o_agent}, not you")
     # Security: refuse to rmtree a symlink (symlink-attack guard).
     if d.is_symlink():
         return error("lock path is a symlink — refusing to remove")
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("valid agent_id required")
+
+    owner_file = d / "owner"
+    owner, owner_error = _read_lock_owner(owner_file)
+
+    if force:
+        force_reason = _require_force_reason(reason)
+        if not force_reason:
+            return error("force reason required")
+        note = f"force by {agent}: {force_reason}"
+        if owner:
+            note = f"{note} (owner={owner})"
+        elif owner_error:
+            note = f"{note} ({owner_error})"
+    else:
+        if owner_error:
+            return error(owner_error)
+        if owner != agent:
+            return error(f"lock owned by {owner}, not {agent}")
+        note = ""
+
+    if d.is_symlink():
+        return error("lock path is a symlink — refusing to remove")
+    if not d.exists():
+        return {"status": "no_lock"}
+
     shutil.rmtree(d)
-    append_log("lock-release", task_id, agent_id)
+    append_log("lock-release", task, agent, note)
     return ok()
 
 @mcp.tool()
 def refresh_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
     """Refresh TTL of a lock (only if you own it)."""
-    d = LOCKS / task_id
+    task = _require_lock_id(task_id)
+    if not task:
+        return error(f"invalid task id: {task_id}")
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("valid agent_id required")
+    d = LOCKS / task
     owner_file = d / "owner"
     if not owner_file.exists():
         return error("no lock")
-    o_agent = owner_file.read_text().strip().split("|")[0]
-    if o_agent != agent_id:
+    o_agent, owner_error = _read_lock_owner(owner_file)
+    if owner_error:
+        return error(owner_error)
+    if o_agent != agent:
         return error(f"not your lock (owner={o_agent})")
-    owner_file.write_text(f"{agent_id}|{int(time.time())}|{ttl}\n")
+    owner_file.write_text(f"{agent}|{int(time.time())}|{ttl}\n")
     return ok()
 
 @mcp.tool()
 def lock_status(task_id: str = "") -> dict:
     """Status of one lock or all locks."""
     if task_id:
-        d = LOCKS / task_id
+        task = _require_lock_id(task_id)
+        if not task:
+            return error(f"invalid task id: {task_id}")
+        d = LOCKS / task
         if not d.exists():
             return {"status": "free"}
         owner_file = d / "owner"
-        if not owner_file.exists():
-            return {"status": "corrupt"}
+        owner, owner_error = _read_lock_owner(owner_file)
+        if owner_error:
+            return {"status": "corrupt", "error": owner_error}
         parts = owner_file.read_text().strip().split("|")
-        return {"status": "locked", "owner": parts[0],
+        return {"status": "locked", "owner": owner,
                 "age_seconds": int(time.time()) - int(parts[1]),
                 "ttl": int(parts[2])}
     else:
