@@ -177,6 +177,61 @@ def test_complete_retry_after_crash_after_active_before_cleanup(queue, monkeypat
     assert not journal.exists()
 
 
+def test_complete_retry_after_active_removal_without_lock_succeeds_for_identical_done(queue, monkeypatch):
+    active, done, owner = queue
+    real_cleanup = taskfile.cleanup_complete_journal
+    tripped = False
+
+    def flaky_cleanup(path: Path) -> None:
+        nonlocal tripped
+        if not tripped:
+            tripped = True
+            raise RuntimeError("boom-before-cleanup")
+        real_cleanup(path)
+
+    monkeypatch.setattr(taskfile, "cleanup_complete_journal", flaky_cleanup)
+    with pytest.raises(RuntimeError, match="boom-before-cleanup"):
+        taskfile.complete(active, done, "t-recover", "owner-agent", "openai-gpt-5.4")
+
+    journal = taskfile.complete_journal_path(active.parent, "t-recover")
+    owner.unlink()
+
+    monkeypatch.setattr(taskfile, "cleanup_complete_journal", real_cleanup)
+    taskfile.complete(active, done, "t-recover", "owner-agent", "openai-gpt-5.4")
+
+    assert "t-recover" not in active.read_text(encoding="utf-8")
+    assert _count_done(done, "t-recover") == 1
+    assert not journal.exists()
+
+
+def test_complete_retry_after_active_removal_without_lock_rejects_missing_done(queue, monkeypatch):
+    active, done, owner = queue
+    real_cleanup = taskfile.cleanup_complete_journal
+    tripped = False
+
+    def flaky_cleanup(path: Path) -> None:
+        nonlocal tripped
+        if not tripped:
+            tripped = True
+            raise RuntimeError("boom-before-cleanup")
+        real_cleanup(path)
+
+    monkeypatch.setattr(taskfile, "cleanup_complete_journal", flaky_cleanup)
+    with pytest.raises(RuntimeError, match="boom-before-cleanup"):
+        taskfile.complete(active, done, "t-recover", "owner-agent", "openai-gpt-5.4")
+
+    journal = taskfile.complete_journal_path(active.parent, "t-recover")
+    taskfile.atomic_write(done, "# Done Tasks\n")
+    owner.unlink()
+    monkeypatch.setattr(taskfile, "cleanup_complete_journal", real_cleanup)
+    before = _snapshot(active, done, journal)
+
+    with pytest.raises(taskfile.TaskError, match="completion journal inconsistent"):
+        taskfile.complete(active, done, "t-recover", "owner-agent", "openai-gpt-5.4")
+
+    _assert_same(before)
+
+
 def test_complete_recovery_refuses_malformed_journal(queue):
     active, done, owner = queue
     journal = taskfile.complete_journal_path(active.parent, "t-recover")

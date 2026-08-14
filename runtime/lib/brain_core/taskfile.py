@@ -245,7 +245,8 @@ def _validate_recovery_payload(
         if _active_block_fingerprint(active_block) != payload["source_active_fingerprint"]:
             raise TaskError(f"completion journal fingerprint mismatch: {tid}")
     else:
-        _ensure_lock_owner(active, tid, agent)
+        if not done_match:
+            _ensure_lock_owner(active, tid, agent)
 
     if done_match and _entry_fingerprint(done_match.group(1)) != payload["final_entry_fingerprint"]:
         raise TaskError(f"completion journal entry mismatch: {tid}")
