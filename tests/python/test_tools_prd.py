@@ -20,6 +20,7 @@ def tp(tmp_path, monkeypatch):
     (tmp_path / "prd").mkdir()
     (tmp_path / "tasks").mkdir()
     (tmp_path / "tasks" / "active.md").write_text("# Active tasks\n")
+    (tmp_path / "tasks" / "done.md").write_text("# Done tasks\n")
 
     # Fake packages
     fake_mcp_pkg = types.ModuleType("mcp")
@@ -45,6 +46,8 @@ def tp(tmp_path, monkeypatch):
     monkeypatch.setattr(p, "BRAIN", tmp_path, raising=False)
     monkeypatch.setattr(common, "ACTIVE", tmp_path / "tasks" / "active.md")
     monkeypatch.setattr(p, "ACTIVE", tmp_path / "tasks" / "active.md", raising=False)
+    monkeypatch.setattr(common, "DONE", tmp_path / "tasks" / "done.md")
+    monkeypatch.setattr(p, "DONE", tmp_path / "tasks" / "done.md", raising=False)
     monkeypatch.setattr(common, "PRD_DIR", tmp_path / "prd")
     monkeypatch.setattr(p, "PRD_DIR", tmp_path / "prd", raising=False)
     
@@ -110,9 +113,26 @@ status: draft
 def test_commit_prd_already_committed(tp):
     p, tmp, common = tp
     (tmp / "prd" / "t-1.md").write_text("status: committed\n## Subtasks\n- [ ] [P1] sub1 — T")
+    active = tmp / "tasks" / "active.md"
+    active.write_text("# Active tasks\n\n## PRD subtasks of t-1\n\n- [ ] [P1] t-1-sub1 — T\n      parent: t-1\n")
     res = p.commit_prd("t-1")
-    assert res["status"] == "error"
-    assert "already committed" in res["error"]
+    assert res["status"] == "ok"
+    assert res["appended_count"] == 0
+    assert active.read_text().count("t-1-sub1") == 1
+
+
+def test_commit_prd_recovers_committed_prd_with_missing_queue(tp):
+    p, tmp, common = tp
+    (tmp / "prd" / "t-1.md").write_text(
+        "status: committed\n## Subtasks\n\n- [ ] [P1] sub1 — T\n      acceptance: ok\n",
+        encoding="utf-8",
+    )
+    res = p.commit_prd("t-1")
+    assert res["status"] == "ok"
+    assert res["recovered"] is True
+    assert res["appended_count"] == 1
+    active = (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
+    assert active.count("t-1-sub1") == 1
 
 def test_get_prd_status(tp):
     p, tmp, common = tp

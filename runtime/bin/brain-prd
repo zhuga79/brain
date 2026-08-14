@@ -87,13 +87,14 @@ print(tmpl.replace('{prd_text}', prd))
 
     # --- parse LLM output into task blocks ---
     _agent="claude-brain-prd-decompose"
-    _result=$(python3 - "$_llm_output" "$id" "$_do_commit" "$A" "$LOG" "$_agent" "$_bin_dir" "$f" <<'PY'
+    _result=$(python3 - "$_llm_output" "$id" "$_do_commit" "$A" "$D" "$LOG" "$_agent" "$_bin_dir" "$f" <<'PY'
 import sys, re, datetime, pathlib
 
-llm_output, parent_id, do_commit, active_path, log_path, agent_id, bin_dir, prd_path = sys.argv[1:9]
+llm_output, parent_id, do_commit, active_path, done_path, log_path, agent_id, bin_dir, prd_path = sys.argv[1:10]
 do_commit = (do_commit == "1")
 
 import brain_task_parser
+from brain_core import prdfile
 
 # --- parse blocks from LLM output ---
 blocks = brain_task_parser.find_blocks(llm_output) if llm_output.strip() else []
@@ -154,27 +155,24 @@ for prio, full_id, title, original, parsed in normalized:
     out_blocks.append(f"- [ ] [{prio}] {full_id} — {title}\n" + "\n".join(new_body))
 
 if do_commit:
-    # write to PRD ## Subtasks section (overwrite)
     p_path = pathlib.Path(prd_path)
+    active = pathlib.Path(active_path)
+    done = pathlib.Path(done_path)
     prd_text = p_path.read_text()
-    sub_text = "## Subtasks\n" + "\n\n".join(out_blocks)
-    if "## Subtasks" in prd_text:
-        new_prd = re.sub(r"## Subtasks.*", sub_text, prd_text, flags=re.S)
-    else:
-        new_prd = prd_text.rstrip() + "\n\n" + sub_text
-    new_prd = re.sub(r"^status: draft", "status: committed", new_prd, flags=re.M)
-    p_path.write_text(new_prd)
-
-    # append to active.md
-    active_text = pathlib.Path(active_path).read_text()
-    header = f"\n## PRD subtasks of {parent_id}\n"
-    new_active = active_text.rstrip() + "\n" + header + "\n" + "\n\n".join(out_blocks) + "\n"
-    pathlib.Path(active_path).write_text(new_active)
+    p_path.write_text(prdfile.replace_subtasks_section(prd_text, out_blocks))
+    result = prdfile.commit(p_path, active, done, parent_id)
     # log — intentionally brief: no prompt content, no secrets
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(log_path, "a") as fh:
-        fh.write(f"## [{ts}] prd-decompose | {parent_id} | {agent_id} | tasks={len(out_blocks)} stub={used_stub}\n")
-    print(f"committed {len(out_blocks)} subtasks to active.md and updated {prd_path} (stub={used_stub}):")
+        fh.write(
+            f"## [{ts}] prd-decompose | {parent_id} | {agent_id} | "
+            f"tasks={len(result.subtasks)} appended={len(result.appended_ids)} "
+            f"recovered={int(result.recovered)} stub={used_stub}\n"
+        )
+    print(
+        f"committed {len(result.subtasks)} subtasks to active.md and updated {prd_path} "
+        f"(appended={len(result.appended_ids)} recovered={result.recovered} stub={used_stub}):"
+    )
     for prio, full_id, title, _, _ in normalized:
         print(f"  [{prio}] {full_id} — {title}")
 else:
@@ -264,90 +262,32 @@ PY
     [ -z "$id" ] && { echo "task id required"; exit 1; }
     f="$PRD_DIR/$id.md"
     [ ! -f "$f" ] && { echo "no PRD at $f"; exit 1; }
-    grep -q "^status: committed" "$f" && { echo "already committed"; exit 1; }
-    # парсим subtasks через python и аппендим в active.md
-    python3 - "$f" "$A" "$id" "$LOG" "$(dirname "${BASH_SOURCE[0]}")" <<'PY'
-import sys, re, datetime, pathlib
+    python3 - "$f" "$A" "$D" "$id" "$LOG" <<'PY'
+import sys, datetime, pathlib
 
-import brain_task_parser
-prd_path, active_path, parent_id, log_path = sys.argv[1:5]
-prd_text = pathlib.Path(prd_path).read_text()
+from brain_core import prdfile
 
-# найти секцию Subtasks
-m = re.search(r"^## Subtasks\s*$(.+?)(?=^## |\Z)", prd_text, re.S | re.M)
-if not m:
-    print("no ## Subtasks section in PRD")
-    sys.exit(1)
-sub_text = m.group(1)
-
-# каждый блок: "- [ ] [Pn] <id> — title" + 2-N строк отступа
-blocks = brain_task_parser.find_blocks(sub_text)
-if not blocks:
-    print("no subtasks found")
+prd_path, active_path, done_path, parent_id, log_path = sys.argv[1:6]
+try:
+    result = prdfile.commit(pathlib.Path(prd_path), pathlib.Path(active_path), pathlib.Path(done_path), parent_id)
+except prdfile.PRDError as exc:
+    print(str(exc))
     sys.exit(1)
 
-# нормализация: заменить локальный id (s1, s2, ...) на полный
-# и в depends_on тоже заменить
-normalized = []
-local_to_full = {}
-
-for b in blocks:
-    parsed = brain_task_parser.parse_block(b)
-    if not parsed:
-        continue
-    prio, local_id = parsed["prio"], parsed["id"]
-    title = parsed["title"]
-    # если local_id уже выглядит как полный (t-...) — оставить, иначе префикс родителя
-    if local_id.startswith("t-"):
-        full_id = local_id
-    else:
-        full_id = f"{parent_id}-{local_id}"
-    local_to_full[local_id] = full_id
-    normalized.append((prio, full_id, title, b))
-
-# теперь переписать depends_on в каждом блоке на полные id
-out_blocks = []
-for prio, full_id, title, original in normalized:
-    body_lines = original.split("\n")[1:]  # без заголовка
-    new_body = []
-    for line in body_lines:
-        line2 = re.sub(
-            r"depends_on: *\[([^\]]*)\]",
-            lambda mm: "depends_on: [" + ", ".join(
-                local_to_full.get(d.strip(), d.strip())
-                for d in mm.group(1).split(",") if d.strip()
-            ) + "]",
-            line,
-        )
-        # добавим parent: <parent_id> если ещё нет
-        new_body.append(line2)
-
-    has_parent = any("parent:" in l for l in new_body)
-    if not has_parent:
-        # вставим в начало body
-        new_body.insert(0, f"      parent: {parent_id}")
-
-    block_out = f"- [ ] [{prio}] {full_id} — {title}\n" + "\n".join(new_body)
-    out_blocks.append(block_out)
-
-# аппендим в active.md
-active_text = pathlib.Path(active_path).read_text()
-header = f"\n## PRD subtasks of {parent_id}\n"
-new_active = active_text.rstrip() + "\n" + header + "\n" + "\n\n".join(out_blocks) + "\n"
-pathlib.Path(active_path).write_text(new_active)
-
-# меняем status в PRD
-new_prd = re.sub(r"^status: draft\s*$", "status: committed", prd_text, count=1, flags=re.M)
-pathlib.Path(prd_path).write_text(new_prd)
-
-# лог
 ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 with open(log_path, "a") as f:
-    f.write(f"## [{ts}] prd-commit | {parent_id} | {len(normalized)} subtasks\n")
+    f.write(
+        f"## [{ts}] prd-commit | {parent_id} |  | "
+        f"subtasks={len(result.subtasks)} appended={len(result.appended_ids)} "
+        f"recovered={int(result.recovered)}\n"
+    )
 
-print(f"committed {len(normalized)} subtasks to active.md:")
-for prio, full_id, title, _ in normalized:
-    print(f"  [{prio}] {full_id} — {title}")
+print(
+    f"committed {len(result.subtasks)} subtasks to active.md "
+    f"(appended={len(result.appended_ids)} recovered={result.recovered}):"
+)
+for item in result.subtasks:
+    print(f"  [{item.prio}] {item.task_id} — {item.title}")
 PY
     "$(dirname "${BASH_SOURCE[0]}")/brain-index" rebuild >/dev/null 2>&1 &
     ;;

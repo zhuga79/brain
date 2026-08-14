@@ -1,4 +1,5 @@
 import re
+from brain_core import prdfile
 from common import mcp, BRAIN, ACTIVE, DONE, PRD_DIR, append_log, git_commit, ts, find_task_block, parse_block, find_blocks
 from result import ok, error
 
@@ -40,72 +41,26 @@ def commit_prd(task_id: str) -> dict:
     f = PRD_DIR / f"{task_id}.md"
     if not f.exists():
         return error(f"no PRD at {f}")
-    
-    prd_text = f.read_text()
-    if re.search(r"^status:\s*committed", prd_text, re.M):
-        return error("already committed")
 
-    # Find Subtasks section
-    m = re.search(r"^## Subtasks\s*$(.+?)(?=^## |\Z)", prd_text, re.S | re.M)
-    if not m:
-        return error("no ## Subtasks section in PRD")
-    sub_text = m.group(1)
+    try:
+        result = prdfile.commit(f, ACTIVE, DONE, task_id)
+    except prdfile.PRDError as exc:
+        return error(str(exc))
 
-    # Find subtask blocks
-    blocks = re.findall(r"(- \[ \] \[P[012]\][^\n]+(?:\n      [^\n]*)*)", sub_text)
-    if not blocks:
-        return error("no subtasks found")
-
-    normalized = []
-    local_to_full = {}
-
-    for b in blocks:
-        head_match = re.match(r"- \[ \] \[(P[012])\] (\S+) — (.+)", b)
-        if not head_match:
-            continue
-        prio, local_id, rest = head_match.groups()
-        full_id = local_id if local_id.startswith("t-") else f"{task_id}-{local_id}"
-        local_to_full[local_id] = full_id
-        normalized.append((prio, full_id, rest, b))
-
-    out_blocks = []
-    for prio, full_id, title, original in normalized:
-        body_lines = original.split("\n")[1:]
-        new_body = []
-        for line in body_lines:
-            line2 = re.sub(
-                r"depends_on: *\[([^\]]*)\]",
-                lambda mm: "depends_on: [" + ", ".join(
-                    local_to_full.get(d.strip(), d.strip())
-                    for d in mm.group(1).split(",") if d.strip()
-                ) + "]",
-                line,
-            )
-            new_body.append(line2)
-
-        if not any("parent:" in l for l in new_body):
-            new_body.insert(0, f"      parent: {task_id}")
-
-        block_out = f"- [ ] [{prio}] {full_id} — {title}\n" + "\n".join(new_body)
-        out_blocks.append(block_out)
-
-    # Append to active.md
-    active_text = ACTIVE.read_text() if ACTIVE.exists() else "# Active tasks\n"
-    header = f"\n## PRD subtasks of {task_id}\n"
-    new_active = active_text.rstrip() + "\n" + header + "\n" + "\n\n".join(out_blocks) + "\n"
-    ACTIVE.write_text(new_active)
-
-    # Update PRD status
-    new_prd = re.sub(r"^status: draft\s*$", "status: committed", prd_text, count=1, flags=re.M)
-    f.write_text(new_prd)
-
-    append_log("prd-commit", task_id, "", f"{len(normalized)} subtasks")
+    append_log(
+        "prd-commit",
+        task_id,
+        "",
+        f"subtasks={len(result.subtasks)} appended={len(result.appended_ids)} recovered={int(result.recovered)}",
+    )
     git_commit(f"prd-commit: {task_id}")
 
     return ok(
         parent_id=task_id,
-        subtasks_count=len(normalized),
-        subtasks=[{"prio": p, "id": i, "title": t.split("\n")[0]} for p, i, t, _ in normalized],
+        subtasks_count=len(result.subtasks),
+        appended_count=len(result.appended_ids),
+        recovered=result.recovered,
+        subtasks=[{"prio": item.prio, "id": item.task_id, "title": item.title} for item in result.subtasks],
     )
 
 @mcp.tool()
