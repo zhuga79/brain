@@ -5,4 +5,5 @@
 set -e
 
 MCP_DIR="${BRAIN_MCP_DIR:-$HOME/.local/share/brain-mcp}"
-exec "$MCP_DIR/.venv/bin/python" "$MCP_DIR/server.py" "$@"
+PYTHONPATH="$MCP_DIR/runtime/lib:$MCP_DIR/runtime/mcp${PYTHONPATH:+:$PYTHONPATH}" \
+  exec "$MCP_DIR/.venv/bin/python" "$MCP_DIR/runtime/mcp/server.py" "$@"
