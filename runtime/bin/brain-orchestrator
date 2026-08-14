@@ -538,29 +538,92 @@ def task_is_active(brain: Path, task: str) -> bool:
     return bool(brain_task_parser.find_block(queue.active_text(brain), task))
 
 
-def get_candidate_by_command(matrix, cmd):
-    all_candidates = []
-    for role_cands in matrix.get("roles", {}).values():
-        all_candidates.extend(role_cands)
-    cmd_str = " ".join(cmd)
-    
-    for c in all_candidates:
-        if c.get("command") == cmd_str:
-            return c
-    for c in all_candidates:
-        if c.get("command") and cmd_str.startswith(c.get("command")):
-            return c
-    executable = cmd[0] if cmd else ""
-    for c in all_candidates:
-        c_exec = c.get("command", "").split()[0] if c.get("command") else ""
-        if c_exec == executable:
-            return c
-    return {"provider": executable, "model": "unknown", "rank": 0}
+def _command_text(cmd: str | list[str]) -> str:
+    if isinstance(cmd, str):
+        return cmd.strip()
+    return " ".join(str(part) for part in cmd).strip()
 
-def create_fallback_handoff(args: argparse.Namespace, brain: Path, combined_output: str, primary: list[str], fallback: list[str]) -> bool:
+
+def _command_matches(candidate_command: str, actual_command: str) -> bool:
+    candidate_command = (candidate_command or "").strip()
+    actual_command = (actual_command or "").strip()
+    if not candidate_command or not actual_command:
+        return False
+    if candidate_command == actual_command or actual_command.startswith(candidate_command):
+        return True
+    try:
+        candidate_parts = shlex.split(candidate_command)
+        actual_parts = shlex.split(actual_command)
+    except ValueError:
+        candidate_parts = candidate_command.split()
+        actual_parts = actual_command.split()
+    if not candidate_parts or not actual_parts:
+        return False
+    return candidate_parts[0] == actual_parts[0]
+
+
+def get_candidate_by_command(matrix, cmd):
+    cmd_str = _command_text(cmd)
+    for role in matrix.get("roles", {}):
+        role_cands, _ = brain_provider.role_candidates(matrix, role)
+        for cand in sorted(role_cands, key=lambda c: c.get("rank", 99)):
+            command = brain_provider.candidate_command(matrix, cand)
+            if _command_matches(command, cmd_str):
+                return {**cand, "command": command, "role": role}
+    executable = ""
+    if isinstance(cmd, list):
+        executable = cmd[0] if cmd else ""
+    elif isinstance(cmd, str):
+        try:
+            executable = shlex.split(cmd)[0]
+        except ValueError:
+            executable = cmd.split()[0] if cmd.split() else ""
+    return {"provider": executable, "model": "unknown", "rank": 0, "command": cmd_str}
+
+
+def get_role_routing_candidates(brain: Path, role: str) -> tuple[dict | None, dict | None]:
+    status = brain_provider.collect_provider_status(brain)
+    role_status = (status.get("roles") or {}).get(role)
+    if role_status is None and "-" in role:
+        role_status = (status.get("roles") or {}).get(role.replace("-", "_"))
+    if not isinstance(role_status, dict):
+        return None, None
+    preferred = role_status.get("preferred")
+    fallbacks = role_status.get("fallback") or []
+    fallback = fallbacks[0] if isinstance(fallbacks, list) and fallbacks else None
+    return preferred if isinstance(preferred, dict) else None, fallback if isinstance(fallback, dict) else None
+
+
+def candidate_for_role_command(
+    brain: Path,
+    role: str,
+    command: str | list[str],
+    *,
+    preferred: dict | None = None,
+    fallback: dict | None = None,
+) -> dict | None:
+    actual_command = _command_text(command)
+    for candidate in (preferred, fallback):
+        if isinstance(candidate, dict) and _command_matches(str(candidate.get("command", "")), actual_command):
+            return candidate
     matrix = brain_provider.load_provider_matrix(brain)
-    c_from = get_candidate_by_command(matrix, primary)
-    c_to = get_candidate_by_command(matrix, fallback)
+    candidate = get_candidate_by_command(matrix, actual_command)
+    return candidate if isinstance(candidate, dict) else None
+
+
+def create_fallback_handoff(
+    args: argparse.Namespace,
+    brain: Path,
+    combined_output: str,
+    primary: list[str],
+    fallback: list[str],
+    *,
+    primary_candidate: dict | None = None,
+    fallback_candidate: dict | None = None,
+) -> bool:
+    matrix = brain_provider.load_provider_matrix(brain)
+    c_from = primary_candidate or get_candidate_by_command(matrix, primary)
+    c_to = fallback_candidate or get_candidate_by_command(matrix, fallback)
     
     # detect reason
     fallback_reason = "quota_exceeded"
@@ -832,7 +895,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             if args.pty and not fallback:
                 create_limit_handoff(args, brain)
             if fallback:
-                handoff_ok = create_fallback_handoff(args, brain, combined, primary, fallback)
+                handoff_ok = create_fallback_handoff(
+                    args,
+                    brain,
+                    combined,
+                    primary,
+                    fallback,
+                    primary_candidate=getattr(args, "primary_candidate", None),
+                    fallback_candidate=getattr(args, "fallback_candidate", None),
+                )
                 if not handoff_ok:
                     print("brain-orchestrator: fallback handoff creation failed; running fallback command anyway", file=sys.stderr)
                 print("brain-orchestrator: limit output detected while task remains active; running fallback command", file=sys.stderr)
@@ -855,7 +926,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("brain-orchestrator: limit detected but no fallback command configured", file=sys.stderr)
         return int(primary_res.returncode)
 
-    handoff_ok = create_fallback_handoff(args, brain, combined, primary, fallback)
+    handoff_ok = create_fallback_handoff(
+        args,
+        brain,
+        combined,
+        primary,
+        fallback,
+        primary_candidate=getattr(args, "primary_candidate", None),
+        fallback_candidate=getattr(args, "fallback_candidate", None),
+    )
     if not handoff_ok:
         print("brain-orchestrator: fallback handoff creation failed; running fallback command anyway", file=sys.stderr)
     print("brain-orchestrator: limit detected; running fallback command", file=sys.stderr)
@@ -892,9 +971,20 @@ def cmd_console(args: argparse.Namespace) -> int:
         agent = args.agent or f"operator-{role}-{os.getpid()}"
         log_path = Path(args.log_file).expanduser() if args.log_file else default_log_path(brain, task, agent)
         prompt_path = prompt_path_for(brain, task, agent)
-        primary_cli = args.primary or os.environ.get("BRAIN_ORCHESTRATOR_PRIMARY", "") or mapped_cli_for_role(brain, role, task)
+        routed_primary, routed_fallback = get_role_routing_candidates(brain, role)
+        primary_cli = args.primary or os.environ.get("BRAIN_ORCHESTRATOR_PRIMARY", "")
+        if not primary_cli:
+            primary_cli = str((routed_primary or {}).get("command", "")) or mapped_cli_for_role(brain, role, task)
         fallback_cli = args.fallback or os.environ.get("BRAIN_ORCHESTRATOR_FALLBACK", "")
+        if not fallback_cli and routed_fallback and not _command_matches(str(routed_fallback.get("command", "")), primary_cli):
+            fallback_cli = str(routed_fallback.get("command", ""))
         primary_cli = apply_runtime_overrides(primary_cli, args.model, args.effort)
+        if fallback_cli:
+            fallback_cli = apply_runtime_overrides(fallback_cli, args.model, args.effort)
+        primary_candidate = candidate_for_role_command(
+            brain, role, primary_cli, preferred=routed_primary, fallback=routed_fallback)
+        fallback_candidate = candidate_for_role_command(
+            brain, role, fallback_cli, preferred=routed_primary, fallback=routed_fallback) if fallback_cli else None
         primary_shell = build_prompt_shell(primary_cli, prompt_path, interactive=getattr(args, 'interactive', False))
         fallback_shell = build_prompt_shell(fallback_cli, prompt_path, interactive=getattr(args, 'interactive', False)) if fallback_cli else ""
     except RuntimeError as exc:
@@ -946,6 +1036,8 @@ def cmd_console(args: argparse.Namespace) -> int:
         log_file=str(log_path),
         model=args.model,
         effort=args.effort,
+        primary_candidate=primary_candidate,
+        fallback_candidate=fallback_candidate,
         command=["bash", "-lc", primary_shell],
     )
     run_args.visible_argv = [

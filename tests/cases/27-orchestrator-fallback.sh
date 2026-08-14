@@ -166,6 +166,90 @@ grep -q "Trigger Output Excerpt" "$BRAIN_PATH/handoff/ORCHESTRATOR_HANDOFF.md" |
   exit 1
 }
 
+v2_brain="$(mktemp -d)"
+task_v2="t-smoke-v2-routing-fallback"
+mkdir -p "$v2_brain/tasks" "$v2_brain/config"
+cat > "$v2_brain/tasks/active.md" <<EOF
+- [~] [P1] $task_v2 — Routing v2 fallback smoke
+      role: developer   mode: solo
+      started: 2026-08-14T00:00:00Z
+      by: smoke-v2
+EOF
+primary_script="$v2_brain/primary-limit.sh"
+fallback_script="$v2_brain/fallback-ok.sh"
+cat > "$primary_script" <<'EOF'
+#!/usr/bin/env bash
+echo "HTTP 429 Too Many Requests RESOURCE_EXHAUSTED" >&2
+exit 42
+EOF
+cat > "$fallback_script" <<EOF
+#!/usr/bin/env bash
+printf 'fallback-v2-ran' > "$v2_brain/fallback-v2.marker"
+exit 0
+EOF
+chmod +x "$primary_script" "$fallback_script"
+PROJECT_ROOT="$PROJECT_ROOT" V2_BRAIN="$v2_brain" PRIMARY_SCRIPT="$primary_script" FALLBACK_SCRIPT="$fallback_script" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+project_root = Path(os.environ["PROJECT_ROOT"])
+brain = Path(os.environ["V2_BRAIN"])
+payload = json.loads((project_root / "config" / "routing.json").read_text(encoding="utf-8"))
+payload["roles"] = {"developer": {"profile": "implementation"}}
+payload["profiles"] = {
+    "implementation": [
+        {"rank": 1, "provider": "fake-primary", "model": "quota", "use_for": "smoke"},
+        {"rank": 2, "provider": "fake-fallback", "model": "backup", "use_for": "smoke"},
+    ]
+}
+payload["providers"] = {
+    "fake-primary": {"command": os.environ["PRIMARY_SCRIPT"], "model_flag": "", "enabled": True},
+    "fake-fallback": {"command": os.environ["FALLBACK_SCRIPT"], "model_flag": "", "enabled": True},
+}
+(brain / "config" / "routing.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+PY
+preferred_cmd=$(BRAIN_PATH="$v2_brain" brain-provider cli --role developer)
+fallback_cmd=$(BRAIN_PATH="$v2_brain" PYTHONPATH="$PROJECT_ROOT/runtime/lib" python3 - <<'PY'
+import os
+from pathlib import Path
+import brain_provider
+
+brain = Path(os.environ["BRAIN_PATH"])
+status = brain_provider.collect_provider_status(brain)
+print(status["roles"]["developer"]["fallback"][0]["command"])
+PY
+)
+BRAIN_PATH="$v2_brain" brain-orchestrator run \
+  --no-visible \
+  --task "$task_v2" \
+  --agent smoke-v2 \
+  --to-role developer \
+  --fallback "$fallback_cmd" \
+  -- $preferred_cmd \
+  >/tmp/brain_orchestrator_v2_limit.out 2>/tmp/brain_orchestrator_v2_limit.err
+grep -q "fallback-v2-ran" "$v2_brain/fallback-v2.marker" || {
+  echo "FAILED: v2 fallback command did not run"
+  cat /tmp/brain_orchestrator_v2_limit.out
+  cat /tmp/brain_orchestrator_v2_limit.err
+  exit 1
+}
+! grep -q "AttributeError" /tmp/brain_orchestrator_v2_limit.err || {
+  echo "FAILED: routing/v2 fallback still crashes"
+  cat /tmp/brain_orchestrator_v2_limit.err
+  exit 1
+}
+grep -q '"provider": "fake-primary"' "$v2_brain/handoff/ORCHESTRATOR_HANDOFF.md" || {
+  echo "FAILED: v2 handoff missing primary candidate metadata"
+  cat "$v2_brain/handoff/ORCHESTRATOR_HANDOFF.md"
+  exit 1
+}
+grep -q '"provider": "fake-fallback"' "$v2_brain/handoff/ORCHESTRATOR_HANDOFF.md" || {
+  echo "FAILED: v2 handoff missing fallback candidate metadata"
+  cat "$v2_brain/handoff/ORCHESTRATOR_HANDOFF.md"
+  exit 1
+}
+
 rm -f "$fallback_marker"
 brain-orchestrator run \
   --no-visible \
