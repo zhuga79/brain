@@ -1,5 +1,7 @@
 # Brain
 
+[![tests](https://github.com/Blqd/brain/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/Blqd/brain/actions/workflows/tests.yml)
+
 Файловая память и оркестрация агентов для одного человека. Не фреймворк и не
 сервис: набор CLI поверх обычных markdown-файлов и git, который позволяет
 нескольким LLM-агентам работать над общей базой знаний, не затирая друг друга.

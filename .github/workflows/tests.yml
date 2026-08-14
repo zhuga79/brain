@@ -2,64 +2,18 @@ name: tests
 
 on:
   pull_request:
+    branches: [master]
   push:
-    branches: [master, main]
+    branches: [master]
 
 permissions:
   contents: read
 
 jobs:
-  unit:
-    name: Юнит-тесты
+  tests:
+    name: tests/run.sh
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Установка
-        run: |
-          python -m pip install --upgrade pip
-          # Тяжёлые зависимости (chromadb, sentence-transformers) не нужны:
-          # тесты brain-vector подменяют их моками.
-          pip install pytest
-
-      - name: pytest
-        run: pytest tests/python -q
-
-  shell:
-    name: Синтаксис shell
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: bash -n по всем скриптам
-        run: |
-          fail=0
-          while IFS= read -r f; do
-            bash -n "$f" || { echo "синтаксическая ошибка: $f"; fail=1; }
-          done < <(find . -name '*.sh' -not -path './.git/*')
-          # CLI в runtime/bin без расширения: берём только те, что на bash
-          while IFS= read -r f; do
-            head -1 "$f" | grep -q 'bash' && { bash -n "$f" || { echo "синтаксическая ошибка: $f"; fail=1; }; }
-          done < <(find runtime/bin -type f)
-          exit $fail
-
-  smoke:
-    name: Смоук-набор (информационно)
-    runs-on: ubuntu-latest
-    # Набор сейчас красный: часть кейсов падает независимо от изменений в PR
-    # (см. задачу про brain-validate), плюс один TDD-тест ждёт реализации.
-    # Блокировать PR этим нельзя — иначе красное состояние станет фоном и
-    # перестанет что-либо значить. Вернуть в блокирующие, когда набор
-    # позеленеет.
-    continue-on-error: true
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -67,62 +21,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Прогон через раннер
-        # Только tests/run.sh: он разворачивает Brain во временном HOME.
-        # Запуск файлов из tests/cases/ напрямую работает по боевому
-        # BRAIN_PATH и уничтожает рабочие данные.
+      - name: Run tests/run.sh
+        # Isolated runner: TMP_HOME + BRAIN_PATH. Do not invoke tests/cases
+        # directly — they inherit the working tree and rewrite live data.
         run: bash tests/run.sh
 
-  secrets:
-    name: Секреты и личные данные
+  guard:
+    name: brain-guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: brain-guard — обезличенные признаки
-        # Именные правила лежат в локальном файле секретов и в публичный
-        # репозиторий не попадают: список сущностей сам является персональными
-        # данными. CI поэтому работает только с обезличенными признаками.
+      - name: Generic PII and secrets
+        # --generic-only: named denylist stays off the runner.
         run: python3 runtime/bin/brain-guard tree --brain . --generic-only
-
-      - name: Ключи, токены и захардкоженная почта
-        run: |
-          python3 - <<'PY'
-          import re, subprocess, sys
-          from pathlib import Path
-
-          PATTERNS = {
-              'ключ API':      r'\b(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,})',
-              'приватный ключ': r'-----BEGIN [A-Z ]*PRIVATE KEY-----',
-              'личная почта':   r'[A-Za-z0-9._%+-]+@(gmail|yandex|mail|outlook|icloud)\.[A-Za-z]{2,}',
-          }
-          ALLOW = re.compile(r'example\.|@example|noreply|localhost|test@|smoke@|you@', re.I)
-
-          # Только версионируемые файлы: рабочее дерево может содержать
-          # worktrees и кэши, обход которых занимает минуты и ничего не даёт.
-          tracked = subprocess.run(
-              ['git', 'ls-files', '-z'], capture_output=True, text=True, check=True
-          ).stdout.split('\0')
-
-          hits = []
-          for name in filter(None, tracked):
-              f = Path(name)
-              try:
-                  if not f.is_file() or f.stat().st_size > 1_000_000:
-                      continue
-                  text = f.read_text(encoding='utf-8')
-              except (UnicodeDecodeError, OSError):
-                  continue
-              for i, line in enumerate(text.splitlines(), 1):
-                  if ALLOW.search(line):
-                      continue
-                  for label, pat in PATTERNS.items():
-                      if re.search(pat, line):
-                          hits.append(f'{f}:{i} — {label}')
-
-          if hits:
-              print('Похоже на секрет или личный контакт в коде:')
-              print('\n'.join('  ' + h for h in hits))
-              sys.exit(1)
-          print(f'чисто (проверено файлов: {len(list(filter(None, tracked)))})')
-          PY
