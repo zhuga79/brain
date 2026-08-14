@@ -606,6 +606,24 @@ def candidate_for_role_command(
     return None
 
 
+def _candidate_with_runtime_overrides(candidate: dict | None, model: str = "", effort: str = "") -> dict | None:
+    if not isinstance(candidate, dict):
+        return None
+    updated = dict(candidate)
+    command = str(updated.get("command", "") or "")
+    if command and (model or effort):
+        command = apply_runtime_overrides(command, model, effort)
+        updated["command"] = command
+    if model:
+        updated["model"] = model
+        key_provider = str(updated.get("provider", "") or "")
+        if key_provider:
+            updated["key"] = f"{key_provider}/{model}"
+    if effort:
+        updated["effort"] = effort
+    return updated
+
+
 def create_fallback_handoff(
     args: argparse.Namespace,
     brain: Path,
@@ -970,16 +988,18 @@ def cmd_console(args: argparse.Namespace) -> int:
         primary_cli = args.primary or os.environ.get("BRAIN_ORCHESTRATOR_PRIMARY", "")
         if not primary_cli:
             primary_cli = str((routed_primary or {}).get("command", "")) or mapped_cli_for_role(brain, role, task)
+        primary_candidate = candidate_for_role_command(
+            brain, role, primary_cli, preferred=routed_primary, fallback=routed_fallback)
         fallback_cli = args.fallback or os.environ.get("BRAIN_ORCHESTRATOR_FALLBACK", "")
         if not fallback_cli and routed_fallback and not _command_matches(str(routed_fallback.get("command", "")), primary_cli):
             fallback_cli = str(routed_fallback.get("command", ""))
+        fallback_candidate = candidate_for_role_command(
+            brain, role, fallback_cli, preferred=routed_primary, fallback=routed_fallback) if fallback_cli else None
         primary_cli = apply_runtime_overrides(primary_cli, args.model, args.effort)
         if fallback_cli:
             fallback_cli = apply_runtime_overrides(fallback_cli, args.model, args.effort)
-        primary_candidate = candidate_for_role_command(
-            brain, role, primary_cli, preferred=routed_primary, fallback=routed_fallback)
-        fallback_candidate = candidate_for_role_command(
-            brain, role, fallback_cli, preferred=routed_primary, fallback=routed_fallback) if fallback_cli else None
+        primary_candidate = _candidate_with_runtime_overrides(primary_candidate, args.model, args.effort)
+        fallback_candidate = _candidate_with_runtime_overrides(fallback_candidate, args.model, args.effort)
         primary_shell = build_prompt_shell(primary_cli, prompt_path, interactive=getattr(args, 'interactive', False))
         fallback_shell = build_prompt_shell(fallback_cli, prompt_path, interactive=getattr(args, 'interactive', False)) if fallback_cli else ""
     except RuntimeError as exc:

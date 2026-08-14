@@ -82,6 +82,15 @@ def _console_args(brain: Path, task_id: str, *, primary: str = "", fallback: str
     )
 
 
+def _handoff_json_field(brain: Path, field: str) -> dict:
+    handoff = (brain / "handoff" / "ORCHESTRATOR_HANDOFF.md").read_text(encoding="utf-8")
+    prefix = f"{field}: "
+    for line in handoff.splitlines():
+        if line.startswith(prefix):
+            return json.loads(line[len(prefix):])
+    raise AssertionError(f"missing handoff field: {field}")
+
+
 def test_command_match_requires_normalized_full_argv() -> None:
     assert brain_orchestrator._command_matches("python3 /tmp/a.py --x", "python3 /tmp/a.py --x")
     assert not brain_orchestrator._command_matches("python3 /tmp/a.py", "python3 /tmp/b.py")
@@ -253,3 +262,111 @@ def test_console_explicit_override_without_exact_routed_match_uses_synthetic_met
     assert '"provider": "bash"' in handoff
     assert '"provider": "fake-primary"' not in handoff
     assert '"model": "unknown"' in handoff
+
+
+def test_console_model_override_preserves_routed_metadata(monkeypatch, tmp_path):
+    _patch_prompt(monkeypatch)
+    brain = tmp_path / "brain"
+    task_id = "t-model-override"
+    marker = tmp_path / "fallback.model"
+    primary = _make_executable(
+        tmp_path / "primary.sh",
+        "#!/usr/bin/env bash\n"
+        "echo 'HTTP 429 Too Many Requests RESOURCE_EXHAUSTED' >&2\n"
+        "exit 42\n",
+    )
+    fallback = _make_executable(
+        tmp_path / "fallback.sh",
+        f"#!/usr/bin/env bash\nprintf 'model-ok' > {marker}\nexit 0\n",
+    )
+    _write_task(brain, task_id)
+    _write_live_v2_routing(brain, primary, fallback)
+
+    args = _console_args(brain, task_id)
+    args.model = "override-model"
+    rc = brain_orchestrator.cmd_console(args)
+
+    assert rc == 0
+    assert marker.read_text(encoding="utf-8") == "model-ok"
+    provider_from = _handoff_json_field(brain, "provider_from")
+    provider_to = _handoff_json_field(brain, "provider_to")
+    assert provider_from["provider"] == "fake-primary"
+    assert provider_from["rank"] == 1
+    assert provider_from["model"] == "override-model"
+    assert provider_from["command"].endswith("--model override-model")
+    assert provider_to["provider"] == "fake-fallback"
+    assert provider_to["rank"] == 2
+    assert provider_to["model"] == "override-model"
+
+
+def test_console_effort_override_preserves_routed_metadata(monkeypatch, tmp_path):
+    _patch_prompt(monkeypatch)
+    brain = tmp_path / "brain"
+    task_id = "t-effort-override"
+    marker = tmp_path / "fallback.effort"
+    primary = _make_executable(
+        tmp_path / "primary.sh",
+        "#!/usr/bin/env bash\n"
+        "echo 'HTTP 429 Too Many Requests RESOURCE_EXHAUSTED' >&2\n"
+        "exit 42\n",
+    )
+    fallback = _make_executable(
+        tmp_path / "fallback.sh",
+        f"#!/usr/bin/env bash\nprintf 'effort-ok' > {marker}\nexit 0\n",
+    )
+    _write_task(brain, task_id)
+    _write_live_v2_routing(brain, primary, fallback)
+
+    args = _console_args(brain, task_id)
+    args.effort = "high"
+    rc = brain_orchestrator.cmd_console(args)
+
+    assert rc == 0
+    assert marker.read_text(encoding="utf-8") == "effort-ok"
+    provider_from = _handoff_json_field(brain, "provider_from")
+    provider_to = _handoff_json_field(brain, "provider_to")
+    assert provider_from["provider"] == "fake-primary"
+    assert provider_from["rank"] == 1
+    assert provider_from["effort"] == "high"
+    assert provider_from["command"].endswith("--effort high")
+    assert provider_to["provider"] == "fake-fallback"
+    assert provider_to["rank"] == 2
+    assert provider_to["effort"] == "high"
+
+
+def test_console_model_and_effort_override_preserves_routed_metadata(monkeypatch, tmp_path):
+    _patch_prompt(monkeypatch)
+    brain = tmp_path / "brain"
+    task_id = "t-both-override"
+    marker = tmp_path / "fallback.both"
+    primary = _make_executable(
+        tmp_path / "primary.sh",
+        "#!/usr/bin/env bash\n"
+        "echo 'HTTP 429 Too Many Requests RESOURCE_EXHAUSTED' >&2\n"
+        "exit 42\n",
+    )
+    fallback = _make_executable(
+        tmp_path / "fallback.sh",
+        f"#!/usr/bin/env bash\nprintf 'both-ok' > {marker}\nexit 0\n",
+    )
+    _write_task(brain, task_id)
+    _write_live_v2_routing(brain, primary, fallback)
+
+    args = _console_args(brain, task_id)
+    args.model = "override-model"
+    args.effort = "medium"
+    rc = brain_orchestrator.cmd_console(args)
+
+    assert rc == 0
+    assert marker.read_text(encoding="utf-8") == "both-ok"
+    provider_from = _handoff_json_field(brain, "provider_from")
+    provider_to = _handoff_json_field(brain, "provider_to")
+    assert provider_from["provider"] == "fake-primary"
+    assert provider_from["rank"] == 1
+    assert provider_from["model"] == "override-model"
+    assert provider_from["effort"] == "medium"
+    assert provider_from["command"].endswith("--model override-model --effort medium")
+    assert provider_to["provider"] == "fake-fallback"
+    assert provider_to["rank"] == 2
+    assert provider_to["model"] == "override-model"
+    assert provider_to["effort"] == "medium"
