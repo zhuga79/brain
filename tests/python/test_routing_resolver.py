@@ -38,9 +38,23 @@ def cand(rank: int, provider: str, model: str, command: str) -> dict:
 
 
 @pytest.fixture
-def brain(tmp_path, monkeypatch):
-    monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
+def single_root(tmp_path, monkeypatch):
+    """Корни выставлены явно: единый install, где system root равен data root.
+
+    Без этого `brain_system_path()` брал `BRAIN_SYSTEM_PATH` из шелла, и пустое
+    дерево `tmp_path` дочитывало роли и routing.json из боевого чекаута —
+    проверки «конфигурации нет» проходили или падали в зависимости от того,
+    кто запускает прогон.
+    """
+    monkeypatch.setenv("BRAIN_PATH", str(tmp_path))
+    monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture
+def brain(single_root, monkeypatch):
+    monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
+    return single_root
 
 
 class TestOrder:
@@ -189,6 +203,71 @@ class TestBrokenConfig:
         assert any("routing.json" in w for w in r["warnings"])
 
 
+class TestSystemRootResolution:
+    """t-2026-08-14-pytest-system-path-isolation: оба корня заданы тестом.
+
+    Раньше ветку «конфигурация лежит в системном корне» никто не проверял: её
+    случайно исполняло окружение оператора, если прогон запускали из шелла с
+    выставленным `BRAIN_SYSTEM_PATH`. Тесты изолированы, поэтому обе ветки —
+    и фолбэк без переменной, и разделённый layout — проверяются явно.
+    """
+
+    def _system_root(self, tmp_path: Path) -> Path:
+        system = tmp_path / "system"
+        write_routing(system, {"developer": [cand(1, "opencode", "d", "opencode run")]})
+        return system
+
+    def test_unset_system_path_resolves_to_the_data_root(self, tmp_path, monkeypatch):
+        """Production-фолбэк: переменной нет — системный корень равен data root."""
+        from brain_core.paths import brain_system_path
+
+        data = tmp_path / "data"
+        data.mkdir()
+        monkeypatch.setenv("BRAIN_PATH", str(data))
+        monkeypatch.delenv("BRAIN_SYSTEM_PATH", raising=False)
+
+        assert brain_system_path() == data
+        assert brain_provider.matrix_path(data) == data / "config" / "routing.json"
+
+    def test_unset_system_path_keeps_the_missing_config_warning(self, tmp_path, monkeypatch):
+        """Единый install без конфигурации обязан жаловаться, а не искать соседа."""
+        data = tmp_path / "data"
+        data.mkdir()
+        monkeypatch.setenv("BRAIN_PATH", str(data))
+        monkeypatch.delenv("BRAIN_SYSTEM_PATH", raising=False)
+        monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
+
+        r = brain_provider.resolve_for_role(data, "developer")
+        assert r["source"] == "default"
+        assert any("routing.json" in w for w in r["warnings"])
+
+    def test_split_layout_reads_the_config_from_the_system_root(self, tmp_path, monkeypatch):
+        """Разделённый layout: data root пуст, политика приходит из системного."""
+        data = tmp_path / "data"
+        data.mkdir()
+        system = self._system_root(tmp_path)
+        monkeypatch.setenv("BRAIN_PATH", str(data))
+        monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(system))
+        monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
+
+        assert brain_provider.matrix_path(data) == system / "config" / "routing.json"
+        r = brain_provider.resolve_for_role(data, "developer")
+        assert r["command"] == "opencode run"
+        assert r["source"] == "config"
+
+    def test_data_root_config_wins_over_the_system_one(self, tmp_path, monkeypatch):
+        """Локальный оверрайд сильнее системного: иначе его нельзя было бы задать."""
+        data = tmp_path / "data"
+        write_routing(data, {"developer": [cand(1, "claude", "opus", "claude --model opus")]})
+        system = self._system_root(tmp_path)
+        monkeypatch.setenv("BRAIN_PATH", str(data))
+        monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(system))
+        monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
+
+        assert brain_provider.matrix_path(data) == data / "config" / "routing.json"
+        assert brain_provider.resolve_for_role(data, "developer")["command"] == "claude --model opus"
+
+
 class TestCliCommand:
     def _run(self, brain: Path, *args: str) -> subprocess.CompletedProcess:
         env = dict(os.environ, BRAIN_PATH=str(brain), BRAIN_DISABLE_SKILL_ROUTING="1")
@@ -257,38 +336,38 @@ def test_federation_no_longer_lists_the_removed_file():
 class TestSkillPinScope:
     """Закрепление клиента скиллом действует на задачу, а не на всю роль."""
 
-    def _brain_with_skill(self, tmp_path: Path, requires: str = "") -> Path:
-        (tmp_path / "skills" / "playwright").mkdir(parents=True)
-        (tmp_path / "skills" / "playwright" / "SKILL.md").write_text(
+    def _brain_with_skill(self, brain: Path, requires: str = "") -> Path:
+        (brain / "skills" / "playwright").mkdir(parents=True)
+        (brain / "skills" / "playwright" / "SKILL.md").write_text(
             "---\nname: playwright\ntype: mcp\napplies_to: [developer, qa]\n"
             "supported_clients: [claude]\nmcp_command: npx\n---\nbody\n", encoding="utf-8")
-        (tmp_path / "tasks").mkdir()
+        (brain / "tasks").mkdir()
         block = "- [ ] [P1] t-x — Задача\n      role: developer\n"
         if requires:
             block += f"      requires: [{requires}]\n"
-        (tmp_path / "tasks" / "active.md").write_text(block, encoding="utf-8")
-        write_routing(tmp_path, {"developer": [cand(1, "opencode", "d", "opencode run")]})
-        return tmp_path
+        (brain / "tasks" / "active.md").write_text(block, encoding="utf-8")
+        write_routing(brain, {"developer": [cand(1, "opencode", "d", "opencode run")]})
+        return brain
 
-    def test_task_requiring_the_skill_is_pinned(self, tmp_path, monkeypatch):
+    def test_task_requiring_the_skill_is_pinned(self, single_root, monkeypatch):
         monkeypatch.delenv("BRAIN_DISABLE_SKILL_ROUTING", raising=False)
-        brain = self._brain_with_skill(tmp_path, requires="playwright")
+        brain = self._brain_with_skill(single_root, requires="playwright")
         r = brain_provider.resolve_for_role(brain, "developer", task="t-x")
         assert r["source"] == "skill-pin"
         assert r["command"] == "claude"
 
-    def test_unrelated_task_follows_the_config(self, tmp_path, monkeypatch):
+    def test_unrelated_task_follows_the_config(self, single_root, monkeypatch):
         """Иначе один скилл с ограниченным списком клиентов уводил бы все
         задачи роли и делал конфигурацию маршрутизации недостижимой."""
         monkeypatch.delenv("BRAIN_DISABLE_SKILL_ROUTING", raising=False)
-        brain = self._brain_with_skill(tmp_path)
+        brain = self._brain_with_skill(single_root)
         r = brain_provider.resolve_for_role(brain, "developer", task="t-x")
         assert r["source"] == "config"
         assert r["command"] == "opencode run"
 
-    def test_routing_can_be_disabled_by_env(self, tmp_path, monkeypatch):
+    def test_routing_can_be_disabled_by_env(self, single_root, monkeypatch):
         monkeypatch.setenv("BRAIN_DISABLE_SKILL_ROUTING", "1")
-        brain = self._brain_with_skill(tmp_path, requires="playwright")
+        brain = self._brain_with_skill(single_root, requires="playwright")
         assert brain_provider.resolve_for_role(brain, "developer", task="t-x")["source"] == "config"
 
 
@@ -376,11 +455,11 @@ def test_quota_is_a_fact_not_a_policy():
 class TestValidateRouting:
     """t-2026-08-10-routing-validate: дыры в маршрутизации видны валидатору."""
 
-    def _brain(self, tmp_path: Path, provider_command: str = "claude") -> Path:
-        (tmp_path / "roles").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "roles" / "developer.md").write_text("# developer\n", encoding="utf-8")
-        (tmp_path / "config").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "config" / "routing.json").write_text(json.dumps({
+    def _brain(self, brain: Path, provider_command: str = "claude") -> Path:
+        (brain / "roles").mkdir(parents=True, exist_ok=True)
+        (brain / "roles" / "developer.md").write_text("# developer\n", encoding="utf-8")
+        (brain / "config").mkdir(parents=True, exist_ok=True)
+        (brain / "config" / "routing.json").write_text(json.dumps({
             "version": brain_provider.MATRIX_VERSION,
             "defaults": {"cli": "claude"},
             "providers": {"claude": {"command": provider_command,
@@ -388,38 +467,38 @@ class TestValidateRouting:
             "profiles": {"universal": [{"rank": 1, "provider": "claude", "model": "sonnet"}]},
             "roles": {"developer": {"profile": "universal"}},
         }, ensure_ascii=False), encoding="utf-8")
-        return tmp_path
+        return brain
 
-    def test_clean_config_has_no_issues(self, tmp_path):
+    def test_clean_config_has_no_issues(self, single_root):
         from brain_wiki.validators import validate_routing
 
-        assert validate_routing(self._brain(tmp_path)) == []
+        assert validate_routing(self._brain(single_root)) == []
 
-    def test_missing_executable_is_a_warning_not_an_error(self, tmp_path):
+    def test_missing_executable_is_a_warning_not_an_error(self, single_root):
         """CLI может быть не установлен здесь, но записан для другой машины."""
         from brain_wiki.validators import validate_routing
 
-        issues = validate_routing(self._brain(tmp_path, provider_command="нет-такой-команды"))
+        issues = validate_routing(self._brain(single_root, provider_command="нет-такой-команды"))
         assert [i.severity for i in issues] == ["WARN"]
         assert "не найдена" in issues[0].message
 
-    def test_health_record_silences_the_warning(self, tmp_path):
+    def test_health_record_silences_the_warning(self, single_root):
         """Если про кандидата есть запись о здоровье, отсутствие бинаря уже учтено."""
         from brain_wiki.validators import validate_routing
 
-        brain = self._brain(tmp_path, provider_command="нет-такой-команды")
+        brain = self._brain(single_root, provider_command="нет-такой-команды")
         (brain / ".provider-health.json").write_text(json.dumps({
             "items": {"claude/sonnet": {"status": "unavailable", "reason": "не установлен",
                                         "checked_at": "2099-01-01T00:00:00Z"}},
         }), encoding="utf-8")
         assert validate_routing(brain) == []
 
-    def test_missing_config_is_an_error_when_roles_exist(self, tmp_path):
+    def test_missing_config_is_an_error_when_roles_exist(self, single_root):
         from brain_wiki.validators import validate_routing
 
-        (tmp_path / "roles").mkdir()
-        (tmp_path / "roles" / "developer.md").write_text("# developer\n", encoding="utf-8")
-        issues = validate_routing(tmp_path)
+        (single_root / "roles").mkdir()
+        (single_root / "roles" / "developer.md").write_text("# developer\n", encoding="utf-8")
+        issues = validate_routing(single_root)
         assert any(i.severity == "ERROR" and "нет файла маршрутизации" in i.message for i in issues)
 
 

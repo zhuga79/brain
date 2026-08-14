@@ -35,6 +35,11 @@ TMP_HOME=$(mktemp -d)
 export HOME="$TMP_HOME"
 export BRAIN_PATH="$HOME/brain"
 export PATH="$HOME/.local/bin:$PATH"
+# Песочница задаёт корни целиком, а не поверх шелла оператора. С унаследованным
+# BRAIN_SYSTEM_PATH setup-brain-v2.sh считает установку разделённой и не создаёт
+# $BRAIN/roles — бутстрап падал на первом же legacy-скрипте. BRAIN_ENV_FILE
+# увёл бы корни в файл оператора уже после подмены HOME.
+unset BRAIN_SYSTEM_PATH BRAIN_ENV_FILE
 # Признак песочницы для tests/lib/sandbox-guard.sh: кейс, запущенный в обход
 # раннера, увидит его отсутствие и откажется работать по боевым данным.
 export BRAIN_TEST_SANDBOX=1

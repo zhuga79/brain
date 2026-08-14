@@ -45,9 +45,17 @@ def _old_str(hours: int = 2) -> str:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def temp_brain(tmp_path: Path) -> Path:
-    """Create a minimal Brain directory tree."""
+def temp_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a minimal Brain directory tree.
+
+    Оба корня выставлены явно и совпадают — единый install. Пока
+    `BRAIN_SYSTEM_PATH` наследовался из шелла, `matrix_path` для этого пустого
+    дерева уходил в боевой чекаут, и проверки «конфигурации нет» падали только
+    у операторов с выставленной переменной.
+    """
     (tmp_path / "wiki").mkdir()
+    monkeypatch.setenv("BRAIN_PATH", str(tmp_path))
+    monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(tmp_path))
     return tmp_path
 
 
