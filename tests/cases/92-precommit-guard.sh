@@ -96,11 +96,11 @@ cat > "$BRAIN_PATH/tests/run.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "$BRAIN_PATH/tests/run.sh"
-cat > "$BRAIN_PATH/tests/python/test_fail.py" <<'EOF'
+cat > "$BRAIN_PATH/tests/python/test_fail_gate.py" <<'EOF'
 def test_fails():
     assert False
 EOF
-git add tests/run.sh tests/python/test_fail.py
+git add tests/run.sh tests/python/test_fail_gate.py
 
 set +e
 out="$(git commit -m "pytest fails" 2>&1)"
@@ -115,13 +115,16 @@ echo "OK: failing pytest blocks the commit"
 # Свежий клон не имеет именного списка; fail-closed в этой точке означал бы,
 # что коммитить нельзя вообще ничего.
 rm -f "$BRAIN_PATH/.publish-secrets.local"
-cat > "$BRAIN_PATH/tests/python/test_fail.py" <<'EOF'
+git rm --quiet --cached tests/python/test_fail_gate.py
+rm -f "$BRAIN_PATH/tests/python/test_fail_gate.py"
+rm -rf "$BRAIN_PATH/tests/python/__pycache__"
+cat > "$BRAIN_PATH/tests/python/test_pass_gate.py" <<'EOF'
 def test_passes():
     assert True
 EOF
 printf -- '---\ntitle: Ещё\ntype: concept\n---\n\nЕщё одна страница подсистемы.\n' \
     > "$BRAIN_PATH/wiki/proba-bez-spiska.md"
-git add tests/python/test_fail.py wiki/proba-bez-spiska.md
+git add tests/python/test_pass_gate.py wiki/proba-bez-spiska.md
 git commit --quiet -m "без списка секретов" || {
   echo "FAILED: без файла секретов хук заблокировал обычный коммит"
   exit 1
