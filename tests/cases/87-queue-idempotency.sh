@@ -33,6 +33,13 @@ set -e
 [ "$rc" -ne 0 ] || { echo "FAILED: чужой агент забрал заблокированную задачу"; exit 1; }
 echo "OK: чужой take отклонён"
 
+snapshot_dir="$(mktemp -d)"
+ALL_TMPDIRS+=("$snapshot_dir")
+cp "$BRAIN_PATH/tasks/active.md" "$snapshot_dir/active.before"
+cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.before"
+cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.before"
+cp "$BRAIN_PATH/.locks/$tid/owner" "$snapshot_dir/owner.before"
+
 # ── 4. release без владельца отклоняется ──
 set +e
 out="$(brain-task release "$tid" 2>&1)"
@@ -49,18 +56,59 @@ set -e
 grep -q "укажи владельца" <<< "$out" || { echo "FAILED: непонятная причина отказа: $out"; exit 1; }
 echo "OK: снятие лока требует владельца"
 
-# ── 5. Владелец снимает и повторяет ──
+# ── 5. Чужой release/block/complete не мутирует очередь и лок ──
+set +e
+out="$(brain-task release "$tid" --as intruder 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: чужой release прошёл"; exit 1; }
+grep -Eq "task owned by me, not intruder|lock owned by me, not intruder" <<< "$out" || {
+  echo "FAILED: release wrong-owner error unclear: $out"; exit 1;
+}
+cmp -s "$snapshot_dir/active.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: intruder release changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: intruder release changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: intruder release changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: intruder release changed lock owner"; exit 1; }
+
+set +e
+out="$(brain-task block "$tid" "need info" --as intruder 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: чужой block прошёл"; exit 1; }
+grep -Eq "task owned by me, not intruder|lock owned by me, not intruder" <<< "$out" || {
+  echo "FAILED: block wrong-owner error unclear: $out"; exit 1;
+}
+cmp -s "$snapshot_dir/active.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: intruder block changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: intruder block changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: intruder block changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: intruder block changed lock owner"; exit 1; }
+
+set +e
+out="$(brain-task complete "$tid" --as intruder --model evil-model 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: чужой complete прошёл"; exit 1; }
+grep -Eq "task owned by me, not intruder|lock owned by me, not intruder" <<< "$out" || {
+  echo "FAILED: complete wrong-owner error unclear: $out"; exit 1;
+}
+cmp -s "$snapshot_dir/active.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: intruder complete changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: intruder complete changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: intruder complete changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: intruder complete changed lock owner"; exit 1; }
+echo "OK: wrong owner cannot mutate queue or lock"
+
+# ── 6. Владелец снимает и повторяет ──
 brain-task release "$tid" --as me >/dev/null || { echo "FAILED: release владельцем"; exit 1; }
 brain-task release "$tid" --as me >/dev/null || { echo "FAILED: повторный release"; exit 1; }
 echo "OK: release идемпотентен"
 
-# ── 6. --force снимает чужой лок явно ──
+# ── 7. --force снимает чужой лок явно ──
 brain-lock acquire "$tid" --as someone-else >/dev/null
 brain-lock release "$tid" --force >/dev/null || { echo "FAILED: --force не сработал"; exit 1; }
 [ "$(brain-lock status "$tid")" = "free" ] || { echo "FAILED: лок остался после --force"; exit 1; }
 echo "OK: --force снимает чужой лок явно"
 
-# ── 7. complete без --as не закрывает задачу ──
+# ── 8. complete без --as не закрывает задачу ──
 brain-task take "$tid" --as me >/dev/null
 set +e
 out="$(brain-task complete "$tid" 2>&1)"
@@ -71,11 +119,39 @@ grep -q "укажи исполнителя" <<< "$out" || { echo "FAILED: неп
 grep -q "$tid" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: задача закрыта без владельца"; exit 1; }
 echo "OK: complete требует владельца"
 
+# ── 9. stale lock blocks mutation until explicitly renewed ──
+python3 - "$BRAIN_PATH/.locks/$tid/owner" <<'PY'
+from pathlib import Path
+import time
+import sys
+path = Path(sys.argv[1])
+owner, _ts, ttl = path.read_text(encoding="utf-8").strip().split("|")
+path.write_text(f"{owner}|{int(time.time())-1000}|{ttl}\n", encoding="utf-8")
+PY
+cp "$BRAIN_PATH/tasks/active.md" "$snapshot_dir/active.stale.before"
+cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.stale.before"
+cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.stale.before"
+cp "$BRAIN_PATH/.locks/$tid/owner" "$snapshot_dir/owner.stale.before"
+set +e
+out="$(BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid" --as me 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: complete with stale lock passed"; exit 1; }
+grep -q "task lock is stale" <<< "$out" || { echo "FAILED: stale lock error unclear: $out"; exit 1; }
+cmp -s "$snapshot_dir/active.stale.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: stale-lock complete changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.stale.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: stale-lock complete changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.stale.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: stale-lock complete changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.stale.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: stale-lock complete changed owner"; exit 1; }
+brain-lock acquire "$tid" --as me --ttl 600 >/dev/null || { echo "FAILED: renew stale lock"; exit 1; }
+echo "OK: stale lock blocks mutation until renewed"
+
+cp "$BRAIN_PATH/.locks/$tid/owner" "$snapshot_dir/owner.renewed.before"
 BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid" --as me >/dev/null || {
   echo "FAILED: complete владельцем"
   exit 1
 }
 grep -q "$tid" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: задача не попала в done"; exit 1; }
+[ ! -e "$BRAIN_PATH/.locks/$tid/owner" ] || { echo "FAILED: lock remained after owner complete"; exit 1; }
 echo "OK: задача закрыта владельцем"
 
 echo ">>> queue idempotency checks passed"

@@ -25,7 +25,7 @@ brain-task — управление очередью задач
   brain-task take <id> --as <agent-id>     лок + пометить [~]
   brain-task release <id> --as <agent-id>  снять лок + вернуть [ ]
   brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
-  brain-task block <id> "reason"      пометить [!] с причиной
+  brain-task block <id> "reason" [--as <agent-id>]  пометить [!] с причиной
   brain-task log [N]                  последние N (default 30) записей лога
   brain-task webhook-replay           переотправить все записи из dead-letter.jsonl
 USAGE
@@ -171,8 +171,8 @@ case "$cmd" in
       echo "  без него команда сняла бы и чужой лок" >&2
       exit 2
     fi
-    brain-lock release "$id" --as "$agent" >/dev/null || true
-    _py brain_core.taskfile release "$A" "$id" || true
+    _py brain_core.taskfile release "$A" "$id" "$agent" || exit 1
+    brain-lock release "$id" --as "$agent" >/dev/null || exit 1
     log_op "task-release" "$id" "${agent:-}" ""
     git_commit "task-release: $id"
     _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
@@ -222,13 +222,20 @@ case "$cmd" in
     ;;
 
   block)
-    id="${1:-}"; reason="${2:-}"
-    [ -z "$id" ] || [ -z "$reason" ] && { echo 'brain-task block <id> "reason"'; exit 1; }
+    id="${1:-}"; shift || true
+    reason=""; agent=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --as) agent="$2"; shift 2;;
+        *) [ -z "$reason" ] && reason="$1"; shift;;
+      esac
+    done
+    [ -z "$id" ] || [ -z "$reason" ] && { echo 'brain-task block <id> "reason" [--as <agent-id>]'; exit 1; }
     _validate_id "$id"
     # Идентификатор экранируется через re.escape в модуле: sed здесь был бы
     # уязвим к метасимволам в id, даже при валидации выше.
-    _py brain_core.taskfile block "$A" "$id" || exit 1
-    log_op "task-block" "$id" "" "$reason"
+    _py brain_core.taskfile block "$A" "$id" "${agent:-}" || exit 1
+    log_op "task-block" "$id" "${agent:-}" "$reason"
     git_commit "task-block: $id ($reason)"
     _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
     echo "blocked: $id ($reason)"

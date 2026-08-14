@@ -18,6 +18,7 @@ os.replace подставляет новый inode, так что блокиро
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from brain_core import atomic, grammar
@@ -42,6 +43,51 @@ def atomic_write(path: Path, text: str) -> None:
 
 def _read(path: Path) -> str:
     return atomic.read_text(path)
+
+
+def _lock_owner_path(active: Path, tid: str) -> Path:
+    return active.parent.parent / ".locks" / tid / "owner"
+
+
+def _parse_lock_owner(raw: str) -> tuple[str, int, int]:
+    parts = raw.strip().split("|")
+    if len(parts) != 3:
+        raise TaskError("invalid lock owner format")
+    owner, started, ttl = parts
+    try:
+        return owner, int(started), int(ttl)
+    except ValueError as exc:
+        raise TaskError("invalid lock owner format") from exc
+
+
+def _extract_owner(body: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("by:"):
+            return stripped.split(":", 1)[1].strip()
+    return ""
+
+
+def _ensure_in_progress_owner(active: Path, tid: str, body: str, agent: str | None) -> None:
+    owner = _extract_owner(body)
+    if not owner:
+        raise TaskError(f"task owner missing: {tid}")
+    if not agent:
+        raise TaskError(f"task owner required: {tid}")
+    if owner != agent:
+        raise TaskError(f"task owned by {owner}, not {agent}")
+
+    owner_file = _lock_owner_path(active, tid)
+    if not owner_file.is_file():
+        # Исторические прямые вызовы brain_app.queue.take/complete не создают
+        # lock-файл. Там всё ещё есть смысл сверить `by:` до записи, а строгую
+        # проверку owner/stale выполнять только когда lock реально присутствует.
+        return
+    lock_owner, started, ttl = _parse_lock_owner(_read(owner_file))
+    if lock_owner != agent:
+        raise TaskError(f"lock owned by {lock_owner}, not {agent}")
+    if int(time.time()) - started > ttl:
+        raise TaskError(f"task lock is stale: {tid}")
 
 
 def _pattern(tid: str, state: str) -> re.Pattern:
@@ -87,12 +133,13 @@ def take(active: Path, tid: str, agent: str) -> None:
         atomic_write(active, pat.sub(repl, txt, count=1))
 
 
-def release(active: Path, tid: str) -> None:
+def release(active: Path, tid: str, agent: str | None = None) -> None:
     """Вернуть задачу в очередь: [~] → [ ], снять started/by."""
     with queue_lock(active.parent):
         txt = _read(active)
         pat = _pattern(tid, "~")
-        if not pat.search(txt):
+        match = pat.search(txt)
+        if not match:
             # Задача уже в очереди — значит, освобождать нечего. Повторный
             # release не должен падать: агент, потерявший связь, повторяет
             # команду, и отказ здесь выглядел бы как невозможность отпустить
@@ -100,6 +147,7 @@ def release(active: Path, tid: str) -> None:
             if _pattern(tid, " ").search(txt):
                 return
             raise TaskError(f"task not in progress: {tid}")
+        _ensure_in_progress_owner(active, tid, match.group(3), agent)
 
         def repl(m: re.Match) -> str:
             body = "".join(
@@ -111,7 +159,7 @@ def release(active: Path, tid: str) -> None:
         atomic_write(active, pat.sub(repl, txt, count=1))
 
 
-def block(active: Path, tid: str) -> None:
+def block(active: Path, tid: str, agent: str | None = None) -> None:
     """Пометить задачу заблокированной: [ ]/[~] → [!].
 
     Причина в файл не пишется — она уходит в журнал и в сообщение коммита.
@@ -120,8 +168,12 @@ def block(active: Path, tid: str) -> None:
     with queue_lock(active.parent):
         txt = _read(active)
         pat = _pattern(tid, "[ ~]")
-        if not pat.search(txt):
+        match = pat.search(txt)
+        if not match:
             raise TaskError(f"task not found or not open/in-progress: {tid}")
+        head = grammar.parse_head(match.group(0).splitlines()[0])
+        if head and head.state == "~":
+            _ensure_in_progress_owner(active, tid, match.group(3), agent)
 
         def repl(m: re.Match) -> str:
             return m.group(1) + "!]" + m.group(2) + m.group(3)
@@ -141,6 +193,9 @@ def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None
         m = pat.search(txt)
         if not m:
             raise TaskError(f"task not found: {tid}")
+        head = grammar.parse_head(m.group(0).splitlines()[0])
+        if head and head.state == "~":
+            _ensure_in_progress_owner(active, tid, m.group(3), agent)
 
         ts = utc_now()
         machine = "".join(
@@ -182,9 +237,9 @@ def _main(argv: list[str]) -> int:
         elif op == "take":
             take(Path(rest[0]), rest[1], rest[2])
         elif op == "release":
-            release(Path(rest[0]), rest[1])
+            release(Path(rest[0]), rest[1], rest[2] if len(rest) > 2 else None)
         elif op == "block":
-            block(Path(rest[0]), rest[1])
+            block(Path(rest[0]), rest[1], rest[2] if len(rest) > 2 else None)
         elif op == "complete":
             complete(Path(rest[0]), Path(rest[1]), rest[2], rest[3], rest[4])
         else:
