@@ -4,7 +4,22 @@ import time
 import shutil
 from common import mcp, BRAIN, ACTIVE, DONE, LOCKS, append_log, git_commit, ts, find_task_block, parse_block
 import brain_task_parser
+from brain_app import queue
 from result import ok, error
+
+
+def _require_agent_id(agent_id: str) -> str | None:
+    cleaned = str(agent_id or "").strip()
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _require_model(model: str) -> str | None:
+    cleaned = str(model or "").strip()
+    if not cleaned or cleaned == "unsigned":
+        return None
+    return cleaned
 
 @mcp.tool()
 def acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
@@ -137,18 +152,17 @@ def cleanup_locks() -> dict:
 def take_task(task_id: str, agent_id: str, ttl: int = 600) -> dict:
     """Acquire lock and mark task in-progress.
     Returns error if already locked by someone else."""
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("agent_id required")
     lock_result = acquire_lock(task_id, agent_id, ttl)
     if lock_result.get("status") != "ok":
         return lock_result
-    text = ACTIVE.read_text()
-    pat = re.compile(rf"^(- \[) \](\s*\[\w+\]\s*{re.escape(task_id)} —.*?)(\n(?:      .*\n)*)", re.M)
-    m = pat.search(text)
-    if not m:
-        release_lock(task_id, agent_id)
-        return error(f"task {task_id} not found in active.md")
-    new_block = m.group(1) + "~]" + m.group(2) + m.group(3) + \
-                f"      started: {ts()}\n      by: {agent_id}\n"
-    ACTIVE.write_text(pat.sub(lambda mm: new_block, text, count=1))
+    try:
+        queue.take(task_id, agent, BRAIN)
+    except Exception as exc:
+        release_lock(task_id, agent)
+        return error(str(exc) or f"task {task_id} not found in active.md")
     append_log("task-start", task_id, agent_id)
     git_commit(f"task-start: {task_id} by {agent_id}")
     return ok(id=task_id, owner=agent_id)
@@ -156,43 +170,36 @@ def take_task(task_id: str, agent_id: str, ttl: int = 600) -> dict:
 @mcp.tool()
 def release_task(task_id: str, agent_id: str = "") -> dict:
     """Mark in-progress task as open again, release lock."""
-    if agent_id:
-        release_lock(task_id, agent_id)
-    text = ACTIVE.read_text()
-    pat = re.compile(rf"^(- \[)~\](\s*\[\w+\]\s*{re.escape(task_id)} —.*?\n)((?:      .*\n)*)", re.M)
-    def repl(m):
-        head = m.group(1) + " ]" + m.group(2)
-        body = "".join(l for l in m.group(3).splitlines(keepends=True)
-                       if not (l.lstrip().startswith("started:") or l.lstrip().startswith("by:")))
-        return head + body
-    new_text = pat.sub(repl, text, count=1)
-    if new_text == text:
-        return error("task not in-progress or not found")
-    ACTIVE.write_text(new_text)
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("agent_id required")
+    try:
+        queue.release(task_id, BRAIN, agent=agent)
+    except Exception as exc:
+        return error(str(exc) or "task not in-progress or not found")
+    lock_result = release_lock(task_id, agent)
+    if lock_result.get("status") == "error":
+        return lock_result
     append_log("task-release", task_id, agent_id)
     git_commit(f"task-release: {task_id}")
     return ok()
 
 @mcp.tool()
-def complete_task(task_id: str, agent_id: str = "", summary: str = "") -> dict:
+def complete_task(task_id: str, agent_id: str = "", model: str = "", summary: str = "") -> dict:
     """Mark task done, move to done.md, release lock."""
-    text = ACTIVE.read_text()
-    pat = re.compile(rf"^(- \[)[~ x]\](\s*\[\w+\]\s*{re.escape(task_id)} —.*?\n)((?:      .*\n)*)", re.M)
-    m = pat.search(text)
-    if not m:
-        return error("task not found")
-    block = "- [x]" + m.group(2) + m.group(3) + f"      completed: {ts()}\n"
-    if summary:
-        block += f"      summary: {summary}\n"
-    new_a = re.sub(r"\n{3,}", "\n\n", pat.sub("", text, count=1))
-    ACTIVE.write_text(new_a)
-    if not DONE.exists():
-        DONE.write_text("# Done tasks\n\n")
-    dtxt = DONE.read_text()
-    parts = dtxt.split("\n", 3)
-    DONE.write_text("\n".join(parts[:2]) + "\n\n" + block + "\n" + (parts[3] if len(parts) > 3 else ""))
-    if agent_id:
-        release_lock(task_id, agent_id)
+    agent = _require_agent_id(agent_id)
+    if not agent:
+        return error("agent_id required")
+    real_model = _require_model(model)
+    if not real_model:
+        return error("real model required")
+    try:
+        queue.complete(task_id, agent, real_model, BRAIN)
+    except Exception as exc:
+        return error(str(exc) or "task not found")
+    lock_result = release_lock(task_id, agent)
+    if lock_result.get("status") == "error":
+        return lock_result
     append_log("task-done", task_id, agent_id, summary)
     try:
         import brain_webhook as _bwh

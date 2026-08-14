@@ -132,7 +132,7 @@ def test_block_task(tt):
     t, tmp, common = tt
     (tmp / "tasks" / "active.md").write_text("- [ ] [P1] t1 — T1\n")
 
-    res = t.block_task("t1", "need info")
+    res = t.block_task("t1", "need info", agent_id="agent-1")
     assert res["status"] == "ok"
     assert "- [!] [P1] t1 — T1" in (tmp / "tasks" / "active.md").read_text()
 
@@ -140,7 +140,7 @@ def test_block_task(tt):
 def test_block_task_missing(tt):
     t, tmp, common = tt
     (tmp / "tasks" / "active.md").write_text("# Active tasks\n")
-    assert "error" in t.block_task("t-nope", "reason")
+    assert "error" in t.block_task("t-nope", "reason", agent_id="agent-1")
 
 
 def test_get_task_deps(tt):

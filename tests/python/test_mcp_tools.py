@@ -106,8 +106,8 @@ def test_add_task(mock_brain):
 def test_block_task(mock_brain):
     brain, common, tools_tasks, tools_wiki = mock_brain
     common.ACTIVE.write_text("- [ ] [P1] t1 — Test\n")
-    assert tools_tasks.block_task("t1", "x")["status"] == "ok"
-    assert "error" in tools_tasks.block_task("missing", "x")
+    assert tools_tasks.block_task("t1", "x", agent_id="agent-1")["status"] == "ok"
+    assert "error" in tools_tasks.block_task("missing", "x", agent_id="agent-1")
 
 def test_wiki_tools(mock_brain):
     brain, common, tools_tasks, tools_wiki = mock_brain

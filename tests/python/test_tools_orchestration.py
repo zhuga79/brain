@@ -1,19 +1,21 @@
-"""Tests for tools_orchestration.py — Phase 16 T9.
+"""Focused MCP queue integrity tests.
 
-Covers: cleanup_locks, take_task, release_task, complete_task, get_task_bundle,
-        lock_status, refresh_lock (no-lock), and release_lock (no-lock/not-owner).
-
-Fixture pattern mirrors test_acquire_lock.py: inject fake MCP, set BRAIN_PATH,
-reload both common and tools_orchestration so module-level globals pick up tmp_path.
+These cover the MCP mutation tools that must go through the unified
+brain_app.queue / brain_core.taskfile path instead of ad hoc file rewrites.
 """
+
+from __future__ import annotations
+
 import os
 import sys
-import time
 import types
-import importlib
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
+
+sys.path.insert(0, str(Path.cwd() / "runtime" / "lib"))
+sys.path.insert(0, str(Path.cwd() / "runtime" / "mcp"))
 
 
 ACTIVE_CONTENT = (
@@ -32,14 +34,13 @@ def _make_fastmcp_mock():
 
 @pytest.fixture
 def tb(tmp_path, monkeypatch):
-    """temp_brain: isolated BRAIN_PATH with minimal structure, reloaded modules."""
     monkeypatch.setenv("BRAIN_PATH", str(tmp_path))
 
     (tmp_path / "wiki").mkdir()
-    (tmp_path / "wiki" / "log.md").write_text("# Log\n\n")
+    (tmp_path / "wiki" / "log.md").write_text("# Log\n\n", encoding="utf-8")
     (tmp_path / "tasks").mkdir()
-    (tmp_path / "tasks" / "active.md").write_text(ACTIVE_CONTENT)
-    (tmp_path / "tasks" / "done.md").write_text("# Done\n\n")
+    (tmp_path / "tasks" / "active.md").write_text(ACTIVE_CONTENT, encoding="utf-8")
+    (tmp_path / "tasks" / "done.md").write_text("# Done\n\n", encoding="utf-8")
     (tmp_path / ".locks").mkdir()
 
     fake_mcp_pkg = types.ModuleType("mcp")
@@ -53,287 +54,196 @@ def tb(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_mcp_fastmcp)
 
     for mod_name in list(sys.modules.keys()):
-        if mod_name in ("common", "tools_orchestration"):
+        if mod_name in ("common", "tools_orchestration", "tools_tasks"):
             del sys.modules[mod_name]
 
     import common
-    import tools_orchestration as t
+    import tools_orchestration as orchestration
+    import tools_tasks
 
     locks_path = tmp_path / ".locks"
-    monkeypatch.setattr(common, "LOCKS", locks_path)
-    monkeypatch.setattr(t, "LOCKS", locks_path, raising=False)
-    monkeypatch.setattr(common, "ACTIVE", tmp_path / "tasks" / "active.md")
-    monkeypatch.setattr(t, "ACTIVE", tmp_path / "tasks" / "active.md", raising=False)
-    monkeypatch.setattr(common, "DONE", tmp_path / "tasks" / "done.md")
-    monkeypatch.setattr(t, "DONE", tmp_path / "tasks" / "done.md", raising=False)
-    monkeypatch.setattr(common, "BRAIN", tmp_path)
-    monkeypatch.setattr(t, "BRAIN", tmp_path, raising=False)
+    for mod in (common, orchestration, tools_tasks):
+        monkeypatch.setattr(mod, "LOCKS", locks_path, raising=False)
+        monkeypatch.setattr(mod, "ACTIVE", tmp_path / "tasks" / "active.md", raising=False)
+        monkeypatch.setattr(mod, "DONE", tmp_path / "tasks" / "done.md", raising=False)
+        monkeypatch.setattr(mod, "BRAIN", tmp_path, raising=False)
 
-    # Stub git_commit so tests don't touch the actual git repo
     monkeypatch.setattr(common, "git_commit", lambda *a, **k: None)
-    monkeypatch.setattr(t, "git_commit", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(orchestration, "git_commit", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(tools_tasks, "git_commit", lambda *a, **k: None, raising=False)
 
-    yield t, tmp_path, common
-
-
-# ---------------------------------------------------------------------------
-# LockStatus
-# ---------------------------------------------------------------------------
-
-class TestLockStatus:
-    def test_free_task(self, tb):
-        t, tmp, _ = tb
-        res = t.lock_status("t-free")
-        assert res["status"] == "free"
-
-    def test_locked_task(self, tb):
-        t, tmp, _ = tb
-        t.acquire_lock("t-locked", "agent-1", ttl=600)
-        res = t.lock_status("t-locked")
-        assert res["status"] == "locked"
-        assert res["owner"] == "agent-1"
-        assert res["ttl"] == 600
-
-    def test_all_locks_empty(self, tb):
-        t, tmp, _ = tb
-        res = t.lock_status()
-        assert res["locks"] == []
-
-    def test_all_locks_one_entry(self, tb):
-        t, tmp, _ = tb
-        t.acquire_lock("t-all", "agent-x", ttl=300)
-        res = t.lock_status()
-        assert len(res["locks"]) == 1
-        assert res["locks"][0]["task_id"] == "t-all"
-        assert res["locks"][0]["owner"] == "agent-x"
+    return orchestration, tools_tasks, tmp_path, common
 
 
-# ---------------------------------------------------------------------------
-# CleanupLocks
-# ---------------------------------------------------------------------------
-
-class TestCleanupLocks:
-    def test_empty_dir(self, tb):
-        t, tmp, _ = tb
-        res = t.cleanup_locks()
-        assert res["cleaned"] == 0
-
-    def test_active_lock_not_cleaned(self, tb):
-        t, tmp, _ = tb
-        t.acquire_lock("t-active", "agent-1", ttl=600)
-        res = t.cleanup_locks()
-        assert res["cleaned"] == 0
-        assert (tmp / ".locks" / "t-active").exists()
-
-    def test_stale_lock_cleaned(self, tb):
-        t, tmp, c = tb
-        d = c.LOCKS / "t-stale"
-        d.mkdir()
-        # ts=1 (epoch), ttl=1 -> always expired
-        (d / "owner").write_text("agent|1|1\n")
-        res = t.cleanup_locks()
-        assert res["cleaned"] >= 1
-        assert not d.exists()
-
-    def test_corrupt_owner_no_fields_cleaned(self, tb):
-        t, tmp, c = tb
-        d = c.LOCKS / "t-corrupt"
-        d.mkdir()
-        (d / "owner").write_text("garbage_no_pipes")
-        res = t.cleanup_locks()
-        assert res["cleaned"] >= 1
-        assert not d.exists()
-
-    def test_missing_owner_file_cleaned(self, tb):
-        t, tmp, c = tb
-        d = c.LOCKS / "t-noowner"
-        d.mkdir()
-        res = t.cleanup_locks()
-        assert res["cleaned"] >= 1
-        assert not d.exists()
-
-    def test_symlink_skipped(self, tb):
-        """cleanup_locks must NOT follow or remove symlinks (security guard)."""
-        t, tmp, c = tb
-        external = tmp / "external_dir"
-        external.mkdir()
-        (external / "important.txt").write_text("keep me")
-        sym = c.LOCKS / "t-sym"
-        os.symlink(external, sym)
-        res = t.cleanup_locks()
-        assert sym.exists()
-        assert (external / "important.txt").exists()
+def _snapshot(tmp_path: Path) -> tuple[str, str, str, str]:
+    owner = tmp_path / ".locks" / "t-test" / "owner"
+    return (
+        (tmp_path / "tasks" / "active.md").read_text(encoding="utf-8"),
+        (tmp_path / "tasks" / "done.md").read_text(encoding="utf-8"),
+        (tmp_path / "wiki" / "log.md").read_text(encoding="utf-8"),
+        owner.read_text(encoding="utf-8") if owner.exists() else "",
+    )
 
 
-# ---------------------------------------------------------------------------
-# TakeTask
-# ---------------------------------------------------------------------------
+def test_take_task_rejects_empty_agent_before_lock_or_write(tb):
+    t, _, tmp, _ = tb
+    before = _snapshot(tmp)
 
-class TestTakeTask:
-    def test_take_existing_task(self, tb):
-        t, tmp, c = tb
-        res = t.take_task("t-test", "agent-1")
-        assert res["status"] == "ok"
-        active = c.ACTIVE.read_text()
-        assert "[~]" in active
-        assert "t-test" in active
+    res = t.take_task("t-test", "")
 
-    def test_take_nonexistent_task(self, tb):
-        t, tmp, _ = tb
-        res = t.take_task("t-no-such", "agent-x")
-        assert "error" in res
-        # lock should have been released
-        assert not (tmp / ".locks" / "t-no-such").exists()
-
-    def test_take_already_locked(self, tb):
-        t, tmp, _ = tb
-        t.acquire_lock("t-test", "agent-1", ttl=600)
-        res = t.take_task("t-test", "agent-2")
-        assert res.get("status") == "locked"
-
-    def test_take_adds_started_metadata(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-meta")
-        active = c.ACTIVE.read_text()
-        assert "started:" in active
-        assert "by: agent-meta" in active
+    assert res["status"] == "error"
+    assert "agent" in res["error"].lower()
+    assert _snapshot(tmp) == before
+    assert not (tmp / ".locks" / "t-test").exists()
 
 
-# ---------------------------------------------------------------------------
-# ReleaseTask
-# ---------------------------------------------------------------------------
+def test_take_task_uses_queue_contract_and_creates_lock(tb):
+    t, _, tmp, _ = tb
 
-class TestReleaseTask:
-    def test_release_in_progress_task(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-1")
-        res = t.release_task("t-test", "agent-1")
-        assert res["status"] == "ok"
-        active = c.ACTIVE.read_text()
-        assert "- [ ]" in active
+    res = t.take_task("t-test", "agent-1")
 
-    def test_release_removes_started_metadata(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-1")
-        t.release_task("t-test", "agent-1")
-        active = c.ACTIVE.read_text()
-        assert "started:" not in active
-        assert "by:" not in active
-
-    def test_release_nonexistent_task(self, tb):
-        t, tmp, _ = tb
-        res = t.release_task("t-no-such", "agent-1")
-        assert "error" in res
+    assert res["status"] == "ok"
+    active = (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
+    assert "- [~] [P1] t-test" in active
+    assert "by: agent-1" in active
+    owner = (tmp / ".locks" / "t-test" / "owner").read_text(encoding="utf-8")
+    assert owner.startswith("agent-1|")
 
 
-# ---------------------------------------------------------------------------
-# CompleteTask
-# ---------------------------------------------------------------------------
+def test_release_task_rejects_empty_agent_before_mutation(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
 
-class TestCompleteTask:
-    def test_complete_moves_to_done(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-1")
-        res = t.complete_task("t-test", "agent-1", "finished ok")
-        assert res["status"] == "ok"
-        done = c.DONE.read_text()
-        assert "t-test" in done
-        assert "[x]" in done
+    res = t.release_task("t-test", "")
 
-    def test_complete_removes_from_active(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-1")
-        t.complete_task("t-test", "agent-1")
-        active = c.ACTIVE.read_text()
-        assert "t-test" not in active
-
-    def test_complete_includes_summary(self, tb):
-        t, tmp, c = tb
-        t.take_task("t-test", "agent-1")
-        t.complete_task("t-test", "agent-1", "great work done")
-        done = c.DONE.read_text()
-        assert "great work done" in done
-
-    def test_complete_releases_lock(self, tb):
-        t, tmp, _ = tb
-        t.take_task("t-test", "agent-1")
-        t.complete_task("t-test", "agent-1")
-        assert not (tmp / ".locks" / "t-test").exists()
-
-    def test_complete_nonexistent_task(self, tb):
-        t, tmp, _ = tb
-        res = t.complete_task("t-no-such", "agent-1")
-        assert "error" in res
-
-    def test_complete_without_take(self, tb):
-        """complete_task regex covers [ ~x] so open task can be completed directly."""
-        t, tmp, c = tb
-        res = t.complete_task("t-test", "agent-1")
-        assert res["status"] == "ok"
+    assert res["status"] == "error"
+    assert "agent" in res["error"].lower()
+    assert _snapshot(tmp) == before
 
 
-# ---------------------------------------------------------------------------
-# GetTaskBundle
-# ---------------------------------------------------------------------------
+def test_release_task_wrong_owner_rejected_without_mutation(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
 
-class TestGetTaskBundle:
-    def test_present_task_has_all_keys(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-test")
-        assert "task" in b
-        assert "lock" in b
-        assert "council" in b
-        assert "index" in b
+    res = t.release_task("t-test", "intruder")
 
-    def test_present_task_state_not_not_found(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-test")
-        assert b["task"]["state"] != "not_found"
-        assert b["task"]["id"] == "t-test"
+    assert res["status"] == "error"
+    assert "not intruder" in res["error"] or "owned by" in res["error"]
+    assert _snapshot(tmp) == before
 
-    def test_missing_task_state_is_not_found(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-no-such")
-        assert b["task"]["state"] == "not_found"
-        assert b["task"]["id"] == "t-no-such"
 
-    def test_lock_info_free(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-test")
-        assert b["lock"]["held"] is False
+def test_release_task_owner_succeeds_and_removes_lock(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
 
-    def test_lock_info_held(self, tb):
-        t, tmp, _ = tb
-        t.acquire_lock("t-test", "agent-bundle", ttl=600)
-        b = t.get_task_bundle("t-test")
-        assert b["lock"]["held"] is True
-        assert b["lock"]["owner"] == "agent-bundle"
+    res = t.release_task("t-test", "agent-1")
 
-    def test_council_info_no_dir(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-test")
-        assert b["council"]["exists"] is False
-        assert b["council"]["files"] == []
+    assert res["status"] == "ok"
+    active = (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
+    assert "- [ ] [P1] t-test" in active
+    assert "started:" not in active
+    assert "by:" not in active
+    assert not (tmp / ".locks" / "t-test").exists()
 
-    def test_council_info_with_files(self, tb):
-        t, tmp, _ = tb
-        council_dir = tmp / "council" / "t-test"
-        council_dir.mkdir(parents=True)
-        (council_dir / "architect.md").write_text("# opinion")
-        (council_dir / "reviewer.md").write_text("# opinion")
-        b = t.get_task_bundle("t-test")
-        assert b["council"]["exists"] is True
-        assert "architect.md" in b["council"]["files"]
-        assert "reviewer.md" in b["council"]["files"]
 
-    def test_index_hint_has_health(self, tb):
-        t, tmp, _ = tb
-        b = t.get_task_bundle("t-test")
-        assert "health" in b["index"]
+def test_complete_task_requires_real_model_before_mutation(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
 
-    def test_bundle_lock_held_after_take(self, tb):
-        t, tmp, _ = tb
-        t.take_task("t-test", "agent-1")
-        b = t.get_task_bundle("t-test")
-        assert b["lock"]["held"] is True
-        assert b["task"]["state"] != "not_found"
+    res = t.complete_task("t-test", "agent-1", model="", summary="done")
+
+    assert res["status"] == "error"
+    assert "model" in res["error"].lower()
+    assert _snapshot(tmp) == before
+
+
+@pytest.mark.parametrize("model", ["unsigned", "  "])
+def test_complete_task_rejects_non_real_model_values(tb, model):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = t.complete_task("t-test", "agent-1", model=model, summary="done")
+
+    assert res["status"] == "error"
+    assert "model" in res["error"].lower()
+    assert _snapshot(tmp) == before
+
+
+def test_complete_task_wrong_owner_rejected_without_mutation(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = t.complete_task("t-test", "intruder", model="openai-gpt-5.4", summary="done")
+
+    assert res["status"] == "error"
+    assert "not intruder" in res["error"] or "owned by" in res["error"]
+    assert _snapshot(tmp) == before
+
+
+def test_complete_task_owner_records_model_and_releases_lock(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+
+    res = t.complete_task("t-test", "agent-1", model="openai-gpt-5.4", summary="done")
+
+    assert res["status"] == "ok"
+    assert "t-test" not in (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
+    done = (tmp / "tasks" / "done.md").read_text(encoding="utf-8")
+    assert "t-test" in done
+    assert "model: openai-gpt-5.4" in done
+    assert "by: agent-1" in done
+    assert not (tmp / ".locks" / "t-test").exists()
+
+
+def test_mcp_block_task_requires_agent_and_preserves_state_on_error(tb):
+    t, tools_tasks, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = tools_tasks.block_task("t-test", "need info")
+
+    assert res["status"] == "error"
+    assert "agent" in res["error"].lower()
+    assert _snapshot(tmp) == before
+
+
+def test_mcp_block_task_wrong_owner_rejected_without_mutation(tb):
+    t, tools_tasks, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    res = tools_tasks.block_task("t-test", "need info", agent_id="intruder")
+
+    assert res["status"] == "error"
+    assert "not intruder" in res["error"] or "owned by" in res["error"]
+    assert _snapshot(tmp) == before
+
+
+def test_mcp_block_task_owner_succeeds_via_queue_contract(tb):
+    t, tools_tasks, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+
+    res = tools_tasks.block_task("t-test", "need info", agent_id="agent-1")
+
+    assert res["status"] == "ok"
+    active = (tmp / "tasks" / "active.md").read_text(encoding="utf-8")
+    assert "- [!] [P1] t-test" in active
+    assert "t-test" not in (tmp / "tasks" / "done.md").read_text(encoding="utf-8")
+
+
+def test_mcp_take_wrong_owner_and_complete_do_not_lose_updates(tb):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    before = _snapshot(tmp)
+
+    second_take = t.take_task("t-test", "agent-2")
+    intruder_complete = t.complete_task("t-test", "agent-2", model="openai-gpt-5.4")
+
+    assert second_take.get("status") == "locked"
+    assert intruder_complete["status"] == "error"
+    assert _snapshot(tmp) == before

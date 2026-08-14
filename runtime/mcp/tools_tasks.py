@@ -65,13 +65,16 @@ def add_task(text: str, role: str = "developer", mode: str = "solo",
 
 
 @mcp.tool()
-def block_task(task_id: str, reason: str) -> dict:
+def block_task(task_id: str, reason: str, agent_id: str = "") -> dict:
     """Mark task as blocked with reason."""
+    agent = str(agent_id or "").strip()
+    if not agent:
+        return error("agent_id required")
     try:
-        queue.block(task_id, BRAIN)
+        queue.block(task_id, BRAIN, agent=agent)
     except Exception as exc:
         return error(str(exc) or "task not found")
-    append_log("task-block", task_id, "", reason)
+    append_log("task-block", task_id, agent, reason)
     git_commit(f"task-block: {task_id} ({reason})")
     return ok()
 

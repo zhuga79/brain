@@ -207,19 +207,30 @@ def add(
 
 
 def take(task_id: str, agent: str, brain: Path | None = None) -> None:
+    if not str(agent).strip():
+        raise ValueError("agent_id required")
     taskfile.take(paths.active_file(brain), task_id, agent)
 
 
-def release(task_id: str, brain: Path | None = None) -> None:
-    taskfile.release(paths.active_file(brain), task_id)
+def release(task_id: str, brain: Path | None = None, *, agent: str | None = None) -> None:
+    if agent is not None and not str(agent).strip():
+        raise ValueError("agent_id required")
+    taskfile.release(paths.active_file(brain), task_id, agent)
 
 
-def block(task_id: str, brain: Path | None = None) -> None:
-    taskfile.block(paths.active_file(brain), task_id)
+def block(task_id: str, brain: Path | None = None, *, agent: str | None = None) -> None:
+    if agent is not None and not str(agent).strip():
+        raise ValueError("agent_id required")
+    taskfile.block(paths.active_file(brain), task_id, agent)
 
 
 def complete(task_id: str, agent: str, model: str, brain: Path | None = None) -> None:
-    taskfile.complete(paths.active_file(brain), paths.done_file(brain), task_id, agent, model)
+    if not str(agent).strip():
+        raise ValueError("agent_id required")
+    clean_model = str(model).strip()
+    if not clean_model or clean_model == "unsigned":
+        raise ValueError("real model required")
+    taskfile.complete(paths.active_file(brain), paths.done_file(brain), task_id, agent, clean_model)
 
 
 # ── CLI: именованный интерфейс для bash-фасада ───────────────────────────────
