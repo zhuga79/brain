@@ -95,6 +95,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+IGNORED_RUNTIME_BIN = {
+    "launch-dashboard.sh": "wrapper-or-generated",
+}
+
+# Reverse-scan exceptions must stay narrow: only justified generated/managed
+# installed brain-* entrypoints belong here.
+IGNORED_INSTALLED_BRAIN_EXTRAS: dict[str, str] = {}
+
+
 def detect_cli_parity(brain: Path) -> dict[str, Any]:
     system = brain_system_path(brain=brain)
     runtime_bin = system / "runtime" / "bin"
@@ -102,6 +111,7 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
     ignored: list[dict[str, str]] = []
     mismatches: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
+    extras: list[dict[str, str]] = []
     matched = 0
 
     if not runtime_bin.is_dir():
@@ -113,14 +123,18 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
             "ignored": [],
             "mismatches": [],
             "missing": [],
+            "extras": [],
             "drift_count": 0,
         }
 
+    canonical_names: set[str] = set()
     for source in sorted(path for path in runtime_bin.iterdir() if path.is_file()):
         name = source.name
         if not name.startswith("brain-"):
-            ignored.append({"name": name, "reason": "wrapper-or-generated"})
+            if name in IGNORED_RUNTIME_BIN:
+                ignored.append({"name": name, "reason": IGNORED_RUNTIME_BIN[name]})
             continue
+        canonical_names.add(name)
         installed = installed_bin / name
         if not installed.exists():
             missing.append({"name": name, "source": str(source), "installed": str(installed)})
@@ -130,7 +144,19 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
             continue
         matched += 1
 
-    drift_count = len(mismatches) + len(missing)
+    if installed_bin.is_dir():
+        for installed in sorted(path for path in installed_bin.iterdir() if path.is_file()):
+            name = installed.name
+            if not name.startswith("brain-") or not os.access(installed, os.X_OK):
+                continue
+            if name in canonical_names:
+                continue
+            if name in IGNORED_INSTALLED_BRAIN_EXTRAS:
+                ignored.append({"name": name, "reason": IGNORED_INSTALLED_BRAIN_EXTRAS[name]})
+                continue
+            extras.append({"name": name, "installed": str(installed)})
+
+    drift_count = len(mismatches) + len(missing) + len(extras)
     return {
         "status": "ok" if drift_count == 0 else "drift",
         "runtime_bin": str(runtime_bin),
@@ -139,6 +165,7 @@ def detect_cli_parity(brain: Path) -> dict[str, Any]:
         "ignored": ignored,
         "mismatches": mismatches,
         "missing": missing,
+        "extras": extras,
         "drift_count": drift_count,
     }
 
@@ -228,7 +255,14 @@ def print_text(status: dict[str, Any]) -> None:
             f" drift={drift_count} ignored={len(cli_parity.get('ignored', []))}{warn}"
         )
         if drift_count:
-            offenders = [item["name"] for item in cli_parity.get("mismatches", []) + cli_parity.get("missing", [])]
+            offenders = [
+                item["name"]
+                for item in (
+                    cli_parity.get("mismatches", [])
+                    + cli_parity.get("missing", [])
+                    + cli_parity.get("extras", [])
+                )
+            ]
             print(f"  drifted: {', '.join(offenders[:8])}" + (" ..." if len(offenders) > 8 else ""))
 
 

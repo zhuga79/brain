@@ -47,6 +47,33 @@ brain-status | grep -q 'CLI parity: status=drift' || {
 }
 echo "OK: brain-status flags installed CLI drift"
 
+rm -f "$HOME/.local/bin/brain-doctrine"
+install -m 755 "$PROJECT_ROOT/runtime/bin/brain-doctrine" "$HOME/.local/bin/brain-doctrine"
+brain-status --json | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin)["cli_parity"]["status"]=="ok" else 1)' || {
+  echo "FAILED: brain-status did not return to clean parity after restoring managed CLI"
+  exit 1
+}
+
+cat > "$HOME/.local/bin/brain-legacy-extra" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$HOME/.local/bin/brain-legacy-extra"
+brain-status --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["cli_parity"]; names=[x["name"] for x in d.get("extras", [])]; raise SystemExit(0 if d["status"]=="drift" and "brain-legacy-extra" in names and d["drift_count"] > 0 else 1)' || {
+  echo "FAILED: brain-status did not flag extra installed brain CLI absent from canonical source"
+  exit 1
+}
+brain-status | grep -q 'brain-legacy-extra' || {
+  echo "FAILED: brain-status text output did not list extra installed brain CLI"
+  exit 1
+}
+rm -f "$HOME/.local/bin/brain-legacy-extra"
+brain-status --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["cli_parity"]; raise SystemExit(0 if d["status"]=="ok" and not d.get("extras") else 1)' || {
+  echo "FAILED: brain-status did not return to clean parity after removing extra installed brain CLI"
+  exit 1
+}
+echo "OK: brain-status flags extra installed brain CLIs and returns clean after removal"
+
 # Второй список неизбежно отстаёт от первого — поимённых установок быть не должно.
 if grep -qE 'install -m 755 "\$RUNTIME_BRAIN_[A-Z_]+"' "$PROJECT_ROOT/add-power-features-brain.sh"; then
   echo "FAILED: add-power-features-brain.sh снова ставит команды поимённо"
