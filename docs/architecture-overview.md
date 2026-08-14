@@ -55,9 +55,13 @@ single-root lookup.
 ### System/data boundary
 
 - System assets must be changed in the system checkout, then reinstalled.
-- Data root must not shadow live system directories such as `runtime/`,
-  `roles/`, `teams/`, `doctrine/`, `skills/`, `spec/`, `docs/`, `tests/`,
-  `config/`.
+- Data root must not mirror live system directories such as `runtime/`,
+  `roles/`, `doctrine/`, `skills/`, `spec/`, `docs/`, `tests/`, `config/`.
+- `teams/` is special: data-local case teams are allowed, and `$BRAIN/teams`
+  takes precedence over `$BRAIN_SYSTEM_PATH/teams` when a team file exists in
+  the data root.
+- What is prohibited is using the data root as a second canonical copy of the
+  system team catalog.
 - `setup-brain-v2.sh`, `brain-validate`, and the write-path pre-commit guard
   enforce that boundary in split-root mode.
 
@@ -65,7 +69,7 @@ single-root lookup.
 
 ### Install or update the live system
 
-1. Change the public system checkout.
+1. Change the system checkout referenced by `BRAIN_SYSTEM_PATH`.
 2. Reinstall from that checkout with `./setup-brain-v2.sh` or `brain-ops update`.
 3. Run the release gates before treating the install as live.
 
