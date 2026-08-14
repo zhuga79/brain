@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import os
+
 DATA_PATHS = (
     "tasks/",
     "wiki/",
@@ -74,3 +76,96 @@ def agent_branch(task_id: str) -> str:
     """
     safe = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in task_id.strip())
     return f"agent/{safe or 'unscoped'}"
+
+
+WRITE_PATH_PREFIXES = (
+    "runtime/",
+    "roles/",
+    "tests/",
+    "spec/",
+    "docs/",
+    "teams/",
+    "doctrine/",
+    "skills/",
+    "config/",
+)
+"""Системные пути, которые коммитятся только в публичном чекауте."""
+
+
+def _as_text(value: object) -> str:
+    if value is None or isinstance(value, (bytes, bytearray, dict, list, tuple, set)):
+        return ""
+    if hasattr(value, "__fspath__"):
+        value = os.fspath(value)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def is_write_path(path: object) -> bool:
+    """Путь, который нельзя коммитить в дереве данных при двух корнях."""
+    clean = _as_text(path).lstrip("./")
+    if not clean:
+        return False
+    for prefix in WRITE_PATH_PREFIXES:
+        if prefix.endswith("/"):
+            if clean.startswith(prefix):
+                return True
+        elif clean == prefix:
+            return True
+    return False
+
+
+def write_path_among(paths: list[object] | None) -> list[str]:
+    """Write-path файлы из списка, в исходном порядке и без повторов."""
+    if not paths:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for path in paths:
+        text = _as_text(path)
+        if text and is_write_path(text) and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def same_tree(left: object, right: object) -> bool:
+    """Один и тот же корень, с раскрытием ~ и symlink."""
+    from pathlib import Path
+
+    a = _as_text(left)
+    b = _as_text(right)
+    if not a or not b:
+        return False
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return Path(a).expanduser() == Path(b).expanduser()
+
+
+def is_data_repo_write(
+    *,
+    repo: object = None,
+    data: object = None,
+    system: object = None,
+) -> bool:
+    """Текущий репозиторий — слой данных, а система живёт в другом корне."""
+    if not _as_text(repo) or not _as_text(data) or not _as_text(system):
+        return False
+    if same_tree(data, system):
+        return False
+    return same_tree(repo, data)
+
+
+def write_path_violations(
+    paths: list[object] | None,
+    *,
+    repo: object = None,
+    data: object = None,
+    system: object = None,
+) -> list[str]:
+    """Staged system files in the data repo when roots are split."""
+    if not is_data_repo_write(repo=repo, data=data, system=system):
+        return []
+    return write_path_among(paths)

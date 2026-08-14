@@ -16,6 +16,17 @@ set -e
 # Use project-local binaries
 PROJECT_ROOT="${PROJECT_ROOT}"
 
+# Системные файлы коммитятся только в публичном чекауте, не в ~/brain.
+_WRITE_GUARD=""
+if [ -n "\${BRAIN_SYSTEM_PATH:-}" ] && [ -x "\${BRAIN_SYSTEM_PATH}/runtime/hooks/pre-commit-write-path" ]; then
+    _WRITE_GUARD="\${BRAIN_SYSTEM_PATH}/runtime/hooks/pre-commit-write-path"
+elif [ -x "\${PROJECT_ROOT}/runtime/hooks/pre-commit-write-path" ]; then
+    _WRITE_GUARD="\${PROJECT_ROOT}/runtime/hooks/pre-commit-write-path"
+fi
+if [ -n "\$_WRITE_GUARD" ]; then
+    "\$_WRITE_GUARD" || exit 1
+fi
+
 # Системный слой не меняется агентом в главной ветке: правка ролей,
 # доктрин и рантайма меняет поведение всех будущих запусков.
 if [ -x "\${PROJECT_ROOT}/runtime/hooks/pre-commit-system-guard" ]; then

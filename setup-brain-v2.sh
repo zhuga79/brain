@@ -227,6 +227,49 @@ rm -rf "$HOME/.local/lib/brain" "$HOME/.local/share/brain/lib"
 
 
 
+# Write-path hook in the data repo: commit of runtime/ there is rejected
+# when BRAIN_SYSTEM_PATH points at a separate public checkout.
+_install_data_write_path_hook() {
+  local data_git="$BRAIN/.git/hooks"
+  local guard="$SCRIPT_DIR/runtime/hooks/pre-commit-write-path"
+  local hook="$data_git/pre-commit"
+  [ -d "$BRAIN/.git" ] || return 0
+  [ -x "$guard" ] || return 0
+  mkdir -p "$data_git"
+  if [ -f "$hook" ] && grep -q 'pre-commit-write-path' "$hook"; then
+    return 0
+  fi
+  if [ -f "$hook" ]; then
+    local tmp
+    tmp="$(mktemp)"
+    {
+      printf '%s\n' '#!/usr/bin/env bash' 'set -e'
+      printf '%s\n' "# write-path: system edits belong in BRAIN_SYSTEM_PATH"
+      printf '%s\n' "_WRITE_GUARD=\"\${BRAIN_SYSTEM_PATH:-$SCRIPT_DIR}/runtime/hooks/pre-commit-write-path\""
+      printf '%s\n' 'if [ -x "$_WRITE_GUARD" ]; then "$_WRITE_GUARD" || exit 1; fi'
+      if grep -q '^#!/' "$hook"; then
+        tail -n +2 "$hook"
+      else
+        cat "$hook"
+      fi
+    } > "$tmp"
+    mv "$tmp" "$hook"
+  else
+    cat > "$hook" <<HOOK
+#!/usr/bin/env bash
+set -e
+# write-path: system edits belong in BRAIN_SYSTEM_PATH
+_WRITE_GUARD="\${BRAIN_SYSTEM_PATH:-$SCRIPT_DIR}/runtime/hooks/pre-commit-write-path"
+if [ -x "\$_WRITE_GUARD" ]; then
+  "\$_WRITE_GUARD" || exit 1
+fi
+HOOK
+  fi
+  chmod +x "$hook"
+  echo "✓ write-path hook: $hook"
+}
+_install_data_write_path_hook
+
 # Добавление .brain/index/ и .brain/vector/ в .gitignore самого брейна
 if [ ! -f "$BRAIN/.gitignore" ]; then
   printf ".brain/index/\n.brain/vector/\n" > "$BRAIN/.gitignore"

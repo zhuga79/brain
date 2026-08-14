@@ -40,6 +40,45 @@ EXPECTED_FILES = (
 )
 
 
+def validate_staged_write_path(brain: Path) -> list[Issue]:
+    """Staged system files in the data repo when roots are split."""
+    import subprocess
+
+    from brain_core.layers import write_path_violations
+    from brain_core.paths import brain_system_path
+
+    if brain is None:
+        return []
+    root = Path(brain)
+    try:
+        staged = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(root),
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACMR",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    system = brain_system_path(brain=root)
+    return [
+        Issue(
+            "ERROR",
+            path,
+            "системный файл в дереве данных; правь веткой в BRAIN_SYSTEM_PATH",
+        )
+        for path in write_path_violations(
+            staged, repo=root, data=root, system=system
+        )
+    ]
+
+
 def validate_paths(brain: Path) -> list[Issue]:
     issues = []
     for d in REQUIRED_DIRS:
@@ -715,6 +754,7 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     from .pages import brain_path
     brain = brain_path(str(brain_value) if brain_value else None)
     issues = validate_paths(brain)
+    issues.extend(validate_staged_write_path(brain))
     if any(issue.severity == "ERROR" for issue in issues):
         return issues
 
