@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# pre-commit-write-path — system files are committed only in the public checkout.
+#
+# When BRAIN_SYSTEM_PATH is a different tree from the data repo, a commit of
+# runtime/roles/tests/spec (and the rest of the system layer) in ~/brain is
+# rejected. The documented edit path is a branch in the system checkout.
+set -euo pipefail
+
+_HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_SYS_LIB="$(CDPATH= cd -- "$_HOOK_DIR/../lib" && pwd)"
+export PYTHONPATH="${_SYS_LIB}${PYTHONPATH:+:$PYTHONPATH}"
+
+# Git hooks do not inherit the login shell. Pick up operator roots if unset.
+if [ -z "${BRAIN_SYSTEM_PATH:-}" ]; then
+  for _envf in "${BRAIN_ENV_FILE:-}" "${HOME}/.config/brain/env" "${BRAIN_PATH:-$HOME/brain}/.brain/env"; do
+    [ -n "${_envf}" ] && [ -f "${_envf}" ] || continue
+    # shellcheck disable=SC1090
+    set -a
+    # Only KEY=VALUE / export KEY=VALUE; skip command substitutions.
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      case "$_line" in
+        ''|\#*) continue ;;
+      esac
+      _line="${_line#export }"
+      case "$_line" in
+        *'$('*|*'`'*) continue ;;
+        *=*) printf '%s\n' "$_line" ;;
+      esac
+    done < "${_envf}" > "${TMPDIR:-/tmp}/brain-write-path.env.$$"
+    # shellcheck disable=SC1090
+    . "${TMPDIR:-/tmp}/brain-write-path.env.$$"
+    set +a
+    rm -f "${TMPDIR:-/tmp}/brain-write-path.env.$$"
+    break
+  done
+  unset _envf _line
+fi
+
+repo="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$repo" ] || exit 0
+
+python3 - "$repo" <<'PY' || exit 1
+import os
+import subprocess
+import sys
+
+from brain_core.layers import agent_branch, write_path_violations
+from brain_core.paths import brain_path, brain_system_path
+
+repo = sys.argv[1]
+data = brain_path()
+system = brain_system_path(brain=data)
+staged = subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+    text=True,
+).splitlines()
+violations = write_path_violations(staged, repo=repo, data=data, system=system)
+if not violations:
+    raise SystemExit(0)
+
+task = os.environ.get("BRAIN_TASK_ID") or "unscoped"
+branch = agent_branch(task)
+print("ОТКАЗ: системные файлы нельзя коммитить в дереве данных.", file=sys.stderr)
+print(file=sys.stderr)
+print("В индексе:", file=sys.stderr)
+for path in violations:
+    print(f"  {path}", file=sys.stderr)
+print(file=sys.stderr)
+print("Путь правки — ветка в системном чекауте (BRAIN_SYSTEM_PATH):", file=sys.stderr)
+print(file=sys.stderr)
+print(f"    cd {system}", file=sys.stderr)
+print(f"    git switch -c {branch}", file=sys.stderr)
+print("    # правь runtime/ roles/ tests/ spec/ там", file=sys.stderr)
+print("    git commit ...", file=sys.stderr)
+print(file=sys.stderr)
+print("Обновление живого инстанса: brain-ops update", file=sys.stderr)
+raise SystemExit(1)
+PY
