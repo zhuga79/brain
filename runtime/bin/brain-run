@@ -435,7 +435,7 @@ cat <<FOOTER
    \`brain-workspace take --workspace "$workspace_path" $task --as $agent\`
 3. Do the work according to your role and the workspace \`BRAIN.md\`. If doctrine documents apply
    (loaded above), follow them strictly.
-4. On completion: \`brain-workspace complete --workspace "$workspace_path" $task --as $agent --summary "<what changed>"\`.
+4. On completion: \`brain-workspace complete --workspace "$workspace_path" $task --as $agent --model <provider-model-version> --summary "<what changed>"\`.
 5. If an action is listed under workspace Action Gates, stop and get explicit user approval before doing it.
 
 Begin.

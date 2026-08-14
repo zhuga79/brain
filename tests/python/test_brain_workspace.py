@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import threading
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SRC_LIB = REPO / "runtime" / "lib"
@@ -13,13 +14,16 @@ if "brain_workspace" in sys.modules:
 
 from brain_workspace import (
     append_local_log,
+    complete_local_task,
     discover_workspaces,
     find_nearest_workspace,
     is_role_allowed,
     next_local_task,
     parse_local_log,
+    parse_local_log_entries,
     parse_local_tasks,
     parse_workspace_policy,
+    take_local_task,
     update_local_task_state,
 )
 
@@ -332,6 +336,190 @@ def test_append_local_log_creates_workspace_log_entry(tmp_path):
     assert content.startswith("# Local Log\n")
     assert "## 2026-05-28T12:00:00Z | agent-a | took local-001" in content
     assert "- Moved local-001 to in-progress." in content
+
+
+def test_take_local_task_records_owner_started_and_rejects_non_open(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [ ] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+""",
+        encoding="utf-8",
+    )
+
+    task = take_local_task(workspace, "local-001", "agent-a")
+
+    assert task.task_id == "local-001"
+    assert task.state == "in-progress"
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [~] [P1] local-001 - Draft local rules" in content
+    assert "started:" in content
+    assert "by: agent-a" in content
+
+    try:
+        take_local_task(workspace, "local-001", "agent-b")
+    except ValueError as exc:
+        assert "expected state open" in str(exc)
+    else:
+        raise AssertionError("second take unexpectedly succeeded")
+
+
+def test_complete_local_task_requires_owner_in_progress_and_model(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [~] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    try:
+        complete_local_task(workspace, "local-001", "agent-b", "openai-gpt-5.4", "done")
+    except ValueError as exc:
+        assert "owned by agent-a" in str(exc)
+    else:
+        raise AssertionError("foreign complete unexpectedly succeeded")
+
+    try:
+        complete_local_task(workspace, "local-001", "agent-a", "", "done")
+    except ValueError as exc:
+        assert "model signature required" in str(exc)
+    else:
+        raise AssertionError("unsigned complete unexpectedly succeeded")
+
+    task = complete_local_task(workspace, "local-001", "agent-a", "openai-gpt-5.4", "done")
+
+    assert task.state == "done"
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [x] [P1] local-001 - Draft local rules" in content
+    assert "by: agent-a" in content
+    assert "model: openai-gpt-5.4" in content
+    assert "completed:" in content
+    log = (workspace / "LOG.md").read_text(encoding="utf-8")
+    assert "## " in log
+    assert "agent-a | done" in log
+
+
+def test_complete_local_task_rejects_open_task_transition(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [ ] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        complete_local_task(workspace, "local-001", "agent-a", "openai-gpt-5.4", "done")
+    except ValueError as exc:
+        assert "expected state in-progress" in str(exc)
+    else:
+        raise AssertionError("open task completed directly")
+
+
+def test_complete_local_task_recovers_after_log_write_crash(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [~] [P1] local-001 - Draft local rules
+      role: developer
+      acceptance: Rules drafted.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    import brain_workspace as workspace_mod
+
+    real_atomic_write = workspace_mod.atomic.write_text
+    seen_log_write = {"raised": False}
+
+    def crash_once(path, text, *, prefix=".tmp."):
+        real_atomic_write(path, text, prefix=prefix)
+        if path.name == "TASKS.md" and not seen_log_write["raised"]:
+            seen_log_write["raised"] = True
+            raise RuntimeError("simulated crash after task write")
+
+    monkeypatch.setattr(workspace_mod.atomic, "write_text", crash_once)
+
+    try:
+        complete_local_task(workspace, "local-001", "agent-a", "openai-gpt-5.4", "done")
+    except RuntimeError as exc:
+        assert "simulated crash" in str(exc)
+    else:
+        raise AssertionError("simulated crash did not fire")
+
+    monkeypatch.setattr(workspace_mod.atomic, "write_text", real_atomic_write)
+
+    task = complete_local_task(workspace, "local-001", "agent-a", "openai-gpt-5.4", "done")
+
+    assert task.state == "done"
+    assert not (workspace / ".workspace-queue-journal.json").exists()
+    entries = parse_local_log_entries(workspace / "LOG.md", limit=8)
+    matching = [entry for entry in entries if entry.summary == "done"]
+    assert len(matching) == 1
+
+
+def test_take_local_task_serializes_parallel_writers(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        "# Local Tasks\n\n"
+        + "\n\n".join(
+            f"- [ ] [P1] local-{i:02d} - Draft local rules {i:02d}\n"
+            "      role: developer\n"
+            "      acceptance: Rules drafted."
+            for i in range(1, 7)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    failures: list[str] = []
+
+    def worker(i: int) -> None:
+        try:
+            take_local_task(workspace, f"local-{i:02d}", f"agent-{i:02d}")
+        except Exception as exc:  # pragma: no cover - diagnostics
+            failures.append(str(exc))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(1, 7)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    tasks = {task.task_id: task for task in parse_local_tasks(workspace / "TASKS.md")}
+    assert all(tasks[f"local-{i:02d}"].state == "in-progress" for i in range(1, 7))
+    log_entries = parse_local_log_entries(workspace / "LOG.md", limit=16)
+    took_entries = [entry for entry in log_entries if entry.summary.startswith("took local-")]
+    assert len(took_entries) == 6
 
 
 def test_convert_folder_to_workspace(tmp_path):

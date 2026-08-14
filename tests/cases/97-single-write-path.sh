@@ -39,6 +39,7 @@ export BRAIN="$data"
 export BRAIN_SYSTEM_PATH="$system"
 export GIT_DIR="$data/.git"
 export GIT_WORK_TREE="$data"
+unset GIT_INDEX_FILE
 
 # ── 1. Staged runtime/ in the data repo is rejected with a public-checkout hint
 git -C "$data" add runtime/bin/brain-ops
@@ -62,6 +63,7 @@ echo "OK: data-repo runtime/ commit rejected"
 # ── 2. Data-layer commit in the data repo still passes
 (
   export GIT_DIR="$data/.git" GIT_WORK_TREE="$data" BRAIN_PATH="$data" BRAIN_SYSTEM_PATH="$system"
+  unset GIT_INDEX_FILE
   git -C "$data" reset -q HEAD -- runtime/bin/brain-ops
   printf '# more wiki\n' >> "$data/wiki/log.md"
   git -C "$data" add wiki/log.md
@@ -72,6 +74,7 @@ echo "OK: data-layer commit in data repo passes"
 # ── 3. The same runtime/ edit is allowed in the system checkout
 (
   export GIT_DIR="$system/.git" GIT_WORK_TREE="$system" BRAIN_PATH="$data" BRAIN_SYSTEM_PATH="$system"
+  unset GIT_INDEX_FILE
   printf '# edit in public checkout\n' >> "$system/runtime/bin/brain-ops"
   git -C "$system" add runtime/bin/brain-ops
   "$hook"
@@ -88,6 +91,7 @@ git -C "$legacy" add runtime/bin/brain-ops
   export GIT_DIR="$legacy/.git" GIT_WORK_TREE="$legacy"
   unset BRAIN_SYSTEM_PATH
   export BRAIN_PATH="$legacy"
+  unset GIT_INDEX_FILE
   "$hook"
 )
 echo "OK: legacy single-root runtime/ commit passes"

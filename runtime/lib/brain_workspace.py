@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brain_core import grammar
+from brain_core import atomic, grammar
 
 UTC = timezone.utc
 
@@ -29,6 +29,9 @@ TASK_RE = re.compile(
     r"^- \[(?P<mark>[ xX~!])\] \[(?P<priority>P[0-9])\] (?P<task_id>\S+)\s+(?P<sep>—|-)\s+(?P<title>.+)$"
 )
 LOG_RE = re.compile(r"^## (?P<timestamp>[^|]+?) \| (?P<agent>[^|]+?) \| (?P<summary>.+)$")
+WORKSPACE_LOCK_NAME = ".workspace-queue.lock"
+WORKSPACE_JOURNAL_NAME = ".workspace-queue-journal.json"
+WORKSPACE_JOURNAL_VERSION = "1"
 
 
 
@@ -151,12 +154,10 @@ def _field_value(line: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def parse_local_tasks(path: Path) -> list[LocalTask]:
-    if not path.exists():
-        return []
+def parse_local_tasks_from_text(text: str) -> list[LocalTask]:
     tasks: list[LocalTask] = []
     current: dict[str, str] | None = None
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.rstrip()
         match = TASK_RE.match(line)
         if match:
@@ -181,6 +182,12 @@ def parse_local_tasks(path: Path) -> list[LocalTask]:
     if current is not None:
         tasks.append(LocalTask(**current))
     return tasks
+
+
+def parse_local_tasks(path: Path) -> list[LocalTask]:
+    if not path.exists():
+        return []
+    return parse_local_tasks_from_text(path.read_text(encoding="utf-8"))
 
 
 def parse_local_log_entries(path: Path, limit: int = 8) -> list[LocalLogEntry]:
@@ -317,6 +324,93 @@ def _mark_for_state(state: str) -> str:
     return marks[state]
 
 
+def _task_file_text(path: Path) -> str:
+    return atomic.read_text(path)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    atomic.write_text(path, text, prefix=".workspace.")
+
+
+def _queue_lock(workspace: Path):
+    return atomic.file_lock(workspace.resolve() / WORKSPACE_LOCK_NAME)
+
+
+def _journal_path(workspace: Path) -> Path:
+    return workspace.resolve() / WORKSPACE_JOURNAL_NAME
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _field_line(name: str, value: str) -> str:
+    return f"      {name}: {value}"
+
+
+def _strip_task_fields(lines: list[str], names: tuple[str, ...]) -> list[str]:
+    prefixes = tuple(f"{name}:" for name in names)
+    return [line for line in lines if not line.lstrip().startswith(prefixes)]
+
+
+def _extract_task_field(lines: list[str], name: str) -> str:
+    prefix = f"{name}:"
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped.split(":", 1)[1].strip()
+    return ""
+
+
+def _replace_task_block_text(
+    text: str,
+    task_id: str,
+    state: str,
+    *,
+    from_states: tuple[str, ...],
+    mutate_body,
+) -> tuple[str, LocalTask]:
+    target_mark = _mark_for_state(state)
+    lines = text.splitlines()
+    updated: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = TASK_RE.match(line.rstrip())
+        if not match or match.group("task_id") != task_id:
+            updated.append(line)
+            i += 1
+            continue
+
+        current_state = _state_from_mark(match.group("mark"))
+        if from_states and current_state not in from_states:
+            expected = ", ".join(from_states)
+            raise ValueError(f"Local task {task_id} has state {current_state}; expected state {expected}")
+
+        body_lines: list[str] = []
+        j = i + 1
+        while j < len(lines) and not TASK_RE.match(lines[j].rstrip()):
+            body_lines.append(lines[j])
+            j += 1
+        body_lines = mutate_body(body_lines, current_state)
+        updated.append(
+            f"- [{target_mark}] [{match.group('priority')}] {task_id} "
+            f"{match.group('sep')} {match.group('title').strip()}"
+        )
+        updated.extend(body_lines)
+        changed = True
+        i = j
+    if not changed:
+        raise ValueError(f"Local task not found: {task_id}")
+
+    new_text = "\n".join(updated) + "\n"
+    parsed = next((task for task in parse_local_tasks_from_text(new_text) if task.task_id == task_id), None)
+    if parsed is None:
+        raise ValueError(f"Local task not found after update: {task_id}")
+    return new_text, parsed
+
+
 def update_local_task_state(
     path: Path,
     task_id: str,
@@ -325,30 +419,15 @@ def update_local_task_state(
 ) -> LocalTask:
     if not path.exists():
         raise FileNotFoundError(path)
-    target_mark = _mark_for_state(state)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    updated: list[str] = []
-    changed = False
-    for line in lines:
-        match = TASK_RE.match(line.rstrip())
-        if match and match.group("task_id") == task_id:
-            current_state = _state_from_mark(match.group("mark"))
-            if from_states and current_state not in from_states:
-                expected = ", ".join(from_states)
-                raise ValueError(f"Local task {task_id} has state {current_state}; expected state {expected}")
-            line = (
-                f"- [{target_mark}] [{match.group('priority')}] {task_id} "
-                f"{match.group('sep')} {match.group('title').strip()}"
-            )
-            changed = True
-        updated.append(line)
-    if not changed:
-        raise ValueError(f"Local task not found: {task_id}")
-    path.write_text("\n".join(updated) + "\n", encoding="utf-8")
-    for task in parse_local_tasks(path):
-        if task.task_id == task_id:
-            return task
-    raise ValueError(f"Local task not found after update: {task_id}")
+    new_text, task = _replace_task_block_text(
+        path.read_text(encoding="utf-8"),
+        task_id,
+        state,
+        from_states=from_states,
+        mutate_body=lambda body_lines, _current_state: body_lines,
+    )
+    _atomic_write(path, new_text)
+    return task
 
 
 def utc_timestamp() -> str:
@@ -363,16 +442,201 @@ def append_local_log(
     summary: str,
     detail: str = "",
 ) -> None:
-    if path.exists():
-        content = path.read_text(encoding="utf-8").rstrip()
+    with _queue_lock(path.parent):
+        _recover_workspace_transaction(path.parent)
+        content = _task_file_text(path).rstrip()
         if not content:
             content = "# Local Log"
-    else:
+        _atomic_write(path, _append_local_log_text(content, timestamp=timestamp, agent=agent, summary=summary, detail=detail))
+
+
+def _append_local_log_text(
+    content: str,
+    *,
+    timestamp: str,
+    agent: str,
+    summary: str,
+    detail: str = "",
+) -> str:
+    content = content.rstrip()
+    if not content:
         content = "# Local Log"
     entry = f"## {timestamp} | {agent} | {summary}"
     if detail:
         entry = f"{entry}\n\n- {detail}"
-    path.write_text(f"{content}\n\n{entry}\n", encoding="utf-8")
+    return f"{content}\n\n{entry}\n"
+
+
+def _write_workspace_journal(
+    workspace: Path,
+    *,
+    operation: str,
+    task_id: str,
+    tasks_before: str,
+    log_before: str,
+    tasks_after: str,
+    log_after: str,
+) -> None:
+    atomic.write_json(
+        _journal_path(workspace),
+        {
+            "version": WORKSPACE_JOURNAL_VERSION,
+            "operation": operation,
+            "task_id": task_id,
+            "tasks_before_hash": _sha256_text(tasks_before),
+            "log_before_hash": _sha256_text(log_before),
+            "tasks_after_hash": _sha256_text(tasks_after),
+            "log_after_hash": _sha256_text(log_after),
+            "tasks_after": tasks_after,
+            "log_after": log_after,
+        },
+    )
+
+
+def _recover_workspace_transaction(workspace: Path) -> None:
+    journal_path = _journal_path(workspace)
+    payload = atomic.read_json(journal_path)
+    if not payload:
+        return
+    if not isinstance(payload, dict) or payload.get("version") != WORKSPACE_JOURNAL_VERSION:
+        raise ValueError(f"Invalid workspace journal: {journal_path}")
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    tasks_text = _task_file_text(tasks_path)
+    log_text = _task_file_text(log_path)
+    tasks_after = str(payload.get("tasks_after", ""))
+    log_after = str(payload.get("log_after", ""))
+    if str(payload.get("tasks_after_hash", "")) != _sha256_text(tasks_after):
+        raise ValueError(f"Invalid workspace journal: {journal_path}")
+    if str(payload.get("log_after_hash", "")) != _sha256_text(log_after):
+        raise ValueError(f"Invalid workspace journal: {journal_path}")
+    if tasks_text != tasks_after:
+        _atomic_write(tasks_path, tasks_after)
+    if log_text != log_after:
+        _atomic_write(log_path, log_after)
+    journal_path.unlink(missing_ok=True)
+
+
+def _run_workspace_transaction(
+    workspace: Path,
+    *,
+    operation: str,
+    task_id: str,
+    mutate,
+) -> LocalTask:
+    workspace = workspace.resolve()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    with _queue_lock(workspace):
+        _recover_workspace_transaction(workspace)
+        tasks_before = _task_file_text(tasks_path)
+        log_before = _task_file_text(log_path)
+        tasks_after, log_after, task = mutate(tasks_before, log_before)
+        _write_workspace_journal(
+            workspace,
+            operation=operation,
+            task_id=task_id,
+            tasks_before=tasks_before,
+            log_before=log_before,
+            tasks_after=tasks_after,
+            log_after=log_after,
+        )
+        _atomic_write(tasks_path, tasks_after)
+        _atomic_write(log_path, log_after)
+        _journal_path(workspace).unlink(missing_ok=True)
+        return task
+
+
+def take_local_task(workspace: Path, task_id: str, agent: str) -> LocalTask:
+    timestamp = utc_timestamp()
+
+    def mutate(tasks_before: str, log_before: str) -> tuple[str, str, LocalTask]:
+        existing = next((task for task in parse_local_tasks_from_text(tasks_before) if task.task_id == task_id), None)
+        if existing and existing.state == "in-progress":
+            body_lines = []
+            lines = tasks_before.splitlines()
+            for index, line in enumerate(lines):
+                match = TASK_RE.match(line.rstrip())
+                if match and match.group("task_id") == task_id:
+                    cursor = index + 1
+                    while cursor < len(lines) and not TASK_RE.match(lines[cursor].rstrip()):
+                        body_lines.append(lines[cursor])
+                        cursor += 1
+                    break
+            if _extract_task_field(body_lines, "by") == agent:
+                return tasks_before, log_before, existing
+        tasks_after, task = _replace_task_block_text(
+            tasks_before,
+            task_id,
+            "in-progress",
+            from_states=("open",),
+            mutate_body=lambda body_lines, _current_state: (
+                _strip_task_fields(body_lines, ("started", "by", "completed", "model"))
+                + [_field_line("started", timestamp), _field_line("by", agent)]
+            ),
+        )
+        log_after = _append_local_log_text(
+            log_before,
+            timestamp=timestamp,
+            agent=agent,
+            summary=f"took {task_id}",
+            detail=f"Moved {task_id} to in-progress.",
+        )
+        return tasks_after, log_after, task
+
+    return _run_workspace_transaction(workspace, operation="take", task_id=task_id, mutate=mutate)
+
+
+def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, summary: str = "") -> LocalTask:
+    if not model.strip():
+        raise ValueError(f"Local task model signature required: {task_id}")
+    timestamp = utc_timestamp()
+    summary = summary or f"completed {task_id}"
+
+    def mutate(tasks_before: str, log_before: str) -> tuple[str, str, LocalTask]:
+        existing = next((task for task in parse_local_tasks_from_text(tasks_before) if task.task_id == task_id), None)
+        if existing and existing.state == "done":
+            body_lines = []
+            lines = tasks_before.splitlines()
+            for index, line in enumerate(lines):
+                match = TASK_RE.match(line.rstrip())
+                if match and match.group("task_id") == task_id:
+                    cursor = index + 1
+                    while cursor < len(lines) and not TASK_RE.match(lines[cursor].rstrip()):
+                        body_lines.append(lines[cursor])
+                        cursor += 1
+                    break
+            if _extract_task_field(body_lines, "by") == agent and _extract_task_field(body_lines, "model") == model:
+                return tasks_before, log_before, existing
+
+        def update_body(body_lines: list[str], _current_state: str) -> list[str]:
+            owner = _extract_task_field(body_lines, "by")
+            if not owner:
+                raise ValueError(f"Local task owner missing: {task_id}")
+            if owner != agent:
+                raise ValueError(f"Local task {task_id} is owned by {owner}, not {agent}")
+            return _strip_task_fields(body_lines, ("completed", "model")) + [
+                _field_line("model", model),
+                _field_line("completed", timestamp),
+            ]
+
+        tasks_after, task = _replace_task_block_text(
+            tasks_before,
+            task_id,
+            "done",
+            from_states=("in-progress",),
+            mutate_body=update_body,
+        )
+        log_after = _append_local_log_text(
+            log_before,
+            timestamp=timestamp,
+            agent=agent,
+            summary=summary,
+            detail=f"Moved {task_id} to done.",
+        )
+        return tasks_after, log_after, task
+
+    return _run_workspace_transaction(workspace, operation="complete", task_id=task_id, mutate=mutate)
 
 
 def _workspace_info(folder: Path, brain_file: Path) -> WorkspaceInfo:

@@ -145,7 +145,7 @@ grep -q -- "- \\[~\\] \\[P1\\] local-001 - Draft local rules" "$TMP_ROOT/project
   exit 1
 }
 
-brain-workspace complete --workspace "$TMP_ROOT/project-a" local-001 --as test-agent --summary "rules drafted" >/dev/null
+brain-workspace complete --workspace "$TMP_ROOT/project-a" local-001 --as test-agent --model "openai-gpt-5.4" --summary "rules drafted" >/dev/null
 grep -q -- "- \\[x\\] \\[P1\\] local-001 - Draft local rules" "$TMP_ROOT/project-a/TASKS.md" || {
   echo "FAILED: complete did not mark local-001 done"
   exit 1

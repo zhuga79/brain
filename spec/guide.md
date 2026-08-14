@@ -494,7 +494,7 @@ brain-workspace nearest <path>
 brain-workspace tasks --workspace <path> [--role R] [--state open|in-progress|done|blocked|all] [--json]
 brain-workspace next --workspace <path> [--role R] [--json]
 brain-workspace take --workspace <path> <task-id> --as <agent-id>
-brain-workspace complete --workspace <path> <task-id> --as <agent-id> [--summary "..."]
+brain-workspace complete --workspace <path> <task-id> --as <agent-id> --model <provider-model-version> [--summary "..."]
 brain-workspace init-template --out <path>
 ```
 
