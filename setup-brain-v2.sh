@@ -46,6 +46,7 @@ done
 
 BRAIN="${BRAIN_PATH:-$HOME/brain}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SYSTEM_ROOT="${BRAIN_SYSTEM_PATH:-$SCRIPT_DIR}"
 V2_TEMPLATES="$SCRIPT_DIR/runtime/templates/v2"
 TEMPLATE_MEMORY="$V2_TEMPLATES/MEMORY.md"
 [ -f "$SCRIPT_DIR/MEMORY.md" ] && TEMPLATE_MEMORY="$SCRIPT_DIR/MEMORY.md"
@@ -64,8 +65,23 @@ TEMPLATE_SKILLS="$V2_TEMPLATES/skills"
 TEMPLATE_ROUTING="$V2_TEMPLATES/config/routing.json"
 [ -f "$SCRIPT_DIR/config/routing.json" ] && TEMPLATE_ROUTING="$SCRIPT_DIR/config/routing.json"
 
+same_path() {
+  local left="$1"
+  local right="$2"
+  [ "$(readlink -f "$left" 2>/dev/null || printf '%s' "$left")" = \
+    "$(readlink -f "$right" 2>/dev/null || printf '%s' "$right")" ]
+}
+
+SPLIT_ROOT=0
+if [ -n "${BRAIN_SYSTEM_PATH:-}" ] && ! same_path "$BRAIN" "$SYSTEM_ROOT"; then
+  SPLIT_ROOT=1
+fi
+
 echo ">>> brain v2 path: $BRAIN"
-mkdir -p "$BRAIN"/{raw,wiki,tasks,roles,teams,doctrine,council,skills,.locks,.agent-configs}
+mkdir -p "$BRAIN"/{raw,wiki,tasks,council,.locks,.agent-configs}
+if [ "$SPLIT_ROOT" -eq 0 ]; then
+  mkdir -p "$BRAIN"/{roles,teams,doctrine,skills}
+fi
 
 # =============================================================================
 # Load static templates
@@ -90,37 +106,39 @@ copy_md_dir() {
   done
 }
 
-if [ ! -e "$BRAIN/MEMORY.md" ] || [ "$(readlink -f "$TEMPLATE_MEMORY")" != "$(readlink -f "$BRAIN/MEMORY.md")" ]; then
+if [ ! -e "$BRAIN/MEMORY.md" ] || { [ "$SPLIT_ROOT" -eq 0 ] && ! same_path "$TEMPLATE_MEMORY" "$BRAIN/MEMORY.md"; }; then
   cp "$TEMPLATE_MEMORY" "$BRAIN/MEMORY.md"
 fi
 
-copy_md_dir "$TEMPLATE_ROLES" "$BRAIN/roles" overwrite
+if [ "$SPLIT_ROOT" -eq 0 ]; then
+  copy_md_dir "$TEMPLATE_ROLES" "$BRAIN/roles" overwrite
 
-# Маршрутизация ставится вместе с ролями и из того же дерева: иначе роли
-# приезжают все тридцать, а маршруты — шесть, и brain-validate краснеет на
-# свежей установке. Существующий файл не трогаем: это политика оператора.
-if [ -f "$TEMPLATE_ROUTING" ] && [ ! -f "$BRAIN/config/routing.json" ]; then
-  mkdir -p "$BRAIN/config"
-  cp "$TEMPLATE_ROUTING" "$BRAIN/config/routing.json"
-fi
-copy_md_dir "$TEMPLATE_TEAMS" "$BRAIN/teams" overwrite
-copy_md_dir "$TEMPLATE_DOCTRINE" "$BRAIN/doctrine" overwrite
-# Машиночитаемая escalation matrix — yaml, а copy_md_dir копирует только *.md.
-# Без неё brain-validate краснеет на свежей установке (doctrine/ есть, файла нет).
-if [ -f "$TEMPLATE_DOCTRINE/escalation-matrix.yaml" ]; then
-  mkdir -p "$BRAIN/doctrine"
-  # Тот же файл — не ошибка: BRAIN может указывать на само дерево (симлинк).
-  if [ "$(readlink -f "$TEMPLATE_DOCTRINE/escalation-matrix.yaml")" != "$(readlink -f "$BRAIN/doctrine/escalation-matrix.yaml")" ]; then
-    cp "$TEMPLATE_DOCTRINE/escalation-matrix.yaml" "$BRAIN/doctrine/escalation-matrix.yaml"
+  # Маршрутизация ставится вместе с ролями и из того же дерева: иначе роли
+  # приезжают все тридцать, а маршруты — шесть, и brain-validate краснеет на
+  # свежей установке. Существующий файл не трогаем: это политика оператора.
+  if [ -f "$TEMPLATE_ROUTING" ] && [ ! -f "$BRAIN/config/routing.json" ]; then
+    mkdir -p "$BRAIN/config"
+    cp "$TEMPLATE_ROUTING" "$BRAIN/config/routing.json"
+  fi
+  copy_md_dir "$TEMPLATE_TEAMS" "$BRAIN/teams" overwrite
+  copy_md_dir "$TEMPLATE_DOCTRINE" "$BRAIN/doctrine" overwrite
+  # Машиночитаемая escalation matrix — yaml, а copy_md_dir копирует только *.md.
+  # Без неё brain-validate краснеет на свежей установке (doctrine/ есть, файла нет).
+  if [ -f "$TEMPLATE_DOCTRINE/escalation-matrix.yaml" ]; then
+    mkdir -p "$BRAIN/doctrine"
+    # Тот же файл — не ошибка: BRAIN может указывать на само дерево (симлинк).
+    if ! same_path "$TEMPLATE_DOCTRINE/escalation-matrix.yaml" "$BRAIN/doctrine/escalation-matrix.yaml"; then
+      cp "$TEMPLATE_DOCTRINE/escalation-matrix.yaml" "$BRAIN/doctrine/escalation-matrix.yaml"
+    fi
+  fi
+  if [ -d "$TEMPLATE_SKILLS" ]; then
+    mkdir -p "$BRAIN/skills"
+    if ! same_path "$TEMPLATE_SKILLS" "$BRAIN/skills"; then
+      cp -R "$TEMPLATE_SKILLS/." "$BRAIN/skills/"
+    fi
   fi
 fi
 copy_md_dir "$TEMPLATE_RAW" "$BRAIN/raw" missing
-if [ -d "$TEMPLATE_SKILLS" ]; then
-  mkdir -p "$BRAIN/skills"
-  if [ "$(readlink -f "$TEMPLATE_SKILLS")" != "$(readlink -f "$BRAIN/skills")" ]; then
-    cp -R "$TEMPLATE_SKILLS/." "$BRAIN/skills/"
-  fi
-fi
 
 if [ ! -f "$BRAIN/tasks/SCHEMA.md" ] || ! cmp -s "$V2_TEMPLATES/tasks/SCHEMA.md" "$BRAIN/tasks/SCHEMA.md"; then
   cp "$V2_TEMPLATES/tasks/SCHEMA.md" "$BRAIN/tasks/SCHEMA.md"

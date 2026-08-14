@@ -15,6 +15,7 @@ from brain_wiki.validators import (
 
 DATA_DIRS = ("wiki", "tasks", "raw", "council", "handoff", "learning", "prd", ".locks")
 EXCLUSIVE_SYSTEM_DIRS = ("runtime", "tests", "spec", "docs")
+SHADOW_SYSTEM_DIRS = EXCLUSIVE_SYSTEM_DIRS + ("roles", "doctrine", "skills", "config")
 DROPPED_SYSTEM_DIRS = EXCLUSIVE_SYSTEM_DIRS + ("roles", "teams", "doctrine", "skills")
 
 
@@ -99,6 +100,35 @@ def test_split_layout_runtime_back_is_red(split_roots):
     ), issues
     errors = [i for i in validate_all(data) if i.severity == "ERROR"]
     assert any(i.path == "runtime/" for i in errors), errors
+
+
+@pytest.mark.parametrize("name", SHADOW_SYSTEM_DIRS)
+def test_split_layout_system_shadow_dirs_are_red(split_roots, name):
+    data, _system = split_roots
+    target = data / name
+    target.mkdir(parents=True)
+    issues = validate_system_paths_not_restored(data)
+    assert any(
+        i.severity == "ERROR"
+        and i.path == f"{name}/"
+        and "системный путь восстановлен в приватном дереве" in i.message
+        for i in issues
+    ), issues
+
+
+def test_split_layout_data_team_override_is_allowed(split_roots):
+    data, _system = split_roots
+    (data / "teams").mkdir()
+    (data / "teams" / "insurance-fraud.md").write_text(
+        "---\n"
+        "title: Insurance Fraud\n"
+        "type: team\n"
+        "roles: [developer]\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    issues = validate_system_paths_not_restored(data)
+    assert issues == [], issues
 
 
 def test_split_layout_roles_resolve_from_system(split_roots):

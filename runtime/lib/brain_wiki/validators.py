@@ -41,8 +41,17 @@ EXPECTED_FILES = (
     "wiki/log.md",
 )
 # После раздела эти каталоги живут только в системном корне.
-# Локальный оверрайд roles/teams/doctrine/skills — не восстановление.
-EXCLUSIVE_SYSTEM_DIRS = ("runtime", "tests", "spec", "docs")
+# teams остаётся допустимым data-слоем: там могут жить локальные группы дела.
+EXCLUSIVE_SYSTEM_DIRS = (
+    "runtime",
+    "tests",
+    "spec",
+    "docs",
+    "roles",
+    "doctrine",
+    "skills",
+    "config",
+)
 
 
 def validate_staged_write_path(brain: Path) -> list[Issue]:

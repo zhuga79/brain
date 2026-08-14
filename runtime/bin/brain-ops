@@ -49,7 +49,7 @@ update() {
   echo ">>> [brain-ops] pull $root"
   git -C "$root" pull
   echo ">>> [brain-ops] install"
-  bash "$root/setup-brain-v2.sh"
+  BRAIN_SYSTEM_PATH="$root" bash "$root/setup-brain-v2.sh"
   echo ">>> [brain-ops] tests"
   bash "$root/tests/run.sh"
 }
