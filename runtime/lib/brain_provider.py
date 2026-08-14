@@ -299,46 +299,92 @@ def _expand_env_value(value: str, env: dict[str, str]) -> str:
     return os.path.expanduser(value)
 
 
-def _command_probe(command: str) -> tuple[bool, str, str]:
+def _command_probe(command: str) -> tuple[bool, str, str, str]:
     command = command.strip()
     if not command:
-        return False, "empty provider command", ""
+        return False, "empty provider command", "", ""
     try:
         parts = shlex.split(command)
     except ValueError:
         parts = command.split()
     if not parts:
-        return False, "empty provider command", ""
+        return False, "empty provider command", "", ""
 
     env = dict(os.environ)
     idx = 0
     if parts and parts[0] == "env":
         idx = 1
+        while idx < len(parts):
+            token = parts[idx]
+            if token == "--":
+                idx += 1
+                break
+            if token in ("-i", "--ignore-environment"):
+                env = {}
+                idx += 1
+                continue
+            if token == "-u":
+                idx += 1
+                if idx >= len(parts):
+                    return False, "env option requires argument: -u", "", ""
+                env.pop(parts[idx], None)
+                idx += 1
+                continue
+            if token == "--unset":
+                idx += 1
+                if idx >= len(parts):
+                    return False, "env option requires argument: --unset", "", ""
+                env.pop(parts[idx], None)
+                idx += 1
+                continue
+            if token.startswith("--unset="):
+                env.pop(token.split("=", 1)[1], None)
+                idx += 1
+                continue
+            if token.startswith("-"):
+                return False, f"unsupported env option: {token}", "", ""
+            if _ENV_NAME_RE.match(token):
+                name, value = token.split("=", 1)
+                env[name] = _expand_env_value(value, env)
+                idx += 1
+                continue
+            break
     while idx < len(parts) and _ENV_NAME_RE.match(parts[idx]):
         name, value = parts[idx].split("=", 1)
         env[name] = _expand_env_value(value, env)
         idx += 1
     if idx >= len(parts):
-        return False, "empty provider command", ""
+        return False, "empty provider command", "", ""
 
     executable = parts[idx]
     if "/" in executable or executable.startswith("."):
         path = Path(os.path.expanduser(executable))
         if not path.exists():
-            return False, f"command path not found: {path}", executable
+            return False, f"command path not found: {path}", executable, ""
         if not path.is_file():
-            return False, f"command path is not a file: {path}", executable
+            return False, f"command path is not a file: {path}", executable, ""
         if not os.access(path, os.X_OK):
-            return False, f"command path is not executable: {path}", executable
-        return True, f"local command found: {path}", executable
+            return False, f"command path is not executable: {path}", executable, ""
+        return True, f"local command found: {path}", executable, str(path)
 
     try:
         resolved = shutil.which(executable, path=env.get("PATH"))
     except TypeError:
         resolved = shutil.which(executable)
     if not resolved:
-        return False, f"command not found: {executable}", executable
-    return True, f"local command found: {resolved}", executable
+        return False, f"command not found: {executable}", executable, ""
+    return True, f"local command found: {resolved}", executable, resolved
+
+
+def iter_matrix_candidates(matrix: dict[str, Any], role: str = "") -> list[dict[str, Any]]:
+    roles = [role] if role else list((matrix.get("roles") or {}).keys())
+    out: list[dict[str, Any]] = []
+    for role_name in roles:
+        candidates, _profile = role_candidates(matrix, role_name)
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                out.append(candidate)
+    return out
 
 
 def resolve_for_role(
@@ -634,7 +680,7 @@ def _enrich_candidate(candidate: dict[str, Any], health: dict[str, Any]) -> dict
     item = dict(candidate)
     command = str(item.get("command", "")).strip()
     nonlocal_execution = candidate_declares_nonlocal(item)
-    command_present, local_reason, executable = _command_probe(command)
+    command_present, local_reason, executable, resolved = _command_probe(command)
     key = f"{item.get('provider', '')}/{item.get('model', '')}"
     health_item = health.get("items", {}).get(key, {})
     cached_status = str(health_item.get("status", "")).strip()
@@ -706,6 +752,8 @@ def _enrich_candidate(candidate: dict[str, Any], health: dict[str, Any]) -> dict
     item["command_present"] = command_present
     if executable:
         item["executable"] = executable
+    if resolved:
+        item["resolved_command"] = resolved
     item["status"] = status
     item["reason"] = reason
     if nonlocal_execution:

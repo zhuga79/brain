@@ -7,8 +7,6 @@ import datetime as dt
 import json
 import os
 import re
-import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -77,14 +75,9 @@ def write_cache(path: Path, data: dict[str, Any]) -> None:
 
 
 def find_candidate(matrix: dict[str, Any], provider: str, model: str) -> dict[str, Any] | None:
-    for candidates in (matrix.get("roles") or {}).values():
-        if not isinstance(candidates, list):
-            continue
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            if candidate.get("provider") == provider and candidate.get("model") == model:
-                return candidate
+    for candidate in brain_provider.iter_matrix_candidates(matrix):
+        if candidate.get("provider") == provider and candidate.get("model") == model:
+            return candidate
     return None
 
 
@@ -196,14 +189,13 @@ def cmd_render_doc(args: argparse.Namespace) -> int:
 
 
 def probe_candidate(candidate: dict[str, Any], timeout: int) -> tuple[str, str]:
+    execution = brain_provider.candidate_declares_nonlocal(candidate)
+    if execution:
+        return "configured", f"{execution} command declared"
     command = str(candidate.get("command", "")).strip()
-    parts = shlex.split(command)
-    executable = parts[0] if parts else ""
-    if not executable:
-        return "unavailable", "empty provider command"
-    resolved = shutil.which(executable)
-    if not resolved:
-        return "unavailable", f"command not found: {executable}"
+    command_present, reason, _executable, resolved = brain_provider._command_probe(command)
+    if not command_present:
+        return "unavailable", reason
     try:
         res = subprocess.run(
             [resolved, "--version"],
@@ -245,12 +237,18 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         return 1
 
     if not args.yes:
-        command = str(candidate.get("command", "")).strip()
+        candidate = {**candidate, "command": brain_provider.candidate_command(matrix, candidate)}
+        execution = brain_provider.candidate_declares_nonlocal(candidate)
+        command_present, reason, executable, _resolved = brain_provider._command_probe(candidate["command"])
         msg = {
             "action": "refresh",
             "dry_run": True,
             "target": provider_key(args.provider, args.model),
-            "planned_probe": f"{shlex.split(command)[0] if command else '<empty>'} --version",
+            "planned_probe": (
+                f"{execution} declaration"
+                if execution else
+                (f"{executable or '<empty>'} --version" if command_present else reason)
+            ),
             "cache": str(brain_provider.health_path(brain)),
         }
         if args.json:
@@ -267,6 +265,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"brain-provider refresh: {exc}", file=sys.stderr)
         return 1
+    candidate = {**candidate, "command": brain_provider.candidate_command(matrix, candidate)}
     status, reason = probe_candidate(candidate, args.timeout)
     key = provider_key(args.provider, args.model)
     data.setdefault("items", {})[key] = cache_item(args.provider, args.model, status, "probe", reason, ttl_seconds=args.ttl_seconds)
@@ -347,13 +346,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print(f"brain-provider probe: {exc}", file=sys.stderr)
         return 1
 
-    roles_to_check = [args.role] if args.role else list(matrix.get("roles", {}).keys())
-    
-    candidates_to_probe = []
-    for role in roles_to_check:
-        for candidate in matrix.get("roles", {}).get(role, []):
-            if isinstance(candidate, dict):
-                candidates_to_probe.append(candidate)
+    candidates_to_probe = [
+        {**candidate, "command": brain_provider.candidate_command(matrix, candidate)}
+        for candidate in brain_provider.iter_matrix_candidates(matrix, args.role or "")
+    ]
 
     # Deduplicate candidates by provider/model
     unique_candidates = {}

@@ -22,6 +22,11 @@ def write_matrix(brain: Path, data: dict) -> None:
     (brain / "wiki" / "provider-matrix.json").write_text(json.dumps(data))
 
 
+def write_routing(brain: Path, data: dict) -> None:
+    (brain / "config").mkdir(parents=True, exist_ok=True)
+    (brain / "config" / "routing.json").write_text(json.dumps(data), encoding="utf-8")
+
+
 def write_health(brain: Path, data: dict) -> None:
     (brain / ".provider-health.json").write_text(json.dumps(data))
 
@@ -119,6 +124,33 @@ class TestEnrichCandidate:
         assert item["status"] == "unavailable"
         assert item["command_present"] is False
         assert item["reason"] == f"command path is not executable: {tool}"
+
+    def test_env_options_are_parsed_before_assignments_and_executable(self, tmp_path: Path) -> None:
+        tool = tmp_path / "bin" / "custom-cli"
+        tool.parent.mkdir()
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        command = f"env -i --unset HOME -u USER PATH={tool.parent} -- custom-cli --flag"
+        command_present, reason, executable, resolved = brain_provider._command_probe(command)
+        assert command_present is True
+        assert executable == "custom-cli"
+        assert resolved == str(tool)
+        assert "local command found" in reason
+
+    @pytest.mark.parametrize(
+        ("command", "reason"),
+        [
+            ("env -u", "env option requires argument: -u"),
+            ("env --unset", "env option requires argument: --unset"),
+            ("env --bogus cmd", "unsupported env option: --bogus"),
+        ],
+    )
+    def test_env_option_errors_are_precise(self, command: str, reason: str) -> None:
+        command_present, actual_reason, executable, resolved = brain_provider._command_probe(command)
+        assert command_present is False
+        assert actual_reason == reason
+        assert executable == ""
+        assert resolved == ""
 
     def test_health_within_ttl_available_becomes_healthy(self) -> None:
         h = {"items": {"x/m": {
@@ -566,3 +598,54 @@ def test_list_client_models_prefers_api_over_config(tmp_path, monkeypatch):
     payload = brain_provider.list_client_models(tmp_path, "claude")
     assert payload["source"] == "api"
     assert payload["models"] == ["claude-fable-5"]
+
+
+def test_cli_probe_candidate_keeps_declared_nonlocal_configured():
+    import brain_cli.provider as provider_cli
+
+    status, reason = provider_cli.probe_candidate(
+        {"provider": "ghost", "model": "v1", "command": "missing-nonlocal-cli", "execution": "remote"},
+        timeout=1,
+    )
+    assert status == "configured"
+    assert reason == "remote command declared"
+
+
+def test_refresh_cache_roundtrip_preserves_nonlocal_eligibility(temp_brain: Path) -> None:
+    import argparse
+    import brain_cli.provider as provider_cli
+
+    write_routing(temp_brain, {
+        "version": brain_provider.MATRIX_VERSION,
+        "defaults": {"cli": "claude"},
+        "providers": {
+            "ghost": {"command": "missing-nonlocal-cli", "enabled": True},
+            "claude": {"command": "claude", "model_flag": "--model {model}", "enabled": True},
+        },
+        "profiles": {
+            "implementation": [
+                {"rank": 1, "provider": "ghost", "model": "v1", "execution": "virtual"},
+                {"rank": 2, "provider": "claude", "model": "sonnet"},
+            ],
+        },
+        "roles": {"developer": {"profile": "implementation"}},
+    })
+
+    rc = provider_cli.cmd_refresh(argparse.Namespace(
+        brain=str(temp_brain),
+        provider="ghost",
+        model="v1",
+        timeout=1,
+        ttl_seconds=3600,
+        yes=True,
+        json=False,
+    ))
+    assert rc == 0
+    cached = brain_provider.load_provider_health(temp_brain)["items"]["ghost/v1"]
+    assert cached["status"] == "configured"
+    assert cached["reason"] == "virtual command declared"
+
+    resolved = brain_provider.resolve_for_role(temp_brain, "developer")
+    assert resolved["command"] == "missing-nonlocal-cli"
+    assert resolved["provider"] == "ghost"
+    assert resolved["reason"] == "virtual command declared"

@@ -395,7 +395,7 @@ def validate_routing(brain: Path) -> list[Issue]:
             if key in seen:
                 continue
             seen.add(key)
-            command_present, _reason, executable = brain_provider._command_probe(command)
+            command_present, _reason, executable, _resolved = brain_provider._command_probe(command)
             if not executable:
                 continue
             if not command_present and key not in health:
