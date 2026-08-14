@@ -6,13 +6,17 @@ import datetime as _dt
 from pathlib import Path
 from typing import Any
 
+from brain_core.paths import system_asset_rel
+
 from .frontmatter import format_frontmatter, parse_frontmatter, validate_date
 from .pages import (
     INDEX_EXCLUDED,
     Issue,
+    all_page_slugs,
     brain_path,
     existing_page_is_protected,
     extract_wikilinks,
+    iter_system_doc_pages,
     iter_wiki_pages,
     normalize_slug,
     raw_ref_to_path,
@@ -204,12 +208,15 @@ def lock_issues(brain: Path) -> list[Issue]:
 def lint_wiki(brain_value: "str | Path | None" = None) -> list[Issue]:
     brain = brain_path(str(brain_value) if brain_value else None)
     issues = []
-    slugs = wiki_slugs(brain)
+    wiki_pages = list(iter_wiki_pages(brain))
+    system_pages = iter_system_doc_pages(brain)
+    wiki_page_slugs = {page.stem for page in wiki_pages}
+    slugs = all_page_slugs(brain)
     inbound: dict[str, set[str]] = {slug: set() for slug in slugs}
     titles: dict[str, list[str]] = {}
 
-    for page in iter_wiki_pages(brain):
-        rel = str(page.relative_to(brain))
+    for page in [*wiki_pages, *system_pages]:
+        rel = system_asset_rel(page, brain=brain)
         fm, body = parse_frontmatter(read_text(page))
         title = normalize_slug(str(fm.get("title", page.stem)))
         titles.setdefault(title, []).append(page.stem)
@@ -226,7 +233,8 @@ def lint_wiki(brain_value: "str | Path | None" = None) -> list[Issue]:
 
     for slug, sources in sorted(inbound.items()):
         if (
-            slug in INDEX_EXCLUDED
+            slug not in wiki_page_slugs
+            or slug in INDEX_EXCLUDED
             or slug.startswith("source-")
             or slug == "review-cycles"
             or slug.startswith("review-cycle-")
