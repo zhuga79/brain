@@ -35,46 +35,49 @@ def validate_skill(data: Dict[str, Any]) -> bool:
         return False
     return True
 
-def get_skills_for_role(role: str, client: str, skills_dir: Path) -> List[Dict[str, Any]]:
+def _skill_files(skills_dir: Path | None) -> List[Path]:
+    """Файлы скиллов: явный каталог, либо merge $BRAIN + $BRAIN_SYSTEM_PATH."""
+    from brain_core.paths import brain_path, iter_system_files
+
+    if skills_dir is None:
+        return iter_system_files("skills", "**/*.md")
+    try:
+        same = skills_dir.resolve() == (brain_path() / "skills").resolve()
+    except OSError:
+        same = False
+    if same:
+        return iter_system_files("skills", "**/*.md")
+    if not skills_dir.exists():
+        return []
+    return [p for p in skills_dir.rglob("*.md") if p.is_file()]
+
+
+def get_skills_for_role(role: str, client: str, skills_dir: Path | None) -> List[Dict[str, Any]]:
     """Get validated skills applicable to a specific role and client."""
     skills = []
-    if not skills_dir.exists():
-        return skills
-        
-    for filepath in skills_dir.rglob("*.md"):
-        if filepath.name == "SKILL.md":
-            data = parse_skill_file(filepath)
-        else:
-            data = parse_skill_file(filepath)
-            
+    for filepath in _skill_files(skills_dir):
+        data = parse_skill_file(filepath)
         if not data or not validate_skill(data):
             continue
-            
+
         applies = data.get("applies_to", [])
         clients = data.get("supported_clients", [])
-        
+
         if role in applies and (client in clients or "all" in clients):
             skills.append(data)
             
     return skills
 
-def get_pinned_client_for_role(role: str, skills_dir: Path) -> str | None:
+def get_pinned_client_for_role(role: str, skills_dir: Path | None) -> str | None:
     """Check if any skill for this role requires a specific client (platform pinning)."""
-    if not skills_dir.exists():
-        return None
-        
-    for filepath in skills_dir.rglob("*.md"):
-        if filepath.name == "SKILL.md":
-            data = parse_skill_file(filepath)
-        else:
-            data = parse_skill_file(filepath)
-            
+    for filepath in _skill_files(skills_dir):
+        data = parse_skill_file(filepath)
         if not data or not validate_skill(data):
             continue
-            
+
         applies = data.get("applies_to", [])
         clients = data.get("supported_clients", [])
-        
+
         if role in applies:
             if "all" not in clients and len(clients) > 0:
                 # This skill restricts to a limited set of clients. Pin to the first one.
@@ -125,13 +128,10 @@ def get_pinned_client_for_task_role(role: str, task_id: str, brain_path: Path) -
     Вопрос «какие клиенты вообще умеют скиллы этой роли» отвечает
     get_pinned_client_for_role — но это не основание переопределять маршрут.
     """
-    skills_dir = brain_path / "skills"
-    if not skills_dir.exists():
-        return None
     required = set(_parse_task_requires(brain_path / "tasks" / "active.md", task_id))
     if not required:
         return None
-    for filepath in skills_dir.rglob("*.md"):
+    for filepath in _skill_files(brain_path / "skills"):
         data = parse_skill_file(filepath)
         if not data or not validate_skill(data):
             continue

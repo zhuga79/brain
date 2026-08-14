@@ -132,7 +132,9 @@ def load_escalation_matrix(brain: "str | Path") -> tuple[dict[str, Any] | None, 
     unreadable, or does not parse; in the error cases the problems are returned
     in *errors* so the caller can surface them as validation issues.
     """
-    path = Path(brain) / "doctrine" / "escalation-matrix.yaml"
+    from brain_core.paths import resolve_system_asset
+
+    path = resolve_system_asset("doctrine/escalation-matrix.yaml", brain=Path(brain))
     if not path.is_file():
         return None, []
     try:

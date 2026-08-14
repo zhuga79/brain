@@ -74,6 +74,10 @@ def extract_wikilinks(content: str) -> list[str]:
         target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
         if target.startswith("wiki/"):
             target = target[5:]
+        elif target.startswith("docs/decisions/"):
+            target = target[len("docs/decisions/"):]
+        elif target.startswith("docs/"):
+            target = target[5:]
         if target.endswith(".md"):
             target = target[:-3]
         if target:
@@ -93,6 +97,34 @@ def wiki_slugs(brain: Path) -> set[str]:
     if not wiki.exists():
         return set()
     return {path.stem for path in wiki.glob("*.md")}
+
+
+def iter_system_doc_pages(brain: Path) -> list[Path]:
+    """Публичные страницы системы: docs/*.md и docs/decisions/*.md."""
+    from brain_core.paths import iter_system_files
+
+    pages: list[Path] = []
+    seen: set[Path] = set()
+    for rel_dir in ("docs", "docs/decisions"):
+        for path in iter_system_files(rel_dir, "*.md", brain=brain):
+            if not path.is_file() or path.stem in INDEX_EXCLUDED:
+                continue
+            try:
+                key = path.resolve()
+            except OSError:
+                key = path
+            if key in seen:
+                continue
+            seen.add(key)
+            pages.append(path)
+    return pages
+
+
+def all_page_slugs(brain: Path) -> set[str]:
+    """Слаги обоих корней: приватная wiki/ плюс системные docs/."""
+    slugs = wiki_slugs(brain)
+    slugs.update(path.stem for path in iter_system_doc_pages(brain))
+    return slugs
 
 
 def raw_ref_to_path(brain: Path, ref: str) -> Path:
