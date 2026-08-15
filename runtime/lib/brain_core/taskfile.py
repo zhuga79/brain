@@ -151,6 +151,49 @@ def _ensure_lock_owner(active: Path, tid: str, agent: str) -> None:
         raise TaskError(f"task lock is stale: {tid}")
 
 
+def _ensure_open_lock_owner(active: Path, tid: str, agent: str | None) -> None:
+    """Открытая задача под действующим локом принадлежит владельцу лока.
+
+    Между `brain-lock acquire` и `brain-task take` задача остаётся `[ ]`, а лок
+    уже взят. Раньше в этом окне владельца никто не сверял: `complete` читал
+    только `by:`, которого у `[ ]` нет, — и закрыть такую задачу мог посторонний
+    агент, вопреки правилу «acquire перед взятием».
+
+    Протухший, нечитаемый и отсутствующий лок пропускаются: по протоколу
+    (`claim_lock`, `brain-lock acquire`) такой лок перехватываем, а значит и
+    держать задачу не вправе. Иначе брошенный лок мёртвого агента навсегда
+    закрывал бы путь завершения. Сам owner-файл здесь не трогается: завершение
+    — не захват, лок снимает вызывающий (`brain-task complete` → `brain-lock
+    release`).
+    """
+    state = _lock_state(active, tid)
+    if state is None:
+        # Легаси-путь: лока нет вообще — прямое завершение по-прежнему открыто.
+        return
+    lock_owner, stale = state
+    if stale:
+        return
+    if not agent:
+        raise TaskError(f"task owner required: {tid}")
+    if lock_owner != agent:
+        raise TaskError(f"lock owned by {lock_owner}, not {agent}")
+
+
+def _ensure_completion_owner(active: Path, tid: str, match: re.Match[str], agent: str | None) -> None:
+    """Проверка владельца перед завершением — одна на оба состояния задачи.
+
+    `[~]` сверяется по `by:` и (если лок есть) по владельцу лока; `[ ]` — только
+    по локу, другого владельца у открытой задачи нет. Развилка живёт в одном
+    месте, чтобы штатное завершение и recovery не разошлись в том, кого они
+    считают владельцем.
+    """
+    head = grammar.parse_head(match.group(0).splitlines()[0])
+    if head and head.state == "~":
+        _ensure_in_progress_owner(active, tid, match.group(3), agent)
+    else:
+        _ensure_open_lock_owner(active, tid, agent)
+
+
 def _ensure_in_progress_owner(active: Path, tid: str, body: str, agent: str | None) -> None:
     owner = _extract_owner(body)
     if not owner:
@@ -297,12 +340,9 @@ def _validate_recovery_payload(
 
     if active_match:
         active_block = active_match.group(0)
-        head = grammar.parse_head(active_block.splitlines()[0])
-        if head and head.state == "~":
-            _ensure_in_progress_owner(active, tid, active_match.group(3), agent)
-        elif head and head.state == " ":
-            if _lock_owner_path(active, tid).exists():
-                raise TaskError(f"task lock missing owner/body match: {tid}")
+        # Тот же владелец, что и у штатного завершения: recovery дописывает
+        # ровно тот переход, который отказ не пустил бы напрямую.
+        _ensure_completion_owner(active, tid, active_match, agent)
         if _active_block_fingerprint(active_block) != payload["source_active_fingerprint"]:
             raise TaskError(f"completion journal fingerprint mismatch: {tid}")
     else:
@@ -563,9 +603,9 @@ def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None
             if _done_count(_read(done), tid) == 1:
                 return
             raise TaskError(f"task not found: {tid}")
-        head = grammar.parse_head(m.group(0).splitlines()[0])
-        if head and head.state == "~":
-            _ensure_in_progress_owner(active, tid, m.group(3), agent)
+        # Проверка владельца — до journal/done/active: отказ не должен оставлять
+        # следов ни в одном из трёх файлов.
+        _ensure_completion_owner(active, tid, m, agent)
 
         ts = utc_now()
         source_block = m.group(0)

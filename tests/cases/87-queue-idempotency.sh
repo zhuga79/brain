@@ -154,4 +154,39 @@ grep -q "$tid" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: задача не 
 [ ! -e "$BRAIN_PATH/.locks/$tid/owner" ] || { echo "FAILED: lock remained after owner complete"; exit 1; }
 echo "OK: задача закрыта владельцем"
 
+# ── 10. Открытая задача под локом закрывается только владельцем лока ──
+# Между `brain-lock acquire` и `brain-task take` задача остаётся `[ ]`. У неё нет
+# `by:`, и до t-2026-08-14-completion-open-lock-ownership завершение в этом окне
+# не сверяло вообще ничего — закрыть чужую взятую задачу мог любой агент.
+tid2="$(brain-task add "Открытая под локом" --role developer 2>&1 | tail -1 | sed 's/added: //')"
+[ -n "$tid2" ] || { echo "FAILED: вторая задача не создана"; exit 1; }
+brain-lock acquire "$tid2" --as me --ttl 600 >/dev/null || { echo "FAILED: acquire на открытой задаче"; exit 1; }
+grep -q -- "- \[ \].*$tid2 —" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: задача должна остаться open"; exit 1; }
+
+cp "$BRAIN_PATH/tasks/active.md" "$snapshot_dir/active.open.before"
+cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.open.before"
+cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.open.before"
+cp "$BRAIN_PATH/.locks/$tid2/owner" "$snapshot_dir/owner.open.before"
+set +e
+out="$(brain-task complete "$tid2" --as intruder --model evil-model 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: чужой complete закрыл открытую задачу под локом"; exit 1; }
+grep -q "lock owned by me, not intruder" <<< "$out" || {
+  echo "FAILED: open-task complete error unclear: $out"; exit 1;
+}
+cmp -s "$snapshot_dir/active.open.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: intruder complete changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.open.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: intruder complete changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.open.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: intruder complete changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.open.before" "$BRAIN_PATH/.locks/$tid2/owner" || { echo "FAILED: intruder complete changed lock owner"; exit 1; }
+[ ! -e "$BRAIN_PATH/tasks/.taskfile-complete/$tid2.json" ] || { echo "FAILED: intruder complete wrote a journal"; exit 1; }
+echo "OK: открытую задачу под локом чужой не закрывает"
+
+BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid2" --as me >/dev/null || {
+  echo "FAILED: владелец лока не смог закрыть открытую задачу"
+  exit 1
+}
+grep -q "$tid2" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: открытая задача не попала в done"; exit 1; }
+echo "OK: владелец лока закрывает открытую задачу"
+
 echo ">>> queue idempotency checks passed"

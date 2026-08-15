@@ -78,9 +78,13 @@ set -e
 echo "OK: в ветке agent/<task-id> правка проходит"
 
 # ── 5. Для человека хук молчит ──
+# BRAIN_AGENT_ID снимается явно, а не наследуется из шелла: признак человека —
+# именно отсутствие переменной. Запущенный агентом прогон (а pre-commit гоняет
+# сьют ровно с выставленным BRAIN_AGENT_ID) иначе проверял бы агентскую ветку
+# кода вместо человеческой и падал на исправном хуке.
 git switch -q master 2>/dev/null || git switch -q main
 set +e
-"$guard" >/dev/null 2>&1
+env -u BRAIN_AGENT_ID "$guard" >/dev/null 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || { echo "FAILED: хук мешает человеку"; exit 1; }
