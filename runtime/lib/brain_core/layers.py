@@ -78,6 +78,28 @@ def agent_branch(task_id: str) -> str:
     return f"agent/{safe or 'unscoped'}"
 
 
+INSTALLER_SHADOW_FILES = (
+    "setup-brain-v2.sh",
+    "add-design-negotiator-brain.sh",
+    "add-pm-finance-brain.sh",
+    "add-power-features-brain.sh",
+    "add-teams-brain.sh",
+    "install-brain-mcp.sh",
+    "install-hooks.sh",
+    "install-obsidian-skills.sh",
+    "patch-brain-run-doctrine.sh",
+    "refine-tax-boundaries.sh",
+    "pyproject.toml",
+)
+"""Установщики и описание сборки: живут только в системном чекауте.
+
+До инверсии эти файлы лежали в одном корне с данными, и копия осталась в
+приватном дереве. Копия не безобидна: `setup-brain-v2.sh`, запущенный из корня
+данных, видит `SCRIPT_DIR == BRAIN`, считает установку однокорневой,
+пересоздаёт `roles/`, `doctrine/`, `skills/`, `config/` и перезаписывает
+операторский `MEMORY.md` шаблоном. Канонический вход — системный чекаут.
+"""
+
 WRITE_PATH_PREFIXES = (
     "runtime/",
     "roles/",
@@ -88,7 +110,7 @@ WRITE_PATH_PREFIXES = (
     "doctrine/",
     "skills/",
     "config/",
-)
+) + INSTALLER_SHADOW_FILES
 """Системные пути, которые коммитятся только в публичном чекауте."""
 
 
@@ -114,6 +136,32 @@ def is_write_path(path: object) -> bool:
         elif clean == prefix:
             return True
     return False
+
+
+def installer_shadow_reason(name: object) -> str:
+    """Чем именно вредна конкретная тень. Не «что-то не так», а что сломается."""
+    clean = _as_text(name).lstrip("./")
+    if clean == "setup-brain-v2.sh":
+        return (
+            "запуск из корня данных пересоздаёт roles/ doctrine/ skills/ config/ "
+            "и перезаписывает операторский MEMORY.md шаблоном"
+        )
+    if clean == "pyproject.toml":
+        return "сборка и зависимости ядра описываются только системным чекаутом"
+    if clean.startswith("install-"):
+        return "установщик раскладывает системные файлы мимо канонического чекаута"
+    return "bootstrap-скрипт правит системный слой мимо канонического чекаута"
+
+
+def installer_shadows_in(root: object) -> list[str]:
+    """Установочные тени, реально лежащие в корне. Порядок — как в списке."""
+    from pathlib import Path
+
+    base = _as_text(root)
+    if not base:
+        return []
+    top = Path(base)
+    return [name for name in INSTALLER_SHADOW_FILES if (top / name).exists()]
 
 
 def write_path_among(paths: list[object] | None) -> list[str]:

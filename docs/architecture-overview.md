@@ -63,6 +63,13 @@ single-root lookup.
   the data root.
 - What is prohibited is using the data root as a mirrored second canonical
   copy of the system team catalog.
+- Installers and the build manifest are system files too: `setup-brain-v2.sh`,
+  `add-*-brain.sh`, `install-*.sh`, `patch-brain-run-doctrine.sh`,
+  `refine-tax-boundaries.sh` and `pyproject.toml` live only in the system
+  checkout. A copy left in the data root is not cosmetic: running
+  `setup-brain-v2.sh` from there makes `SCRIPT_DIR == BRAIN`, so setup treats
+  the install as single-root, recreates `roles/`, `doctrine/`, `skills/`,
+  `config/` and overwrites the operator's `MEMORY.md` with the template.
 - `setup-brain-v2.sh`, `brain-validate`, and the write-path pre-commit guard
   enforce that boundary in split-root mode.
 
@@ -72,6 +79,8 @@ single-root lookup.
 
 1. Change the system checkout referenced by `BRAIN_SYSTEM_PATH`.
 2. Reinstall from that checkout with `./setup-brain-v2.sh` or `brain-ops update`.
+   That checkout is the only entry point — never run an installer from
+   `$BRAIN_PATH`, and never copy one there.
 3. Run the release gates before treating the install as live.
 
 Installed CLI launchers are copied into `~/.local/bin`, so editing

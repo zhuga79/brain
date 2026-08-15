@@ -153,6 +153,40 @@ def validate_system_paths_not_restored(brain: Path) -> list[Issue]:
     return issues
 
 
+def validate_installer_shadows(brain: Path) -> list[Issue]:
+    """Запрет вернуть установщик в приватное дерево.
+
+    Каталоги ловит `validate_system_paths_not_restored`, но установщики лежат
+    файлами в самом корне, и до раздела они там были законны. Оставшаяся копия
+    опасна не «нечистотой»: `setup-brain-v2.sh` из корня данных считает
+    установку однокорневой и перезаписывает операторский `MEMORY.md`.
+
+    Как и проверка каталогов, работает только при двух корнях: в раскладке
+    «один корень» установщик в корне — это и есть канонический вход.
+    """
+    from brain_core.layers import installer_shadow_reason, installer_shadows_in
+    from brain_core.paths import brain_system_path
+
+    system = brain_system_path(brain=brain)
+    try:
+        same_root = system.resolve() == Path(brain).resolve()
+    except OSError:
+        same_root = Path(system) == Path(brain)
+    if same_root:
+        return []
+
+    return [
+        Issue(
+            "ERROR",
+            name,
+            "installer-тень в дереве данных: "
+            f"{installer_shadow_reason(name)}; "
+            f"канонический файл — {system / name}, копию из корня данных удали",
+        )
+        for name in installer_shadows_in(brain)
+    ]
+
+
 def validate_wiki_page(brain: Path, path: Path, slugs: set[str] | None = None) -> list[Issue]:
     rel = str(path.relative_to(brain))
     slugs = slugs if slugs is not None else all_page_slugs(brain)
@@ -811,6 +845,7 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
         return issues
 
     issues.extend(validate_system_paths_not_restored(brain))
+    issues.extend(validate_installer_shadows(brain))
     slugs = all_page_slugs(brain)
     for raw in sorted((brain / "raw").glob("*.md")):
         issues.extend(validate_raw_source(brain, raw))

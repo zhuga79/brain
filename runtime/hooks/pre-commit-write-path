@@ -44,7 +44,12 @@ import os
 import subprocess
 import sys
 
-from brain_core.layers import agent_branch, write_path_violations
+from brain_core.layers import (
+    INSTALLER_SHADOW_FILES,
+    agent_branch,
+    installer_shadow_reason,
+    write_path_violations,
+)
 from brain_core.paths import brain_path, brain_system_path
 
 repo = sys.argv[1]
@@ -64,7 +69,10 @@ print("ОТКАЗ: системные файлы нельзя коммитить
 print(file=sys.stderr)
 print("В индексе:", file=sys.stderr)
 for path in violations:
-    print(f"  {path}", file=sys.stderr)
+    if path.strip().lstrip("./") in INSTALLER_SHADOW_FILES:
+        print(f"  {path} — {installer_shadow_reason(path)}", file=sys.stderr)
+    else:
+        print(f"  {path}", file=sys.stderr)
 print(file=sys.stderr)
 print("Путь правки — ветка в системном чекауте (BRAIN_SYSTEM_PATH):", file=sys.stderr)
 print(file=sys.stderr)

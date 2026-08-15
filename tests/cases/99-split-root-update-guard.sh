@@ -96,6 +96,68 @@ echo "$shadow_out" | grep -q "config/" || {
 }
 rm -rf "$data/config"
 
+echo ">>> brain-validate rejects a stale installer shadow in the data root"
+cp "$PROJECT_ROOT/setup-brain-v2.sh" "$data/setup-brain-v2.sh"
+cp "$PROJECT_ROOT/pyproject.toml" "$data/pyproject.toml"
+set +e
+installer_out="$(brain-validate 2>&1)"
+installer_rc=$?
+set -e
+[ "$installer_rc" -ne 0 ] || {
+  echo "FAILED: brain-validate should fail on an installer shadow in the data root"
+  echo "$installer_out"
+  exit 1
+}
+echo "$installer_out" | grep -q "ERROR: setup-brain-v2.sh: installer-тень в дереве данных" || {
+  echo "FAILED: missing installer-shadow diagnostic for setup-brain-v2.sh"
+  echo "$installer_out"
+  exit 1
+}
+echo "$installer_out" | grep -q "перезаписывает операторский MEMORY.md" || {
+  echo "FAILED: installer-shadow diagnostic does not say what breaks"
+  echo "$installer_out"
+  exit 1
+}
+echo "$installer_out" | grep -qF "$system/setup-brain-v2.sh" || {
+  echo "FAILED: installer-shadow diagnostic does not name the canonical file"
+  echo "$installer_out"
+  exit 1
+}
+echo "$installer_out" | grep -q "ERROR: pyproject.toml: installer-тень в дереве данных" || {
+  echo "FAILED: missing installer-shadow diagnostic for pyproject.toml"
+  echo "$installer_out"
+  exit 1
+}
+rm -f "$data/setup-brain-v2.sh" "$data/pyproject.toml"
+brain-validate >/dev/null 2>&1 || {
+  echo "FAILED: brain-validate should be green again once the shadow is gone"
+  brain-validate 2>&1 || true
+  exit 1
+}
+
+echo ">>> pre-commit write-path guard rejects re-adding an installer shadow"
+git -C "$data" init >/dev/null 2>&1 || true
+git -C "$data" config user.email "case@example.com"
+git -C "$data" config user.name "case"
+cp "$PROJECT_ROOT/setup-brain-v2.sh" "$data/setup-brain-v2.sh"
+git -C "$data" add -f setup-brain-v2.sh >/dev/null
+set +e
+guard_out="$(cd "$data" && "$PROJECT_ROOT/runtime/hooks/pre-commit-write-path" 2>&1)"
+guard_rc=$?
+set -e
+[ "$guard_rc" -ne 0 ] || {
+  echo "FAILED: write-path guard accepted a staged installer shadow"
+  echo "$guard_out"
+  exit 1
+}
+echo "$guard_out" | grep -q "setup-brain-v2.sh — запуск из корня данных" || {
+  echo "FAILED: write-path guard did not explain the installer shadow"
+  echo "$guard_out"
+  exit 1
+}
+git -C "$data" reset -q >/dev/null 2>&1 || true
+rm -f "$data/setup-brain-v2.sh"
+
 echo ">>> legacy single-root setup remains working"
 single="$BRAIN_FACTORY_TMP/single-root"
 mkdir -p "$single"

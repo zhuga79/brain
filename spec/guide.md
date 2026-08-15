@@ -7,6 +7,10 @@
 ## TL;DR — за 30 секунд
 
 ```bash
+# 0. Установка идёт ТОЛЬКО из системного чекаута. Запуск установщика из
+#    корня данных перезапишет твой MEMORY.md шаблоном.
+cd "$BRAIN_SYSTEM_PATH"
+
 # 1. Один раз настроить
 bash setup-brain-v2.sh && bash add-teams-brain.sh && \
 bash add-pm-finance-brain.sh && bash add-design-negotiator-brain.sh && \
@@ -1485,9 +1489,22 @@ bash tests/e2e-failover.sh   # прогнать все 3 drill'а
 
 Установочные скрипты копируют файлы из `runtime/` в `~/.local/bin/` и другие директории, используя `install -m 755`. `setup-brain-v2.sh` разворачивает базовую структуру памяти, загружая статический контент из `runtime/templates/v2`.
 
+### Где запускать
+
+Единственный вход — системный чекаут (`$BRAIN_SYSTEM_PATH`, этот репозиторий).
+Установщики и `pyproject.toml` живут только там; копировать их в корень данных
+(`$BRAIN_PATH`) нельзя. Из корня данных `SCRIPT_DIR` совпадает с `BRAIN`, setup
+считает установку однокорневой, пересоздаёт `roles/`, `doctrine/`, `skills/`,
+`config/` и перезаписывает операторский `MEMORY.md` шаблоном. `brain-validate`
+и pre-commit write-path guard отклоняют такую копию, называя канонический файл.
+
 ### Порядок установки
 
-Запустите по порядку:
+Запустите по порядку, находясь в системном чекауте:
+
+```bash
+cd "$BRAIN_SYSTEM_PATH"
+```
 
 1. **Базовая установка:** `bash setup-brain-v2.sh`
    - Устанавливает `brain-common` и весь набор runtime CLI.
@@ -1511,6 +1528,7 @@ bash tests/e2e-failover.sh   # прогнать все 3 drill'а
 export PATH="$HOME/.local/bin:$PATH"
 export BRAIN_PATH="${BRAIN_PATH:-$HOME/brain}"
 
+cd "$BRAIN_SYSTEM_PATH"
 bash setup-brain-v2.sh
 bash install-brain-mcp.sh
 codex mcp add brain "$HOME/.local/bin/brain-mcp"

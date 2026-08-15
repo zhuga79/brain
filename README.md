@@ -68,6 +68,15 @@ export BRAIN_PATH="$HOME/brain"
 export BRAIN_SYSTEM_PATH="$HOME/src/brain"
 ```
 
+Установщики (`setup-brain-v2.sh`, `add-*-brain.sh`, `install-*.sh`,
+`patch-brain-run-doctrine.sh`, `refine-tax-boundaries.sh`) и `pyproject.toml`
+живут **только** в системном чекауте, и запускать их можно только оттуда.
+Копия в `~/brain` не безобидна: тогда `SCRIPT_DIR` совпадает с корнем данных,
+setup считает установку однокорневой, пересоздаёт `roles/`, `doctrine/`,
+`skills/`, `config/` и перезаписывает ваш `MEMORY.md` шаблоном.
+`brain-validate` и pre-commit write-path guard отклоняют такие копии
+с указанием канонического файла.
+
 CLI **копируются**, а не линкуются: после `git pull` нужен повторный
 `install`, иначе правка в `runtime/bin/` не подействует. Обе операции и
 прогон тестов закрывает одна команда:

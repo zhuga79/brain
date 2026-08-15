@@ -25,8 +25,11 @@ Brain — рабочий инструмент одного человека, в�
 
 Системную правку пишут веткой в этом (публичном) чекауте, не в `~/brain`.
 Коммит `runtime/`, `roles/`, `tests/` или `spec/` в дереве данных хук
-отклоняет. После merge оператор гоняет `brain-ops update`: `git pull` +
-`setup-brain-v2.sh` + `tests/run.sh`.
+отклоняет. Это же относится к установщикам (`setup-brain-v2.sh`,
+`add-*-brain.sh`, `install-*.sh`, `patch-brain-run-doctrine.sh`,
+`refine-tax-boundaries.sh`) и к `pyproject.toml`: их канонические копии —
+только здесь, запускать установку из корня данных нельзя. После merge оператор
+гоняет `brain-ops update`: `git pull` + `setup-brain-v2.sh` + `tests/run.sh`.
 
 **Агентская ветка сводится в `master` по закрытию своего тикета, а не
 накоплением.** Ветка `agent/<task-id>` живёт ровно один тикет: закрыт тикет —

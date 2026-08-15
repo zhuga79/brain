@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from brain_core.layers import (
+    INSTALLER_SHADOW_FILES,
     WRITE_PATH_PREFIXES,
+    installer_shadow_reason,
+    installer_shadows_in,
     is_data_repo_write,
     is_write_path,
     same_tree,
@@ -162,3 +165,76 @@ def test_docs_name_public_checkout_branch():
 def test_write_path_prefixes_are_explicit():
     for prefix in ("runtime/", "roles/", "tests/", "spec/"):
         assert prefix in WRITE_PATH_PREFIXES
+
+
+@pytest.mark.parametrize("name", INSTALLER_SHADOW_FILES)
+def test_installer_shadows_are_write_paths(name):
+    """t-2026-08-14-data-root-stale-installer-reti: тень не вернуть коммитом."""
+    assert name in WRITE_PATH_PREFIXES
+    assert is_write_path(name)
+    assert is_write_path(f"./{name}")
+
+
+def test_installer_shadow_names_are_root_only():
+    """Совпадение точное: wiki/setup-brain-v2.sh — заметка, а не установщик."""
+    assert not is_write_path("wiki/setup-brain-v2.sh")
+    assert not is_write_path("raw/pyproject.toml")
+    assert not is_write_path("handoff/install-hooks.sh.md")
+
+
+def test_installer_shadow_staged_in_data_repo_is_a_violation(tmp_path):
+    data = tmp_path / "data"
+    system = tmp_path / "system"
+    data.mkdir()
+    system.mkdir()
+    staged = ["wiki/log.md", "setup-brain-v2.sh", "pyproject.toml"]
+    assert write_path_violations(
+        staged, repo=data, data=data, system=system
+    ) == ["setup-brain-v2.sh", "pyproject.toml"]
+    # Один корень — легаси-раскладка, установщик в корне законен.
+    assert write_path_violations(staged, repo=data, data=data, system=data) == []
+
+
+def test_installer_shadows_in_lists_only_present_files(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    assert installer_shadows_in(root) == []
+    (root / "add-teams-brain.sh").write_text("x\n", encoding="utf-8")
+    (root / "setup-brain-v2.sh").write_text("x\n", encoding="utf-8")
+    (root / "wiki").mkdir()
+    # Порядок канонического списка, а не файловой системы.
+    assert installer_shadows_in(root) == ["setup-brain-v2.sh", "add-teams-brain.sh"]
+    assert installer_shadows_in(None) == []
+    assert installer_shadows_in("") == []
+
+
+def test_installer_shadow_reason_names_the_damage():
+    assert "MEMORY.md" in installer_shadow_reason("setup-brain-v2.sh")
+    assert "сборка" in installer_shadow_reason("pyproject.toml")
+    assert "установщик" in installer_shadow_reason("install-brain-mcp.sh")
+    assert "bootstrap" in installer_shadow_reason("refine-tax-boundaries.sh")
+
+
+def test_hook_reports_installer_shadow_reason():
+    hook = (REPO / "runtime" / "hooks" / "pre-commit-write-path").read_text(encoding="utf-8")
+    assert "installer_shadow_reason" in hook
+
+
+def test_installers_live_only_in_the_system_checkout():
+    """Канонические копии — здесь. Валидатор и хук ссылаются на этот же корень."""
+    for name in INSTALLER_SHADOW_FILES:
+        assert (REPO / name).is_file(), name
+
+
+def test_docs_name_the_system_checkout_as_the_only_installer_entry():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    guide = (REPO / "spec" / "guide.md").read_text(encoding="utf-8")
+    overview = (REPO / "docs" / "architecture-overview.md").read_text(encoding="utf-8")
+    contrib = (REPO / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    assert "живут **только** в системном чекауте" in readme
+    assert "перезаписывает ваш `MEMORY.md`" in readme
+    assert 'cd "$BRAIN_SYSTEM_PATH"' in guide
+    assert "Единственный вход — системный чекаут" in guide
+    assert "never run an installer from" in overview
+    assert "их канонические копии" in contrib
