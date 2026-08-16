@@ -99,6 +99,12 @@ System health is intentionally multi-signal:
 
 - CI runs smoke plus pytest for the public repo.
 - Local pre-commit runs smoke plus pytest before system commits.
+- The system-layer pre-commit guard admits a system path on `master`/`main`
+  only from a positively identified operator: an interactive terminal, or a
+  fresh operator-session file outside the repo. A declared `BRAIN_AGENT_ID`
+  means agent, and no identity at all means refusal — absence of a
+  self-declared variable is not evidence of a human. The guard also fails
+  closed when it cannot run its own check. See CONTRIBUTING.md.
 - Runtime health checks for the live instance still include `brain-validate`
   and `brain-lint`.
 

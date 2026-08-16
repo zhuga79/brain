@@ -1,60 +1,155 @@
 #!/usr/bin/env bash
-# pre-commit-system-guard — системный слой не меняется агентом в главной ветке.
+# pre-commit-system-guard — системный слой в главной ветке правит только
+# опознанный человек.
 #
 # Слой данных (tasks/, wiki/, raw/, council/, prd/) агент правит по ходу работы,
 # и автокоммит его стажирует. Системный слой (roles/, doctrine/, runtime/,
 # config/, tests/, MEMORY.md и т. д.) описывает, КАК агент работает: правка
 # меняет поведение всех будущих запусков и должна проходить обзор человеком.
+# Поэтому такой коммит в главной ветке принимается только от оператора, а
+# агентская работа уводится в ветку agent/<task-id>.
 #
-# Поэтому агентский коммит с системными файлами в главной ветке отклоняется, а
-# работа предлагается перенести в ветку agent/<task-id>. Для человека хук
-# молчит: признак агента — переменная окружения BRAIN_AGENT_ID.
+# Опознание положительное с обеих сторон, и «никто» — это отказ:
+#
+#   агент     — назвался сам через BRAIN_AGENT_ID (самообъявление сужает права,
+#               поэтому ему верят на слово);
+#   оператор  — интерактивный терминал на fd 1/2 либо свежий файл операторской
+#               сессии (см. brain_core.committer);
+#   не опознан— отказ. До 2026-08-16 признаком человека служило ОТСУТСТВИЕ
+#               BRAIN_AGENT_ID, то есть переменная, которой распоряжается тот,
+#               кого она должна изобличать: агент, её не выставивший, проходил
+#               в master свободно, и 14–15 августа так прошли два коммита.
+#
+# Гейт fail-closed и в отношении самого себя: если проверку не удалось
+# выполнить (нет python3, не импортируется brain_core), коммит отклоняется.
+# Раньше любая такая осечка молча пропускала всё — а brain_core виден только
+# после установки пакета, поэтому в чужом HOME хук был инертен целиком.
 set -euo pipefail
 
-MAIN_BRANCHES="${BRAIN_MAIN_BRANCHES:-main master}"
-AGENT="${BRAIN_AGENT_ID:-}"
+_HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_SYS_LIB="$_HOOK_DIR/../lib"
+if [ -d "$_SYS_LIB" ]; then
+  _SYS_LIB="$(CDPATH= cd -- "$_SYS_LIB" && pwd)"
+  export PYTHONPATH="${_SYS_LIB}${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
-# Человек коммитит без ограничений — обзор и есть он сам.
-[ -n "$AGENT" ] || exit 0
+# main и master защищены всегда: BRAIN_MAIN_BRANCHES список расширяет, но не
+# подменяет. Иначе гейт снимался бы переменной окружения ровно так же, как
+# раньше снимался отсутствием BRAIN_AGENT_ID, — тем же классом обхода.
+MAIN_BRANCHES="main master ${BRAIN_MAIN_BRANCHES:-}"
 
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+# symbolic-ref, а не rev-parse: на неродившейся ветке (самый первый коммит)
+# rev-parse падает, имя ветки выходило пустым и гейт пропускал коммит.
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+[ -n "$branch" ] || branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
 case " $MAIN_BRANCHES " in
   *" $branch "*) ;;
   *) exit 0 ;;   # уже в ветке — ровно то, чего мы хотим
 esac
 
-staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
-[ -n "$staged" ] || exit 0
+# Терминал определяется здесь: у git-хука stdin отвязан от терминала самим
+# git, а fd 1/2 наследуются от интерактивного `git commit`.
+interactive=no
+if [ -t 1 ] || [ -t 2 ]; then
+  interactive=yes
+fi
 
-system="$(printf '%s\n' "$staged" | python3 -c '
+set +e
+BRAIN_GUARD_BRANCH="$branch" BRAIN_GUARD_INTERACTIVE="$interactive" python3 - <<'PY'
+import os
+import subprocess
 import sys
-from brain_core.layers import system_paths_among
 
-paths = [line.strip() for line in sys.stdin if line.strip()]
-for path in system_paths_among(paths):
-    print(path)
-' 2>/dev/null || true)"
+from brain_core.committer import (
+    classify_committer,
+    operator_session_path,
+    session_ttl,
+)
+from brain_core.layers import agent_branch, system_paths_among
 
-[ -n "$system" ] || exit 0
+REFUSE = 3
 
-task="${BRAIN_TASK_ID:-}"
-target="$(python3 -c "
-from brain_core.layers import agent_branch
-print(agent_branch('${task:-unscoped}'))
-" 2>/dev/null || echo "agent/${task:-unscoped}")"
+staged = subprocess.run(
+    ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout.splitlines()
 
-{
-  echo "ОТКАЗ: агент $AGENT правит системный слой в ветке $branch."
-  echo
-  echo "Системные файлы в индексе:"
-  printf '  %s\n' $system
-  echo
-  echo "Такая правка меняет поведение всех будущих запусков и требует обзора."
-  echo "Перенеси работу в ветку задачи:"
-  echo
-  echo "    git switch -c $target"
-  echo "    git commit ..."
-  echo
-  echo "Если это осознанное решение человека — сними BRAIN_AGENT_ID."
-} >&2
-exit 1
+system = system_paths_among([line.strip() for line in staged if line.strip()])
+if not system:
+    raise SystemExit(0)
+
+branch = os.environ.get("BRAIN_GUARD_BRANCH", "")
+interactive = os.environ.get("BRAIN_GUARD_INTERACTIVE") == "yes"
+who = classify_committer(interactive=interactive)
+if who.is_operator:
+    raise SystemExit(0)
+
+task = os.environ.get("BRAIN_TASK_ID") or "unscoped"
+target = agent_branch(task)
+
+
+def say(line: str = "") -> None:
+    print(line, file=sys.stderr)
+
+
+if who.is_agent:
+    say(f"ОТКАЗ: агент {who.name} правит системный слой в ветке {branch}.")
+else:
+    say(f"ОТКАЗ: системный слой в ветке {branch} правит неопознанный процесс.")
+say()
+say("Системные файлы в индексе:")
+for path in system:
+    say(f"  {path}")
+say()
+say("Такая правка меняет поведение всех будущих запусков и требует обзора.")
+say()
+
+if who.is_agent:
+    say("Перенеси работу в ветку задачи:")
+    say()
+    say(f"    git switch -c {target}")
+    say("    git commit ...")
+else:
+    session = operator_session_path()
+    ttl = session_ttl()
+    say("Гейт не считает отсутствие BRAIN_AGENT_ID признаком человека: этой")
+    say("переменной распоряжается ровно тот, кого она должна изобличать.")
+    say("Опознание положительное, и неопознанный процесс сюда не пишет.")
+    say()
+    say("Человек-оператор: коммит из интерактивного терминала опознаётся сам.")
+    say("Без терминала (GUI-клиент, скрипт) подтвердите сессию явно:")
+    say()
+    say(f"    mkdir -p {session.parent} && touch {session}")
+    say(f"    # действует {ttl} с, продлевается повторным touch")
+    say()
+    say(f"Состояние сессии сейчас — {who.note}")
+    say()
+    say("Агент: назовись и уходи в ветку задачи.")
+    say()
+    say("    export BRAIN_AGENT_ID=<provider-model-short>")
+    say(f"    git switch -c {target}")
+
+raise SystemExit(REFUSE)
+PY
+rc=$?
+set -e
+
+case "$rc" in
+  0) exit 0 ;;
+  3) exit 1 ;;
+  *)
+    {
+      echo "ОТКАЗ: гейт системного слоя не смог проверить коммит (rc=$rc)."
+      echo
+      echo "Проверка не выполнена, поэтому коммит отклонён: молчаливый пропуск"
+      echo "здесь неотличим от отключённого гейта."
+      echo
+      echo "Обычные причины: нет python3 в PATH, или brain_core не читается по"
+      echo "пути $_SYS_LIB."
+    } >&2
+    exit 1
+    ;;
+esac

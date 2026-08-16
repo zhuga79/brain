@@ -45,6 +45,12 @@ manual repair is itself being documented.
 
 ## Code Rules
 
+- Export `BRAIN_AGENT_ID=<your agent id>` for the whole session, and commit
+  system-layer work (`runtime/`, `roles/`, `tests/`, `spec/`, …) on
+  `agent/<task-id>`, never on `master`. The pre-commit guard refuses a
+  system-layer commit on a main branch from anyone it cannot positively
+  identify as the operator, so an unset `BRAIN_AGENT_ID` buys nothing — it only
+  makes the refusal less informative. See CONTRIBUTING.md.
 - Keep changes scoped to the active ticket.
 - Prefer the existing shell/Python style and runtime layout.
 - Do not introduce new dependencies unless the ticket explicitly requires it.
