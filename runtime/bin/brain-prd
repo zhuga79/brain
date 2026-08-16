@@ -119,12 +119,20 @@ if not blocks:
     blocks = brain_task_parser.find_blocks("\n".join(lines))
 
 # --- normalize ids and add parent ---
+# t-2026-08-14-prd-malformed-subtask-rejectio: a block that find_blocks()
+# matched but parse_block() could not read used to be skipped here, so
+# decompose --commit silently dropped it while committing the rest — the
+# same block that `brain-prd dry-run` already refuses outright. Reject the
+# whole batch the same way, before any write happens (commit_prepared()
+# runs only below, inside `if do_commit`). Only the header line is echoed,
+# never the block body, so a secret in a continuation line cannot leak.
 normalized = []
 local_to_full = {}
 for b in blocks:
     parsed = brain_task_parser.parse_block(b)
     if not parsed:
-        continue
+        print(f"invalid subtask header: {b.splitlines()[0]}", file=sys.stderr)
+        sys.exit(1)
     prio, local_id, title = parsed["prio"], parsed["id"], parsed["title"]
     full_id = local_id if local_id.startswith("t-") else f"{parent_id}-{local_id}"
     local_to_full[local_id] = full_id

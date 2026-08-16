@@ -61,7 +61,15 @@ def normalize_subtasks(parent_id: str, sub_text: str) -> list[NormalizedSubtask]
     for block in blocks:
         parsed = brain_task_parser.parse_block(block)
         if not parsed:
-            continue
+            # t-2026-08-14-prd-malformed-subtask-rejectio: a block that
+            # find_blocks() matched but parse_block() could not read used to
+            # be dropped silently here, so the rest of the PRD committed
+            # while this one vanished from PRD, active.md and the log alike.
+            # Reject the whole batch instead — mirrors what `brain-prd
+            # dry-run` already does for the same input. Only the header line
+            # is echoed back, never the block body, so any secret pasted
+            # into a continuation line does not leak into the error.
+            raise PRDError(f"invalid subtask header: {block.splitlines()[0]}")
         prio = str(parsed["prio"])
         local_id = str(parsed["id"])
         title = str(parsed["title"])

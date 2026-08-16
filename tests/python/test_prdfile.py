@@ -160,6 +160,70 @@ status: draft
     assert prd_path.read_bytes() == prd_before
 
 
+def test_commit_rejects_unparsable_subtask_without_writing(tmp_path: Path):
+    """t-2026-08-14-prd-malformed-subtask-rejectio.
+
+    A block that find_blocks() matches (non-empty header line) but
+    parse_block() cannot read (missing the required em-dash separator)
+    used to be silently dropped by normalize_subtasks(): the rest of the
+    PRD committed fine and the malformed subtask vanished from the PRD,
+    active.md and the log without a trace. It must instead reject the
+    whole batch atomically, the same way `brain-prd dry-run` already does
+    for identical input.
+    """
+    prd_path, active, done = _setup_brain(tmp_path)
+    prd_path.write_text(
+        """---
+id: t-parent
+status: draft
+---
+## Subtasks
+
+- [ ] [P1] s1 -- First
+      role: developer
+      acceptance: ok
+
+- [ ] [P2] s2 — Second
+      role: developer
+      acceptance: ok
+""",
+        encoding="utf-8",
+    )
+    active_before = active.read_bytes()
+    prd_before = prd_path.read_bytes()
+
+    try:
+        prdfile.commit(prd_path, active, done, "t-parent")
+    except prdfile.PRDError as exc:
+        assert "invalid subtask header" in str(exc)
+        assert "s1" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected unparsable subtask block to be rejected")
+
+    assert active.read_bytes() == active_before
+    assert prd_path.read_bytes() == prd_before
+
+
+def test_commit_prepared_rejects_unparsable_block_without_writing(tmp_path: Path):
+    prd_path, active, done = _setup_brain(tmp_path)
+    prepared = [
+        "- [ ] [P1] t-parent-s1 -- First\n      parent: t-parent\n      acceptance: ok",
+        "- [ ] [P1] t-parent-s2 — Second\n      parent: t-parent\n      acceptance: ok",
+    ]
+    active_before = active.read_bytes()
+    prd_before = prd_path.read_bytes()
+
+    try:
+        prdfile.commit_prepared(prd_path, active, done, "t-parent", prepared)
+    except prdfile.PRDError as exc:
+        assert "invalid subtask header" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected unparsable prepared block to be rejected")
+
+    assert active.read_bytes() == active_before
+    assert prd_path.read_bytes() == prd_before
+
+
 def test_commit_prepared_rejects_duplicates_without_writing(tmp_path: Path):
     prd_path, active, done = _setup_brain(tmp_path)
     prepared = [
