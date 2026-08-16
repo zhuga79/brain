@@ -14,15 +14,19 @@
 set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BRAIN="${BRAIN_PATH:-$HOME/brain}"
-MCP_DIR="$HOME/.local/share/brain-mcp"
-LAUNCHER_PATH="$HOME/.local/bin/brain-mcp"
+# Каталог установки и путь лаунчера переопределяются теми же переменными,
+# что читают brain-status, setup-brain-v2.sh и сам лаунчер. Без этого
+# установщик был единственным, кто умел писать только в боевую установку, —
+# проверить его, не трогая рабочий MCP оператора, было нечем.
+MCP_DIR="${BRAIN_MCP_DIR:-$HOME/.local/share/brain-mcp}"
+LAUNCHER_PATH="${BRAIN_MCP_LAUNCHER:-$HOME/.local/bin/brain-mcp}"
 PACKAGING_TOOL="$SCRIPT_DIR/runtime/mcp/packaging.py"
 
 [ ! -f "$BRAIN/MEMORY.md" ] && { echo "Сначала setup-brain-v2.sh"; exit 1; }
 [ ! -f "$PACKAGING_TOOL" ] && { echo "Не найден $PACKAGING_TOOL"; exit 1; }
 
 mkdir -p "$MCP_DIR"
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$(dirname "$LAUNCHER_PATH")"
 
 # =============================================================================
 # Python venv + FastMCP
@@ -102,7 +106,7 @@ cat <<INFO
 ## Подключение к Claude Code
 
 Один раз:
-  claude mcp add brain "$HOME/.local/bin/brain-mcp"
+  claude mcp add brain "$LAUNCHER_PATH"
 
 После этого в любой Claude Code сессии будут доступны tools:
   brain__list_tasks

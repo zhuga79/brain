@@ -98,4 +98,66 @@ env -u BRAIN_MCP_SKIP_PIP bash "$PROJECT_ROOT/install-brain-mcp.sh" >/tmp/mcp-re
   fail_case "existing MCP refresh unexpectedly depended on pip"
 }
 
+# После удачной установки служебных каталогов не остаётся.
+leftovers="$(find "$MCP_DIR" -maxdepth 1 -name '.brain-mcp-*' -print)"
+[ -z "$leftovers" ] || fail_case "install left temp/backup leftovers: $leftovers"
+
+# -----------------------------------------------------------------------------
+# Прерванная подмена восстановима
+# -----------------------------------------------------------------------------
+# Обрыв имитируем в самой опасной точке: прежнее дерево уже уехало в backup,
+# новое ещё не внесено, журнал на месте. Без восстановления установка здесь
+# остаётся без runtime/ — ровно то, чем был опасен старый install.
+echo ">>> Verifying interrupted swap is recoverable"
+crash_backup="$MCP_DIR/.brain-mcp-backup-crash"
+crash_stage="$MCP_DIR/.brain-mcp-stage-crash"
+mkdir -p "$crash_backup" "$crash_stage"
+mv "$MCP_DIR/runtime" "$crash_backup/runtime"
+cat > "$MCP_DIR/.brain-mcp-swap.json" <<'JSON'
+{"backup": ".brain-mcp-backup-crash", "incoming": ["runtime", "manifest.json"], "replaced": ["manifest.json", "runtime"], "schema": "brain-mcp-swap-journal-v1", "stage": ".brain-mcp-stage-crash"}
+JSON
+
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" recover --install-root "$MCP_DIR" >/tmp/mcp-recover.out || {
+  cat /tmp/mcp-recover.out
+  fail_case "packaging recover failed after simulated crash"
+}
+grep -q '"recovered": true' /tmp/mcp-recover.out || {
+  cat /tmp/mcp-recover.out
+  fail_case "recover did not report a rollback"
+}
+assert_file_exists "$MCP_DIR/runtime/mcp/server.py"
+assert_file_exists "$MCP_DIR/runtime/lib/brain_core/paths.py"
+[ ! -e "$crash_backup" ] || fail_case "backup tree survived recovery"
+[ ! -e "$crash_stage" ] || fail_case "staging tree survived recovery"
+[ ! -e "$MCP_DIR/.brain-mcp-swap.json" ] || fail_case "swap journal survived recovery"
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$PROJECT_ROOT" --install-root "$MCP_DIR" >/tmp/mcp-verify-recovered.out || {
+  cat /tmp/mcp-verify-recovered.out
+  fail_case "recovered MCP tree drifted from source"
+}
+
+# -----------------------------------------------------------------------------
+# Установка отводится в сторону теми же переменными, что читает brain-status
+# -----------------------------------------------------------------------------
+echo ">>> Verifying installer honours BRAIN_MCP_DIR / BRAIN_MCP_LAUNCHER"
+alt_dir="$HOME/alt-brain-mcp"
+alt_launcher="$HOME/alt-bin/brain-mcp"
+mkdir -p "$alt_dir"
+ln -s "$MCP_DIR/.venv" "$alt_dir/.venv"
+env BRAIN_MCP_DIR="$alt_dir" BRAIN_MCP_LAUNCHER="$alt_launcher" BRAIN_MCP_SKIP_PIP=1 \
+  bash "$PROJECT_ROOT/install-brain-mcp.sh" >/tmp/mcp-alt.out 2>/tmp/mcp-alt.err || {
+  cat /tmp/mcp-alt.out
+  cat /tmp/mcp-alt.err
+  fail_case "install-brain-mcp.sh ignored BRAIN_MCP_DIR"
+}
+assert_file_exists "$alt_dir/manifest.json"
+assert_file_exists "$alt_dir/runtime/mcp/server.py"
+assert_file_exists "$alt_launcher"
+[ -L "$alt_dir/.venv" ] || fail_case "existing .venv was replaced by the refresh"
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$PROJECT_ROOT" --install-root "$alt_dir" >/dev/null || {
+  fail_case "diverted MCP install drifted from source"
+}
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$PROJECT_ROOT" --install-root "$MCP_DIR" >/dev/null || {
+  fail_case "diverted install disturbed the default MCP tree"
+}
+
 echo ">>> MCP installer packaging checks passed"
