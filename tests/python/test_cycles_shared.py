@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +28,8 @@ from brain_app.cycles import (
     sync,
     validate,
 )
+
+REPO = Path(__file__).resolve().parent.parent.parent
 
 
 # ── systemd ──────────────────────────────────────────────────────────────────
@@ -185,6 +189,83 @@ def test_wants_timer_present_in_validate_index_refresh_provider_probe(cycle, tim
     module, extra = CYCLE_UNIT_ARGS[cycle]
     head = _rendered_cycle_service(module, extra).split("[Service]", 1)[0]
     assert f"Wants={timer}" in head
+
+
+# ── t-2026-08-16-operator-timers-dead-user-serv ─────────────────────────────
+#
+# systemd user-менеджер стартует сервисы с минимальным PATH и без .pth,
+# который `setup-brain-v2.sh` кладёт в user site-packages интерактивного
+# python3. Все шесть циклов упали `ModuleNotFoundError: No module named
+# 'brain_app'` под systemd, оставаясь `active` по `systemctl list-timers`.
+
+@pytest.mark.parametrize("cycle", list(CYCLE_UNIT_ARGS))
+def test_every_cycle_unit_carries_pythonpath(cycle, monkeypatch):
+    """Все шесть юнитов несут PYTHONPATH на runtime/lib системного чекаута."""
+    monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(REPO))
+    module, extra = CYCLE_UNIT_ARGS[cycle]
+    args = argparse.Namespace(brain="/tmp/brain", **extra)
+    env = dict(module.unit(args).environment)
+    assert env.get("PYTHONPATH") == str(REPO / "runtime" / "lib")
+    assert env.get("BRAIN_PATH") == "/tmp/brain"
+
+
+def test_service_environment_follows_split_root(monkeypatch, tmp_path):
+    """Данные и система расходятся (как на машине оператора) — PYTHONPATH
+    указывает на систему, а не на дерево данных."""
+    monkeypatch.setenv("BRAIN_SYSTEM_PATH", str(REPO))
+    data_root = tmp_path / "data-only-brain"
+    env = dict(runner.service_environment(data_root))
+    assert env["BRAIN_PATH"] == str(data_root)
+    assert env["PYTHONPATH"] == str(REPO / "runtime" / "lib")
+
+
+def test_service_environment_falls_back_to_brain_without_split_root(monkeypatch, tmp_path):
+    """Без BRAIN_SYSTEM_PATH система = дерево данных, как до разделения корней."""
+    monkeypatch.delenv("BRAIN_SYSTEM_PATH", raising=False)
+    brain = tmp_path / "brain"
+    env = dict(runner.service_environment(brain))
+    assert env["PYTHONPATH"] == str(brain / "runtime" / "lib")
+
+
+def test_core_import_fails_under_a_pth_less_interpreter_without_pythonpath(tmp_path):
+    """Регресс-тест: интерпретатор без .pth не видит brain_app без PYTHONPATH.
+
+    Это ровно та картина, что двое суток показывал журнал systemd: `env
+    python3` резолвится в интерпретатор, куда `brain-runtime.pth` никогда не
+    ставился (systemd-пользовательский менеджер даёт минимальный PATH и не
+    читает login-shell). HOME подменён на пустой каталог, поэтому даже если
+    тест запускает интерактивный python3 с реальным .pth оператора, в этом
+    прогоне .pth не находится — интерпретатор honестно «без .pth».
+    """
+    fake_home = tmp_path / "home-without-pth"
+    fake_home.mkdir()
+    bare_env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_home)}
+
+    broken = subprocess.run(
+        [sys.executable, "-c", "import brain_app"],
+        env=bare_env, capture_output=True, text=True,
+    )
+    assert broken.returncode != 0
+    assert "ModuleNotFoundError" in broken.stderr
+    assert "brain_app" in broken.stderr
+
+
+def test_service_environment_pythonpath_recovers_the_same_interpreter(tmp_path):
+    """Тот же интерпретатор из предыдущего теста — с PYTHONPATH из
+    `runner.service_environment` — импортирует brain_app как обычно."""
+    fake_home = tmp_path / "home-without-pth"
+    fake_home.mkdir()
+    bare_env = {"PATH": "/usr/bin:/bin", "HOME": str(fake_home)}
+
+    env_vars = dict(runner.service_environment(REPO))
+    fixed_env = dict(bare_env, PYTHONPATH=env_vars["PYTHONPATH"])
+
+    fixed = subprocess.run(
+        [sys.executable, "-c", "import brain_app; print('ok')"],
+        env=fixed_env, capture_output=True, text=True,
+    )
+    assert fixed.returncode == 0, fixed.stderr
+    assert fixed.stdout.strip() == "ok"
 
 
 # ── corrective ───────────────────────────────────────────────────────────────

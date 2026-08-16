@@ -17,6 +17,7 @@ from typing import Any
 
 import brain_tasks
 import brain_index
+import brain_periodic
 import brain_provider
 
 TASK_RE = brain_tasks.TASK_RE  # re-export for backward compat
@@ -300,6 +301,7 @@ def collect_status(brain: Path) -> dict[str, Any]:
         "providers": brain_provider.collect_provider_status(brain),
         "cli_parity": detect_cli_parity(brain),
         "mcp_parity": detect_mcp_parity(brain),
+        "periodic": brain_periodic.collect_periodic_status(),
     }
 
 
@@ -397,6 +399,30 @@ def print_text(status: dict[str, Any]) -> None:
                 )
             ]
             print(f"  drifted: {', '.join(offenders[:8])}" + (" ..." if len(offenders) > 8 else ""))
+    periodic = status.get("periodic", {})
+    if periodic:
+        # t-2026-08-16-operator-timers-dead-user-serv: таймер, который просто
+        # активен, ничего не говорит о том, отработал ли он в systemd-контексте
+        # успешно — только это делает провал видимым без ручного journalctl.
+        if not periodic.get("available"):
+            print("Periodic units: systemctl --user unavailable — status unknown")
+        else:
+            failed = periodic.get("failed", [])
+            unknown = periodic.get("unknown", [])
+            not_installed = periodic.get("not_installed", [])
+            warn = " [WARN: journalctl --user -u <unit>.service]" if failed else ""
+            print(
+                "Periodic units: "
+                f"{len(periodic.get('units', [])) - len(failed) - len(unknown) - len(not_installed)}/"
+                f"{len(periodic.get('units', []))} healthy"
+                f"{warn}"
+            )
+            if failed:
+                print(f"  FAILED: {', '.join(failed)}")
+            if not_installed:
+                print(f"  not installed: {', '.join(not_installed)}")
+            if unknown:
+                print(f"  unknown: {', '.join(unknown)}")
 
 
 def main() -> int:
@@ -419,4 +445,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        # `brain-status --json | grep -q ...` — типичный вызов из smoke-кейсов
+        # и `brain-ops`; grep закрывает читающий конец, как только находит
+        # совпадение, не дожидаясь остального вывода. Секция periodic-юнитов
+        # (t-2026-08-16-operator-timers-dead-user-serv) подняла типичный размер
+        # JSON выше объёма трубы за один write(), и досрочно закрытый читатель
+        # стал обычным случаем, а не ошибкой продюсера — читатель получил всё,
+        # что искал. os.devnull гасит попытку доflush'ить оставшийся буфер, не
+        # оставляя traceback/ненулевой код там, где потребитель просто устал ждать.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        raise SystemExit(0)

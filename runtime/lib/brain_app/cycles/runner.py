@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from brain_core.paths import brain_path
+from brain_core.paths import brain_path, brain_system_path
 
 from . import systemd
 
@@ -45,6 +45,52 @@ class CycleSpec:
 def resolve_brain(args: argparse.Namespace) -> Path:
     """Корень Brain из аргументов, окружения или умолчания."""
     return brain_path(getattr(args, "brain", None)).resolve()
+
+
+def service_environment(brain: Path) -> list[tuple[str, str]]:
+    """BRAIN_PATH и PYTHONPATH — переменные, общие всем шести юнитам.
+
+    t-2026-08-16-operator-timers-dead-user-serv: все шесть циклов несут
+    `#!/usr/bin/env python3` (или запускаются через console-скрипт с тем же
+    шебангом). Интерактивно первым в PATH обычно идёт Homebrew python3, и туда
+    `setup-brain-v2.sh` кладёт `brain-runtime.pth`. Но systemd user-менеджер
+    стартует сервисы с собственным минимальным PATH — он не читает login-shell
+    и резолвит `env python3` в системный интерпретатор, где `.pth` никогда не
+    ставился. Импорт `brain_app` падает `ModuleNotFoundError`, при этом таймер
+    в `systemctl list-timers` выглядит `active`: он исправно стартует сервис,
+    просто сервис тут же проваливается с exit-code. Пять таймеров молчали так
+    двое суток, пока `brain-status` рапортовал установленное ядро.
+
+    PYTHONPATH здесь не альтернатива пакетированию — t-2026-08-14-package-core
+    уже закрыл PYTHONPATH-хаки как костыль для интерактивного CLI (brain-validate
+    /brain-task находят brain_core через .pth, без ручного sys.path). Здесь
+    другой случай: это декларация окружения самого systemd-юнита, а не обход
+    установки ядра. systemd не может увидеть .pth стороннего интерпретатора —
+    единственный канал сообщить процессу, где лежит дерево, это Environment=
+    в самом юните. Ядро остаётся установлено ровно один раз (.pth/editable);
+    PYTHONPATH лишь делает путь к этой установке видимым и в systemd-контексте,
+    а не только в интерактивном.
+
+    Альтернативы и почему они отклонены — записаны в
+    ref: wiki/log.md, t-2026-08-16-operator-timers-dead-user-serv:
+      * `.pth` во ВСЕ site-packages, что найдутся на машине — не решает: набор
+        интерпретаторов, которые может резолвнуть `env python3` в разных
+        контекстах (login shell, systemd, cron, su -c), заранее не известен и
+        меняется при апгрейде дистрибутива/Homebrew; чинили бы каждый раз заново.
+      * Прибитый абсолютный путь интерпретатора в шебанге/ExecStart — переживает
+        только одну машину: юниты правит одна и та же обвязка на нескольких
+        хостах (см. `brain-sync.timer.bak-*` — copy-paste между машинами),
+        и абсолютный путь Homebrew на одной из них не существует на другой.
+      * Полноценный venv вместо .pth-фолбэка — правильный долгосрочный шаг, но
+        меняет сам механизм установки ядра, который t-2026-08-14-package-core
+        стабилизировал двое суток назад; переигрывать его сейчас — расширять
+        blast radius ровно там, где B4-доктрина просит сузить его.
+    """
+    system_root = brain_system_path(brain=brain)
+    return [
+        ("BRAIN_PATH", str(brain)),
+        ("PYTHONPATH", str(system_root / "runtime" / "lib")),
+    ]
 
 
 def add_mode_args(parser: argparse.ArgumentParser, *, required: bool = False) -> None:

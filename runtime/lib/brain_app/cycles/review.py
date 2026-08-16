@@ -307,7 +307,7 @@ def unit(args: argparse.Namespace) -> systemd.UnitSpec:
             ("Persistent", "true"),
         ],
         working_dir=brain,
-        environment=[("BRAIN_PATH", str(brain))],
+        environment=runner.service_environment(brain),
     )
 
 

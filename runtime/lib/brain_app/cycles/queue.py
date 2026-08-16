@@ -257,7 +257,7 @@ def unit(args: argparse.Namespace) -> systemd.UnitSpec:
         exec_args=["--brain", str(brain), "--apply", "--agent", args.agent],
         timer_options=[("OnCalendar", "daily"), ("Persistent", "true"), ("RandomizedDelaySec", "30min")],
         working_dir=brain,
-        environment=[("BRAIN_PATH", str(brain))],
+        environment=runner.service_environment(brain),
     )
 
 

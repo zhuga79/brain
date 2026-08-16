@@ -122,7 +122,7 @@ def unit(args: argparse.Namespace) -> systemd.UnitSpec:
         timer_options=[("OnCalendar", "daily"), ("RandomizedDelaySec", "6h"), ("Persistent", "true")],
         unit_options=[("Wants", f"{NAME}.timer")],
         working_dir=brain,
-        environment=[("BRAIN_PATH", str(brain))],
+        environment=runner.service_environment(brain),
     )
 
 

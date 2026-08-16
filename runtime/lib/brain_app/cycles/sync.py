@@ -227,7 +227,7 @@ def unit(args: argparse.Namespace) -> systemd.UnitSpec:
         timer_options=[("OnBootSec", "2min"), ("OnUnitActiveSec", args.interval), ("Persistent", "true")],
         unit_options=[("After", "network-online.target"), ("Wants", "network-online.target")],
         working_dir=repo,
-        environment=[("BRAIN_PATH", str(brain))],
+        environment=runner.service_environment(brain),
     )
 
 

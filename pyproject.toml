@@ -24,6 +24,7 @@ py-modules = [
     "brain_launch_queue",
     "brain_launch_watch",
     "brain_learning",
+    "brain_periodic",
     "brain_provider",
     "brain_sandbox_guard",
     "brain_skill_check",
