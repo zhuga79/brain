@@ -44,6 +44,15 @@ unset BRAIN_SYSTEM_PATH BRAIN_ENV_FILE
 # раннера, увидит его отсутствие и откажется работать по боевым данным.
 export BRAIN_TEST_SANDBOX=1
 
+# Состав провайдерских CLI задаёт песочница, а не хост. Каталог заглушек идёт
+# первым в PATH и перекрывает настоящие codex/gemini/claude/opencode: без
+# этого решение маршрутизатора зависело от того, что установлено на машине, и
+# смоук показывал 100/100 у оператора против 92/100 на чистом раннере.
+# Подробности — в tests/lib/provider-stubs.sh.
+. "$SCRIPT_DIR/lib/provider-stubs.sh"
+STUB_BIN=$(make_provider_stubs "$TMP_HOME/.provider-stubs")
+export PATH="$STUB_BIN:$PATH"
+
 echo ">>> [bootstrap] Running setup scripts"
 scripts=(
     setup-brain-v2.sh

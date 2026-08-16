@@ -6,9 +6,30 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "runtime" / "lib"))
+
+
+@pytest.fixture(autouse=True)
+def brain_cli_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`create_fallback_handoff` зовёт brain-handoff по имени, через PATH.
+
+    Тест проходил только там, где Brain уже установлен в ~/.local/bin: на
+    чистом раннере шесть проверок падали на «No such file or directory:
+    'brain-handoff'». Команду даёт дерево, а не машина — тогда прогон
+    проверяет ту же копию, которую правят.
+    """
+    bin_dir = REPO / "runtime" / "bin"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    lib_dir = str(REPO / "runtime" / "lib")
+    existing = os.environ.get("PYTHONPATH", "")
+    if lib_dir not in existing.split(os.pathsep):
+        monkeypatch.setenv(
+            "PYTHONPATH", f"{lib_dir}{os.pathsep}{existing}" if existing else lib_dir
+        )
 
 loader = importlib.machinery.SourceFileLoader("brain_orchestrator_cli", str(REPO / "runtime" / "bin" / "brain-orchestrator"))
 spec = importlib.util.spec_from_loader(loader.name, loader)

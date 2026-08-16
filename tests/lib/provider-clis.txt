@@ -1,0 +1,13 @@
+# Провайдерские CLI, наличие которых обязана обеспечить песочница тестов.
+#
+# Один список на два прогона: bash-заглушки для смоука (tests/lib/provider-stubs.sh)
+# и фикстура pytest (tests/python/conftest.py). Второй список неизбежно отстал бы
+# от первого, а расхождение здесь означает, что часть прогона снова читает
+# состав софта на хосте вместо своей конфигурации.
+#
+# Имена берутся из providers.*.command в config/routing.json: именно их
+# `brain_provider._command_probe` ищет через shutil.which.
+claude
+codex
+gemini
+opencode

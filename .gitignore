@@ -1,6 +1,10 @@
 __pycache__/
 *.py[cod]
 *.pyo
+# Остаток editable-установки: setuptools кладёт метаданные рядом с пакетом,
+# и после каждого `pip install -e` (в т.ч. внутри tests/run.sh) в дереве
+# появляется невыслеженный каталог.
+*.egg-info/
 
 .DS_Store
 *.swp

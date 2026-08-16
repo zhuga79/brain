@@ -204,6 +204,52 @@ for target in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md" "$HOME/.gemini/
   fi
 done
 
+# -----------------------------------------------------------------------------
+# Схемы, шаблоны и ядро как пакет
+# -----------------------------------------------------------------------------
+# Идёт ДО установки CLI, и это не косметика. `pip install -e` создаёт свои
+# console-скрипты из [project.scripts] — brain-provider, brain-validate,
+# brain-search — в том же ~/.local/bin. Пока установка шла первой, pip
+# затирал три обёртки из runtime/bin, и 88-bin-install видел их устаревшими.
+# Локально расхождения не было только потому, что PEP 668 гнал pip в
+# .pth-фолбэк и console-скрипты не появлялись вовсе: гейт был зелёным ровно
+# из-за отказа pip. Установка CLI идёт последней и остаётся победителем.
+mkdir -p "$HOME/.local/share/brain/schemas"
+mkdir -p "$HOME/.local/share/brain/templates"
+if [ -d "$SCRIPT_DIR/runtime/schemas" ]; then
+  cp -R "$SCRIPT_DIR/runtime/schemas/." "$HOME/.local/share/brain/schemas/"
+fi
+if [ -d "$SCRIPT_DIR/runtime/templates/workspace" ]; then
+  mkdir -p "$HOME/.local/share/brain/templates/workspace"
+  cp -R "$SCRIPT_DIR/runtime/templates/workspace/." "$HOME/.local/share/brain/templates/workspace/"
+fi
+
+# Библиотека ставится один раз и editable: ровно одна копия — та, что в дереве.
+echo ">>> Установка ядра как пакета (editable)"
+if python3 -m pip install --user -e "$SCRIPT_DIR" --quiet 2>/dev/null; then
+  echo "✓ pip install --user -e"
+else
+  # PEP 668: дистрибутивы помечают системный интерпретатор как externally-managed
+  # и pip отказывается ставить в него что-либо. Ломать окружение
+  # (--break-system-packages) ради этого нельзя, поэтому подключаем дерево так
+  # же, как это сделал бы editable-install, — файлом .pth в user site-packages.
+  python3 - "$SCRIPT_DIR" <<'PYEOF'
+import site
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+target = Path(site.getusersitepackages())
+target.mkdir(parents=True, exist_ok=True)
+(target / "brain-runtime.pth").write_text(str(root / "runtime" / "lib") + "\n", encoding="utf-8")
+print(f"✓ .pth в {target} (pip отказал: externally-managed)")
+PYEOF
+fi
+
+# Старые копии удаляем: пока они лежат на месте, они участвуют в разрешении
+# импорта и способны перебить дерево.
+rm -rf "$HOME/.local/lib/brain" "$HOME/.local/share/brain/lib"
+
 # =============================================================================
 # CLI-инструменты в ~/.local/bin
 # =============================================================================
@@ -240,45 +286,6 @@ for _cmd_path in "$SCRIPT_DIR"/runtime/bin/*; do
 done
 [ "$_installed" -gt 0 ] || { echo "Нет исполняемых файлов в $SCRIPT_DIR/runtime/bin"; exit 1; }
 echo "✓ CLI: установлено команд — $_installed"
-
-# -----------------------------------------------------------------------------
-# Схемы, шаблоны и ядро как пакет
-# -----------------------------------------------------------------------------
-mkdir -p "$HOME/.local/share/brain/schemas"
-mkdir -p "$HOME/.local/share/brain/templates"
-if [ -d "$SCRIPT_DIR/runtime/schemas" ]; then
-  cp -R "$SCRIPT_DIR/runtime/schemas/." "$HOME/.local/share/brain/schemas/"
-fi
-if [ -d "$SCRIPT_DIR/runtime/templates/workspace" ]; then
-  mkdir -p "$HOME/.local/share/brain/templates/workspace"
-  cp -R "$SCRIPT_DIR/runtime/templates/workspace/." "$HOME/.local/share/brain/templates/workspace/"
-fi
-
-# Библиотека ставится один раз и editable: ровно одна копия — та, что в дереве.
-echo ">>> Установка ядра как пакета (editable)"
-if python3 -m pip install --user -e "$SCRIPT_DIR" --quiet 2>/dev/null; then
-  echo "✓ pip install --user -e"
-else
-  # PEP 668: дистрибутивы помечают системный интерпретатор как externally-managed
-  # и pip отказывается ставить в него что-либо. Ломать окружение
-  # (--break-system-packages) ради этого нельзя, поэтому подключаем дерево так
-  # же, как это сделал бы editable-install, — файлом .pth в user site-packages.
-  python3 - "$SCRIPT_DIR" <<'PYEOF'
-import site
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve()
-target = Path(site.getusersitepackages())
-target.mkdir(parents=True, exist_ok=True)
-(target / "brain-runtime.pth").write_text(str(root / "runtime" / "lib") + "\n", encoding="utf-8")
-print(f"✓ .pth в {target} (pip отказал: externally-managed)")
-PYEOF
-fi
-
-# Старые копии удаляем: пока они лежат на месте, они участвуют в разрешении
-# импорта и способны перебить дерево.
-rm -rf "$HOME/.local/lib/brain" "$HOME/.local/share/brain/lib"
 
 # MCP остаётся opt-in: fresh setup его не ставит. Но если оператор уже
 # подключал MCP, canonical setup обязан обновлять ту же установленную копию.

@@ -23,6 +23,7 @@ bad_patterns=(
   '^test_cli\.sh$'
   '^wiki/stale-test\.md$'
   'local-command-caveatcaveat-the-messages-below\.txt$'
+  '\.egg-info/'
 )
 
 tracked="$(git -C "$PROJECT_ROOT" ls-files)"

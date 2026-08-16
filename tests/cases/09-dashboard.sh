@@ -42,7 +42,15 @@ _dash_active=$(brain-status --json | python3 -c "import json,sys; print(json.loa
 _dash_locks=$(brain-status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['locks']['count'])")
 _dash_council=$(brain-status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['council']['count'])")
 _dash_index_health=$(brain-status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['index']['health'])")
-_dash_provider_role=$(brain-status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['providers']['roles']['developer']['preferred']['provider'])")
+# preferred равен null, когда ни один кандидат роли не доступен. Прямое
+# обращение по ключу давало TypeError и трейсбек вместо диагноза — читать его
+# в логе CI бесполезно. Достаём мягко и говорим, чего именно не хватило.
+_dash_provider_role=$(brain-status --json | python3 -c "import json,sys; roles=json.load(sys.stdin)['providers']['roles']; print(((roles.get('developer') or {}).get('preferred') or {}).get('provider', ''))")
+[ -n "$_dash_provider_role" ] || {
+  echo "FAILED: у роли developer нет доступного провайдера — статус не с чем сверять"
+  brain-provider status || true
+  exit 1
+}
 grep -q "sse-tasks-active.*>${_dash_active}<\|>${_dash_active}</strong>" "$BRAIN_PATH/wiki/_views/brain-dashboard.html" || { echo "FAILED: dashboard active_count ${_dash_active} not found (status contract)"; exit 1; }
 grep -q "sse-locks-count.*>${_dash_locks}<\|Total: ${_dash_locks}" "$BRAIN_PATH/wiki/_views/brain-dashboard.html" || { echo "FAILED: dashboard lock count ${_dash_locks} not found (status contract)"; exit 1; }
 grep -q "sse-council-count.*>${_dash_council}<\|Active sessions: ${_dash_council}" "$BRAIN_PATH/wiki/_views/brain-dashboard.html" || { echo "FAILED: dashboard council count ${_dash_council} not found (status contract)"; exit 1; }

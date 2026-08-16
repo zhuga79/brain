@@ -42,6 +42,29 @@ def test_workflow_runs_tests_run_sh():
     assert "tests/run.sh" in _combined()
 
 
+def test_workflow_installs_pytest_before_smoke():
+    """Кейс 92 гоняет pre-commit-хук, а тот зовёт pytest внутри песочницы.
+
+    Пока установки не было, смоук падал на «No module named pytest», и до шага
+    с самим pytest прогон не доходил. Порядок шагов — часть контракта гейта.
+    """
+    for path, text in _workflow_texts():
+        if "tests/run.sh" not in text:
+            continue
+        install = text.find("pip install pytest")
+        assert install != -1, (
+            f"{path.relative_to(REPO)}: pytest не ставится, кейс 92 упадёт в песочнице"
+        )
+        smoke = text.find("bash tests/run.sh")
+        assert install < smoke, (
+            f"{path.relative_to(REPO)}: pytest ставится после tests/run.sh"
+        )
+        assert "pip install --user pytest" not in text, (
+            f"{path.relative_to(REPO)}: --user не виден из песочницы — "
+            "tests/run.sh подменяет HOME"
+        )
+
+
 def test_workflow_runs_full_pytest_suite():
     text = _combined()
     assert "pytest" in text

@@ -10,6 +10,27 @@ echo ">>> Verifying dashboard board (kanban) rendering"
 
 brain_factory
 export PATH="$PROJECT_ROOT/runtime/bin:$PATH"
+
+# Колонка «Циклические» рисуется из вывода `systemctl --user list-timers`.
+# Без подмены кейс проверял не вёрстку, а состав таймеров хоста: у оператора
+# brain-* таймеры заведены и колонка была, на чистом раннере таймеров нет и
+# кейс падал. Расписание задаёт сам кейс — как в 71-dashboard-cycle-run.
+shim="$BRAIN_FACTORY_TMP/shim"; mkdir -p "$shim"
+cat > "$shim/systemctl" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" list-timers "*)
+    cat <<'TABLE'
+NEXT                        LEFT    LAST                        PASSED  UNIT                       ACTIVATES
+Sat 2026-05-30 16:20:00 UTC 10min   Sat 2026-05-30 16:10:00 UTC 1min    brain-provider-probe.timer brain-provider-probe.service
+TABLE
+    ;;
+esac
+exit 0
+SH
+chmod +x "$shim/systemctl"
+export PATH="$shim:$PATH"
+
 mkdir -p "$BRAIN_PATH/tasks" "$BRAIN_PATH/wiki" "$BRAIN_PATH/roles"
 cat > "$BRAIN_PATH/tasks/active.md" <<'TASKS'
 # Active Tasks

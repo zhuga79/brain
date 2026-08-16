@@ -69,6 +69,41 @@ def test_setup_removes_stale_copies():
     assert "brain-runtime.pth" in text, "нужен запасной путь: pip отказывает при PEP 668"
 
 
+def test_cli_install_runs_after_pip_editable():
+    """Обёртки из runtime/bin обязаны пережить console-скрипты pip.
+
+    `pip install -e` создаёт из [project.scripts] свои brain-provider,
+    brain-validate и brain-search в том же ~/.local/bin. Пока установка CLI
+    шла первой, pip затирал три обёртки — 88-bin-install видел их
+    устаревшими. Локально это не проявлялось: PEP 668 гнал pip в .pth-фолбэк,
+    console-скриптов не возникало, и гейт был зелёным из-за отказа pip.
+    """
+    text = (REPO / "setup-brain-v2.sh").read_text(encoding="utf-8")
+    pip_at = text.find("pip install --user -e")
+    install_at = text.find('install -m 755 "$_cmd_path"')
+    assert pip_at != -1 and install_at != -1
+    assert pip_at < install_at, (
+        "установка CLI обязана идти после pip install -e, иначе console-скрипты "
+        "pip перебивают обёртки runtime/bin"
+    )
+
+
+def test_smoke_runner_pins_provider_clis():
+    """Состав провайдерских CLI задаёт песочница, а не хост.
+
+    `shutil.which` решал, доступен ли провайдер, поэтому один коммит давал
+    100/100 у оператора (codex/gemini/claude/opencode установлены) и 92/100 на
+    чистом раннере. Заглушки идут первыми в PATH и перекрывают настоящие CLI.
+    """
+    runner = (REPO / "tests" / "run.sh").read_text(encoding="utf-8")
+    assert "lib/provider-stubs.sh" in runner, "раннер не подключает заглушки провайдеров"
+    assert 'export PATH="$STUB_BIN:$PATH"' in runner, "заглушки не в начале PATH"
+
+    stubs = (REPO / "tests" / "lib" / "provider-stubs.sh").read_text(encoding="utf-8")
+    for name in ("claude", "codex", "gemini", "opencode"):
+        assert name in stubs, f"нет заглушки для {name}"
+
+
 def test_brain_status_reports_core_version():
     text = (REPO / "runtime" / "bin" / "brain-status").read_text(encoding="utf-8")
     assert "core_version()" in text and "core_location()" in text

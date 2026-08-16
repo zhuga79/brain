@@ -21,6 +21,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install test dependencies
+        # Ставится ДО tests/run.sh: кейс 92 гоняет pre-commit-хук, а тот
+        # запускает pytest внутри песочницы. Без этого шага смоук падал на
+        # "No module named pytest" — и второй шаг с pytest не начинался вовсе.
+        #
+        # Без --user намеренно. tests/run.sh подменяет HOME на временный
+        # каталог, поэтому user site раннера внутри песочницы не виден:
+        # pytest, поставленный с --user, пропал бы ровно там, где нужен.
+        run: python3 -m pip install pytest
+
       - name: Run tests/run.sh
         # Isolated runner: TMP_HOME + BRAIN_PATH. Do not invoke tests/cases
         # directly — they inherit the working tree and rewrite live data.
