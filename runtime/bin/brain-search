@@ -2,6 +2,7 @@
 """Обёртка над brain_cli.search — сохраняет привычный путь запуска."""
 
 from brain_cli.search import main
+from brain_core.cli_entry import run_cli
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_cli(main)

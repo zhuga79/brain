@@ -4,8 +4,10 @@ set -euo pipefail
 source "$(dirname "$0")/../_lib.sh"
 
 echo ">>> Verifying brain-run tax-advisor pre-flight"
-brain-run --role tax-advisor --task t-smoke-preflight 2>/dev/null | grep -q "PRE-FLIGHT\|ТЕКУЩИЙ ЭТАП" || { echo "FAILED: brain-run tax-advisor missing pre-flight block"; exit 1; }
-brain-run --role developer --task t-smoke-preflight 2>/dev/null | grep -q "PRE-FLIGHT" && { echo "FAILED: brain-run developer should NOT have pre-flight block"; exit 1; } || true
+capture_output _br_tax 'brain-run --role tax-advisor --task t-smoke-preflight 2>/dev/null'
+grep -q "PRE-FLIGHT\|ТЕКУЩИЙ ЭТАП" <<< "$_br_tax" || { echo "FAILED: brain-run tax-advisor missing pre-flight block"; exit 1; }
+capture_output _br_dev 'brain-run --role developer --task t-smoke-preflight 2>/dev/null'
+grep -q "PRE-FLIGHT" <<< "$_br_dev" && { echo "FAILED: brain-run developer should NOT have pre-flight block"; exit 1; } || true
 
 echo ">>> Verifying brain-mcp --http hardening"
 grep -q "def do_POST" "$PROJECT_ROOT/runtime/bin/brain-dashboard" || { echo "FAILED: do_POST missing from brain-dashboard"; exit 1; }

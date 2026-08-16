@@ -179,12 +179,12 @@ set -e
   echo "FAILED: unknown team should fail closed"
   exit 1
 }
-echo "$unknown_team_out" | grep -qi "no such team" || {
+grep -qi "no such team" <<< "$unknown_team_out" || {
   echo "FAILED: unknown team error not surfaced"
   echo "$unknown_team_out"
   exit 1
 }
-echo "$unknown_team_out" | grep -qi "council started" && {
+grep -qi "council started" <<< "$unknown_team_out" && {
   echo "FAILED: unknown team printed misleading started message"
   echo "$unknown_team_out"
   exit 1
@@ -202,12 +202,12 @@ set -e
   echo "FAILED: unknown role should fail closed"
   exit 1
 }
-echo "$unknown_role_out" | grep -qi "no role file" || {
+grep -qi "no role file" <<< "$unknown_role_out" || {
   echo "FAILED: unknown role error not surfaced"
   echo "$unknown_role_out"
   exit 1
 }
-echo "$unknown_role_out" | grep -qi "council started" && {
+grep -qi "council started" <<< "$unknown_role_out" && {
   echo "FAILED: unknown role printed misleading started message"
   echo "$unknown_role_out"
   exit 1
@@ -269,8 +269,9 @@ cat > "$BRAIN_PATH/tasks/done.md" <<EOF
       completed: 2026-05-02T00:00:00Z
 EOF
 
-next_out=$(brain-task next --role developer | head -n 1)
-if echo "$next_out" | grep -q "t-dependent"; then
+capture_output next_full 'brain-task next --role developer'
+next_out=$(head -n 1 <<< "$next_full")
+if grep -q "t-dependent" <<< "$next_out"; then
     echo "FAILED: t-dependent is available but its dependency t-parent is NOT done (matched t-parent-child incorrectly)"
     exit 1
 fi
@@ -280,7 +281,8 @@ cat >> "$BRAIN_PATH/tasks/done.md" <<EOF
       role: developer
       completed: 2026-05-02T00:00:00Z
 EOF
-brain-task next --role developer | grep -q "t-dependent" || {
+capture_output next_full2 'brain-task next --role developer'
+grep -q "t-dependent" <<< "$next_full2" || {
     echo "FAILED: t-dependent did not become available after exact dependency t-parent completed"
     exit 1
 }

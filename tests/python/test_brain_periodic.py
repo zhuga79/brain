@@ -233,8 +233,20 @@ def test_brain_status_exits_clean_when_reader_closes_early(tmp_path):
 
 
 def test_main_guard_catches_broken_pipe_around_entrypoint():
-    """Статическая подстраховка: перехват не может незаметно потеряться."""
+    """Статическая подстраховка: перехват не может незаметно потеряться.
+
+    Сам except BrokenPipeError переехал в общее место —
+    brain_core.cli_entry.run_cli (t-2026-08-16-pipe-races-in-smoke-grep-q-clo):
+    восемь продюсеров с тем же паттерном использования (`| grep -q` на их
+    выводе) делят одну реализацию гарантии вместо восьми копий. Здесь
+    проверяем обе половины: что brain-status зовёт общий хелпер, и что сам
+    хелпер действительно перехватывает BrokenPipeError.
+    """
     text = (REPO / "runtime" / "bin" / "brain-status").read_text(encoding="utf-8")
     tail = text.split('if __name__ == "__main__":', 1)[1]
-    assert "except BrokenPipeError" in tail
-    assert "raise SystemExit(main())" in tail
+    assert "from brain_core.cli_entry import run_cli" in tail
+    assert "run_cli(main)" in tail
+
+    cli_entry = (REPO / "runtime" / "lib" / "brain_core" / "cli_entry.py").read_text(encoding="utf-8")
+    assert "except BrokenPipeError" in cli_entry
+    assert "os.dup2(devnull, sys.stdout.fileno())" in cli_entry

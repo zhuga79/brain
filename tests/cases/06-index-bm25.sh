@@ -47,13 +47,20 @@ brain-index rebuild > /dev/null
 [ -f "$BRAIN_PATH/.brain/index/sources.json" ] || { echo "FAILED: sources.json not generated"; exit 1; }
 [ -f "$BRAIN_PATH/.brain/index/search.jsonl" ] || { echo "FAILED: search.jsonl not generated"; exit 1; }
 [ -f "$BRAIN_PATH/.brain/index/manifest.json" ] || { echo "FAILED: manifest.json not generated"; exit 1; }
-brain-index status | grep -q "health: ok" || { echo "FAILED: brain-index status not ok"; exit 1; }
-brain-index page search-topic | grep -q "Search Topic" || { echo "FAILED: brain-index page failed"; exit 1; }
-brain-index backlinks decision-search | grep -q "search-topic" || { echo "FAILED: brain-index backlinks failed"; exit 1; }
-brain-index sources raw/demo-source.md | grep -q "decision-search" || { echo "FAILED: brain-index sources failed"; exit 1; }
-brain-search rarebrainterm | grep -q "wiki/search-topic.md" || { echo "FAILED: brain-search did not find search-topic"; exit 1; }
-brain-search rarebrainterm --type concept | grep -q "wiki/search-topic.md" || { echo "FAILED: brain-search type filter failed"; exit 1; }
-brain-index stale | grep -q "status: ok" || { echo "FAILED: brain-index stale should be ok after rebuild"; exit 1; }
+capture_output _bi_status 'brain-index status'
+grep -q "health: ok" <<< "$_bi_status" || { echo "FAILED: brain-index status not ok"; exit 1; }
+capture_output _bi_page 'brain-index page search-topic'
+grep -q "Search Topic" <<< "$_bi_page" || { echo "FAILED: brain-index page failed"; exit 1; }
+capture_output _bi_backlinks 'brain-index backlinks decision-search'
+grep -q "search-topic" <<< "$_bi_backlinks" || { echo "FAILED: brain-index backlinks failed"; exit 1; }
+capture_output _bi_sources 'brain-index sources raw/demo-source.md'
+grep -q "decision-search" <<< "$_bi_sources" || { echo "FAILED: brain-index sources failed"; exit 1; }
+capture_output _bs_search1 'brain-search rarebrainterm'
+grep -q "wiki/search-topic.md" <<< "$_bs_search1" || { echo "FAILED: brain-search did not find search-topic"; exit 1; }
+capture_output _bs_search2 'brain-search rarebrainterm --type concept'
+grep -q "wiki/search-topic.md" <<< "$_bs_search2" || { echo "FAILED: brain-search type filter failed"; exit 1; }
+capture_output _bi_stale 'brain-index stale'
+grep -q "status: ok" <<< "$_bi_stale" || { echo "FAILED: brain-index stale should be ok after rebuild"; exit 1; }
 
 echo "--- wiki stale check ---"
 cat >> "$BRAIN_PATH/wiki/search-topic.md" <<EOF

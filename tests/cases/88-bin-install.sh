@@ -42,7 +42,8 @@ brain-status --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["cli_p
   echo "FAILED: brain-status did not flag drifted installed CLI"
   exit 1
 }
-brain-status | grep -q 'CLI parity: status=drift' || {
+capture_output _bs_drift 'brain-status'
+grep -q 'CLI parity: status=drift' <<< "$_bs_drift" || {
   echo "FAILED: brain-status text output did not warn about CLI drift"
   exit 1
 }
@@ -64,7 +65,8 @@ brain-status --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["cli_p
   echo "FAILED: brain-status did not flag extra installed brain CLI absent from canonical source"
   exit 1
 }
-brain-status | grep -q 'brain-legacy-extra' || {
+capture_output _bs_extra 'brain-status'
+grep -q 'brain-legacy-extra' <<< "$_bs_extra" || {
   echo "FAILED: brain-status text output did not list extra installed brain CLI"
   exit 1
 }

@@ -45,7 +45,8 @@ echo "OK: приоритет кодируется значком"
 brain-uiux-lint --strict "$html" >/dev/null 2>&1 || {
   # Базовый список исключений живёт рядом с рабочим файлом; в песочнице его
   # может не быть, поэтому смотрим только на правило, ради которого правка.
-  brain-uiux-lint "$html" 2>&1 | grep -q "side-tab" && {
+  capture_output _lint_out 'brain-uiux-lint "$html" 2>&1'
+  grep -q "side-tab" <<< "$_lint_out" && {
     echo "FAILED: правило side-tab снова нарушено"; exit 1; }
 }
 echo "OK: side-tab не нарушен"

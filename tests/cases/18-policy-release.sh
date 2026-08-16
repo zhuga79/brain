@@ -5,7 +5,8 @@ source "$(dirname "$0")/../_lib.sh"
 
 echo ">>> Verifying brain-policy check"
 brain-policy --help > /dev/null 2>&1 || { echo "FAILED: brain-policy --help"; exit 1; }
-brain-policy check 2>&1 | grep -q "All Brain workflow operations are accessible" || {
+capture_output _bp_check 'brain-policy check 2>&1'
+grep -q "All Brain workflow operations are accessible" <<< "$_bp_check" || {
   echo "FAILED: brain-policy check did not pass all gates"
   brain-policy check
   exit 1

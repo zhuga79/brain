@@ -58,10 +58,12 @@ brain-status --help > /dev/null
 brain-dashboard --help > /dev/null
 brain-doctrine --help > /dev/null
 brain-shell --help > /dev/null
-brain-status | grep -q "^Brain: " || { echo "FAILED: brain-status text output missing Brain header"; exit 1; }
-brain-status --json | grep -q '"tasks"' || { echo "FAILED: brain-status json output missing tasks"; exit 1; }
-brain-status --json | grep -q '"cli_parity"' || { echo "FAILED: brain-status json output missing cli_parity"; exit 1; }
-brain-status --json | grep -q '"mcp_parity"' || { echo "FAILED: brain-status json output missing mcp_parity"; exit 1; }
+capture_output _bs_text 'brain-status'
+grep -q "^Brain: " <<< "$_bs_text" || { echo "FAILED: brain-status text output missing Brain header"; exit 1; }
+capture_output _bs_json 'brain-status --json'
+grep -q '"tasks"' <<< "$_bs_json" || { echo "FAILED: brain-status json output missing tasks"; exit 1; }
+grep -q '"cli_parity"' <<< "$_bs_json" || { echo "FAILED: brain-status json output missing cli_parity"; exit 1; }
+grep -q '"mcp_parity"' <<< "$_bs_json" || { echo "FAILED: brain-status json output missing mcp_parity"; exit 1; }
 
 echo ">>> Verifying split-root doctrine and skill listing from data cwd"
 split_td=$(mktemp -d)
@@ -73,11 +75,13 @@ printf '# log\n' > "$split_brain/wiki/log.md"
 (
   export BRAIN_PATH="$split_brain"
   export BRAIN_SYSTEM_PATH="$PROJECT_ROOT"
-  brain-doctrine list | grep -q '^tax-boundaries$' || {
+  capture_output _dl 'brain-doctrine list'
+  grep -q '^tax-boundaries$' <<< "$_dl" || {
     echo "FAILED: brain-doctrine list does not see system doctrine from data cwd"
     exit 1
   }
-  brain-skill list | grep -q 'frontend-handoff-spec' || {
+  capture_output _sl 'brain-skill list'
+  grep -q 'frontend-handoff-spec' <<< "$_sl" || {
     echo "FAILED: brain-skill list does not see system skills from data cwd"
     exit 1
   }
