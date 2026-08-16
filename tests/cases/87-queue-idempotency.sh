@@ -189,4 +189,57 @@ BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid2" --as me >/dev/null || 
 grep -q "$tid2" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: открытая задача не попала в done"; exit 1; }
 echo "OK: владелец лока закрывает открытую задачу"
 
+# ── 11. Открытая задача под локом не блокируется посторонним ──
+# t-2026-08-15-block-on-open-task-under-forei: та же расстановка, что в п.10, но
+# другой мутирующий путь. Гвардия стояла только на ветке `[~]`, поэтому чужой
+# агент не мог закрыть задачу, зато мог выбить её из очереди в `[!]`. Проверка
+# сформулирована над инвариантом: переход состояния выполняет только владелец,
+# и текст отказа у block и complete совпадает.
+tid3="$(brain-task add "Открытая под локом для block" --role developer 2>&1 | tail -1 | sed 's/added: //')"
+[ -n "$tid3" ] || { echo "FAILED: третья задача не создана"; exit 1; }
+brain-lock acquire "$tid3" --as me --ttl 600 >/dev/null || { echo "FAILED: acquire на открытой задаче"; exit 1; }
+grep -q -- "- \[ \].*$tid3 —" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: задача должна остаться open"; exit 1; }
+
+cp "$BRAIN_PATH/tasks/active.md" "$snapshot_dir/active.block.before"
+cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.block.before"
+cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.block.before"
+cp "$BRAIN_PATH/.locks/$tid3/owner" "$snapshot_dir/owner.block.before"
+
+set +e
+block_out="$(brain-task block "$tid3" "need info" --as intruder 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || { echo "FAILED: чужой block выбил открытую задачу под локом"; exit 1; }
+grep -q "lock owned by me, not intruder" <<< "$block_out" || {
+  echo "FAILED: open-task block error unclear: $block_out"; exit 1;
+}
+cmp -s "$snapshot_dir/active.block.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: intruder block changed active.md"; exit 1; }
+cmp -s "$snapshot_dir/done.block.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: intruder block changed done.md"; exit 1; }
+cmp -s "$snapshot_dir/log.block.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: intruder block changed wiki/log.md"; exit 1; }
+cmp -s "$snapshot_dir/owner.block.before" "$BRAIN_PATH/.locks/$tid3/owner" || { echo "FAILED: intruder block changed lock owner"; exit 1; }
+echo "OK: открытую задачу под локом чужой не блокирует"
+
+# Отказ не зависит от глагола: block и complete на одной расстановке говорят одно.
+set +e
+complete_out="$(brain-task complete "$tid3" --as intruder --model evil-model 2>&1)"
+set -e
+grep -q "lock owned by me, not intruder" <<< "$complete_out" || {
+  echo "FAILED: complete на той же расстановке отказал иначе: $complete_out"; exit 1;
+}
+echo "OK: block и complete отказывают одинаково"
+
+# Протухший лок не держит block — как и acquire, и complete.
+python3 - "$BRAIN_PATH/.locks/$tid3/owner" <<'PY'
+from pathlib import Path
+import sys, time
+path = Path(sys.argv[1])
+owner, _ts, ttl = path.read_text(encoding="utf-8").strip().split("|")
+path.write_text(f"{owner}|{int(time.time())-1000}|{ttl}\n", encoding="utf-8")
+PY
+brain-task block "$tid3" "stale lock does not hold" --as passerby >/dev/null || {
+  echo "FAILED: протухший лок не пустил block"; exit 1;
+}
+grep -q -- "- \[!\].*$tid3 —" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: задача не помечена [!]"; exit 1; }
+echo "OK: протухший лок не держит block"
+
 echo ">>> queue idempotency checks passed"

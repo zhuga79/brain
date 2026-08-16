@@ -179,13 +179,18 @@ def _ensure_open_lock_owner(active: Path, tid: str, agent: str | None) -> None:
         raise TaskError(f"lock owned by {lock_owner}, not {agent}")
 
 
-def _ensure_completion_owner(active: Path, tid: str, match: re.Match[str], agent: str | None) -> None:
-    """Проверка владельца перед завершением — одна на оба состояния задачи.
+def _ensure_transition_owner(active: Path, tid: str, match: re.Match[str], agent: str | None) -> None:
+    """Проверка владельца перед любым переходом состояния задачи.
 
-    `[~]` сверяется по `by:` и (если лок есть) по владельцу лока; `[ ]` — только
-    по локу, другого владельца у открытой задачи нет. Развилка живёт в одном
-    месте, чтобы штатное завершение и recovery не разошлись в том, кого они
-    считают владельцем.
+    Инвариант: **переход состояния задачи в очереди выполняет только её
+    владелец**. Владелец задачи `[~]` — это `by:` (и владелец лока, если лок
+    есть); владелец задачи `[ ]` — владелец действующего лока, другого у
+    открытой задачи нет.
+
+    Развилка живёт в одном месте, потому что делить её по глаголу уже
+    оказалось ошибкой дважды: `complete` проверял `[ ]` (t-2026-08-14), `block`
+    — нет (t-2026-08-15), хотя расстановка одна и та же. Новый мутирующий путь
+    обязан звать этот хелпер, а не повторять развилку у себя.
     """
     head = grammar.parse_head(match.group(0).splitlines()[0])
     if head and head.state == "~":
@@ -342,7 +347,7 @@ def _validate_recovery_payload(
         active_block = active_match.group(0)
         # Тот же владелец, что и у штатного завершения: recovery дописывает
         # ровно тот переход, который отказ не пустил бы напрямую.
-        _ensure_completion_owner(active, tid, active_match, agent)
+        _ensure_transition_owner(active, tid, active_match, agent)
         if _active_block_fingerprint(active_block) != payload["source_active_fingerprint"]:
             raise TaskError(f"completion journal fingerprint mismatch: {tid}")
     else:
@@ -465,6 +470,12 @@ def block(active: Path, tid: str, agent: str | None = None) -> None:
 
     Причина в файл не пишется — она уходит в журнал и в сообщение коммита.
     Так было и до выделения модуля; менять формат блока задачи здесь незачем.
+
+    Владелец сверяется тем же `_ensure_transition_owner`, что и у `complete`:
+    выбить задачу из очереди — такой же переход состояния, как закрыть её.
+    Раньше развилка стояла здесь своя и покрывала только `[~]`, так что
+    открытую задачу под чужим действующим локом мог заблокировать посторонний
+    (t-2026-08-15-block-on-open-task-under-forei).
     """
     with queue_lock(active.parent):
         txt = _read(active)
@@ -472,9 +483,8 @@ def block(active: Path, tid: str, agent: str | None = None) -> None:
         match = pat.search(txt)
         if not match:
             raise TaskError(f"task not found or not open/in-progress: {tid}")
-        head = grammar.parse_head(match.group(0).splitlines()[0])
-        if head and head.state == "~":
-            _ensure_in_progress_owner(active, tid, match.group(3), agent)
+        # Проверка владельца — до записи: отказ не оставляет следов в очереди.
+        _ensure_transition_owner(active, tid, match, agent)
 
         def repl(m: re.Match) -> str:
             return m.group(1) + "!]" + m.group(2) + m.group(3)
@@ -605,7 +615,7 @@ def complete(active: Path, done: Path, tid: str, agent: str, model: str) -> None
             raise TaskError(f"task not found: {tid}")
         # Проверка владельца — до journal/done/active: отказ не должен оставлять
         # следов ни в одном из трёх файлов.
-        _ensure_completion_owner(active, tid, m, agent)
+        _ensure_transition_owner(active, tid, m, agent)
 
         ts = utc_now()
         source_block = m.group(0)

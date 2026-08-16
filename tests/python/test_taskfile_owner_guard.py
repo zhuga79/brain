@@ -211,6 +211,138 @@ def test_complete_open_task_with_empty_lock_dir_is_not_blocked(tmp_path: Path):
     assert "t-owner-guard" not in active.read_text(encoding="utf-8")
 
 
+# ── инвариант владения на всех мутирующих путях ──────────────────────────────
+#
+# t-2026-08-15-block-on-open-task-under-forei: та же находка, что и у
+# `complete`, но на втором экземпляре. Инвариант формулируется над путём, а не
+# над функцией: **любой переход состояния задачи в очереди отвергается, если
+# задачу держит действующий лок другого агента**. Мутирующие пути очереди —
+# `take`, `release`, `block`, `complete`; параметризация ниже держит их вместе,
+# чтобы следующий путь нельзя было добавить, не назвав его владельца.
+
+
+def _attempt_block(active: Path, done: Path, agent: str) -> None:
+    taskfile.block(active, "t-owner-guard", agent)
+
+
+def _attempt_complete(active: Path, done: Path, agent: str) -> None:
+    taskfile.complete(active, done, "t-owner-guard", agent, "some-model")
+
+
+def _attempt_release(active: Path, done: Path, agent: str) -> None:
+    taskfile.release(active, "t-owner-guard", agent)
+
+
+def _attempt_take(active: Path, done: Path, agent: str) -> None:
+    taskfile.take(active, "t-owner-guard", agent)
+
+
+# Пути, меняющие состояние *открытой* задачи. `release` сюда не входит: он
+# определён только над `[~]`, а на `[ ]` возвращается без записи — мутации нет.
+OPEN_TASK_MUTATORS = {
+    "take": _attempt_take,
+    "block": _attempt_block,
+    "complete": _attempt_complete,
+}
+
+
+@pytest.mark.parametrize("path_name", sorted(OPEN_TASK_MUTATORS))
+def test_open_task_mutators_reject_intruder_under_live_lock(open_queue, path_name):
+    """Ни один переход открытой задачи не проходит мимо действующего чужого лока."""
+    _brain, active, done, owner = open_queue
+    before = _snapshot(active, done, owner)
+    with pytest.raises(taskfile.TaskError) as excinfo:
+        OPEN_TASK_MUTATORS[path_name](active, done, "intruder")
+    assert "owner-agent" in str(excinfo.value) and "intruder" in str(excinfo.value)
+    _assert_same(before)
+
+
+@pytest.mark.parametrize("path_name", sorted(OPEN_TASK_MUTATORS))
+def test_open_task_mutators_allow_lock_owner(tmp_path: Path, path_name):
+    """Владелец лока проходит тем же путём — гвардия не запирает саму работу."""
+    stamp = f"owner-agent|{int(time.time())}|600\n"
+    _brain, active, done, _owner = _build_queue(tmp_path / path_name, OPEN_ACTIVE, lock_owner=stamp)
+    OPEN_TASK_MUTATORS[path_name](active, done, "owner-agent")
+    assert "- [ ] [P1] t-owner-guard" not in active.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("path_name", sorted(OPEN_TASK_MUTATORS))
+def test_open_task_mutators_ignore_stale_lock(tmp_path: Path, path_name):
+    """Протухший лок не держит ни один путь — он перехватываем, как в claim_lock."""
+    _brain, active, done, _owner = _build_queue(
+        tmp_path / path_name, OPEN_ACTIVE, lock_owner="dead-agent|1|1\n",
+    )
+    OPEN_TASK_MUTATORS[path_name](active, done, "next-agent")
+    assert "- [ ] [P1] t-owner-guard" not in active.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("path_name", sorted(OPEN_TASK_MUTATORS))
+def test_open_task_mutators_keep_legacy_lockless_behaviour(tmp_path: Path, path_name):
+    """Лока нет вообще — legacy-путь открыт любому агенту, как и до правки."""
+    _brain, active, done, _owner = _build_queue(tmp_path / path_name, OPEN_ACTIVE, lock_owner=None)
+    OPEN_TASK_MUTATORS[path_name](active, done, "passerby")
+    assert "- [ ] [P1] t-owner-guard" not in active.read_text(encoding="utf-8")
+
+
+def test_block_open_task_rejection_is_identical_to_complete(tmp_path: Path):
+    """`block` и `complete` отказывают одним сообщением на одной расстановке.
+
+    Требование приёмки тикета: отказ на открытой задаче под чужим локом не
+    должен различаться по глаголу — иначе владение читается как свойство
+    команды, а не задачи.
+    """
+    stamp = f"owner-agent|{int(time.time())}|600\n"
+    _b1, active_b, done_b, _o1 = _build_queue(tmp_path / "block", OPEN_ACTIVE, lock_owner=stamp)
+    _b2, active_c, done_c, _o2 = _build_queue(tmp_path / "complete", OPEN_ACTIVE, lock_owner=stamp)
+
+    with pytest.raises(taskfile.TaskError) as block_err:
+        taskfile.block(active_b, "t-owner-guard", "intruder")
+    with pytest.raises(taskfile.TaskError) as complete_err:
+        taskfile.complete(active_c, done_c, "t-owner-guard", "intruder", "evil-model")
+    assert str(block_err.value) == str(complete_err.value) == "lock owned by owner-agent, not intruder"
+
+
+def test_block_rejects_anonymous_agent_on_open_task_under_live_lock(open_queue):
+    """Безымянный вызов на залоченной открытой задаче — тот же отказ, что у complete."""
+    _brain, active, done, owner = open_queue
+    before = _snapshot(active, done, owner)
+    with pytest.raises(taskfile.TaskError, match="task owner required: t-owner-guard"):
+        taskfile.block(active, "t-owner-guard", None)
+    _assert_same(before)
+
+
+def test_block_open_task_with_corrupt_lock_is_not_blocked(tmp_path: Path):
+    """Нечитаемый owner-файл — обрывок, а не лок: тот же вывод, что у `complete`."""
+    _brain, active, done, _owner = _build_queue(tmp_path, OPEN_ACTIVE, lock_owner="garbage\n")
+    taskfile.block(active, "t-owner-guard", "next-agent")
+    assert "- [!] [P1] t-owner-guard" in active.read_text(encoding="utf-8")
+
+
+def test_block_open_task_with_empty_lock_dir_is_not_blocked(tmp_path: Path):
+    """Каталог лока без owner-файла — обрывок предыдущего запуска."""
+    _brain, active, done, _owner = _build_queue(tmp_path, OPEN_ACTIVE, lock_owner=None)
+    (tmp_path / ".locks" / "t-owner-guard").mkdir(parents=True)
+    taskfile.block(active, "t-owner-guard", "next-agent")
+    assert "- [!] [P1] t-owner-guard" in active.read_text(encoding="utf-8")
+
+
+def test_block_open_task_leaves_lock_untouched(open_queue):
+    """Блокировка задачи не трогает owner-файл: снимает лок вызывающий."""
+    _brain, active, _done, owner = open_queue
+    owner_before = owner.read_bytes()
+    taskfile.block(active, "t-owner-guard", "owner-agent")
+    assert "- [!] [P1] t-owner-guard" in active.read_text(encoding="utf-8")
+    assert owner.read_bytes() == owner_before
+
+
+def test_release_of_open_task_under_foreign_lock_does_not_mutate(open_queue):
+    """`release` на `[ ]` — не переход, а no-op: писать ему нечего и не во что."""
+    _brain, active, done, owner = open_queue
+    before = _snapshot(active, done, owner)
+    taskfile.release(active, "t-owner-guard", "intruder")
+    _assert_same(before)
+
+
 # ── recovery по журналу ──────────────────────────────────────────────────────
 #
 # Журнал complete переживает падение процесса, и повторный вызов дописывает
