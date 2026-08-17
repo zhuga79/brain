@@ -169,6 +169,13 @@ capture_output() {
 # ── Setup bootstrap (run setup scripts once per test session) ──
 
 run_bootstrap_scripts() {
+    # С унаследованным BRAIN_SYSTEM_PATH/BRAIN_ENV_FILE setup-brain-v2.sh
+    # считает установку разделённой и не создаёт $BRAIN/roles — первый же
+    # legacy-скрипт падает. tests/run.sh снимает обе переменные глобально
+    # перед прогоном кейсов, поэтому сегодня это безопасно, но функция не
+    # должна полагаться на уборку вызывающего — снимаем и здесь, чтобы
+    # запуск был самодостаточным независимо от того, кто и как её вызовет.
+    unset BRAIN_SYSTEM_PATH BRAIN_ENV_FILE
     local scripts=(
         setup-brain-v2.sh
         add-teams-brain.sh

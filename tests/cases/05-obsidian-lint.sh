@@ -8,11 +8,14 @@ brain-lint --sync-report > /tmp/_lint_sync.log 2>&1 || { echo "FAILED: brain-lin
 grep -q "Obsidian views sync-report" /tmp/_lint_sync.log || { echo "FAILED: brain-lint --sync-report missing header"; cat /tmp/_lint_sync.log; exit 1; }
 # Python unit test for obsidian_sync_report function
 python3 - <<'PYEOF'
-import sys
+import sys, os, tempfile
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "runtime/lib"))
+# __file__ == "<stdin>" в heredoc-скрипте — не путь к кейсу. Берём
+# PROJECT_ROOT, который явно экспортирует раннер (tests/run.sh). Сейчас это
+# маскируется тем, что PYTHONPATH уже содержит верный runtime/lib (см.
+# tests/_lib.sh), но insert(0, ...) с битым путём — та же болезнь.
+sys.path.insert(0, str(Path(os.environ["PROJECT_ROOT"]) / "runtime/lib"))
 import brain_wiki
-import os, tempfile
 
 brain = Path(os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
 

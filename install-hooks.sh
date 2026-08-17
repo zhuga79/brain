@@ -35,6 +35,16 @@ if [ -x "\${PROJECT_ROOT}/runtime/hooks/pre-commit-system-guard" ]; then
     "\${PROJECT_ROOT}/runtime/hooks/pre-commit-system-guard" || exit 1
 fi
 
+# Git передаёт хуку своё окружение: GIT_INDEX_FILE указывает на index.lock
+# основного чекаута, GIT_DIR — на его .git. Тесты запускают git в собственных
+# временных репозиториях и наследуют эти переменные, поэтому их \`git add\` и
+# \`git commit\` уходили в индекс живого репозитория. Проявлялось как четыре
+# падения git-кейсов (47, 49, 95, 97) только внутри коммита — при отдельном
+# прогоне те же кейсы зелёные. Снимаем всё окружение git до любых проверок.
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX GIT_AUTHOR_DATE \\
+      GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_EDITOR GIT_EXEC_PATH \\
+      GIT_REFLOG_ACTION
+
 echo ">>> [pre-commit] Checking shell syntax"
 for s in "\${PROJECT_ROOT}"/*.sh "\${PROJECT_ROOT}"/runtime/bin/*; do
     [ -f "\$s" ] || continue
@@ -42,6 +52,12 @@ for s in "\${PROJECT_ROOT}"/*.sh "\${PROJECT_ROOT}"/runtime/bin/*; do
         bash -n "\$s"
     fi
 done
+
+# cd до прогона, а не после: смоук-кейсы резолвят пути от cwd, и при коммите
+# из git worktree cwd — это дерево worktree, а PROJECT_ROOT — основной чекаут.
+# Кейсы искали runtime/bin/* рядом с собой и падали, из-за чего коммит из
+# worktree был невозможен в принципе.
+cd "\${PROJECT_ROOT}"
 
 if [ -f "\${PROJECT_ROOT}/tests/run.sh" ]; then
     echo ">>> [pre-commit] Running smoke suite (tests/run.sh)"

@@ -314,16 +314,18 @@ PYEOF
 
 echo ">>> Verifying brain-dashboard /events SSE endpoint"
 python3 - <<'PYEOF'
-import sys, json, time, threading, socket
+import sys, json, time, threading, socket, os
 from pathlib import Path
 import importlib.machinery, importlib.util
-src = Path(__file__).parent.parent / "runtime/bin/brain-dashboard"
+# Скрипт выполняется как heredoc через "python3 -", поэтому __file__ == "<stdin>"
+# и Path(__file__).parent не значит "рядом с этим кейсом" — это cwd вызывающего.
+# PROJECT_ROOT раннер экспортирует явно (tests/run.sh), на него и опираемся.
+src = Path(os.environ["PROJECT_ROOT"]) / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
 mod = importlib.util.module_from_spec(spec)
 loader.exec_module(mod)
 
-import os
 brain = Path(os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
 
 # Pick a free port

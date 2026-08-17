@@ -14,7 +14,9 @@ python3 - <<'PYEOF'
 import sys, json, time, threading, socket, urllib.request, argparse
 from pathlib import Path
 import importlib.machinery, importlib.util, os
-src = Path(__file__).parent.parent / "runtime/bin/brain-dashboard"
+# __file__ == "<stdin>" в heredoc-скрипте — не путь к кейсу. Берём
+# PROJECT_ROOT, который явно экспортирует раннер (tests/run.sh).
+src = Path(os.environ["PROJECT_ROOT"]) / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
 mod = importlib.util.module_from_spec(spec)
@@ -48,8 +50,11 @@ PYEOF
 python3 - <<'PYEOF'
 import sys, os, tempfile
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "runtime/lib"))
-src = Path(__file__).parent.parent / "runtime/bin/brain-dashboard"
+# __file__ == "<stdin>" в heredoc-скрипте — не путь к кейсу. Берём
+# PROJECT_ROOT, который явно экспортирует раннер (tests/run.sh).
+_project_root = Path(os.environ["PROJECT_ROOT"])
+sys.path.insert(0, str(_project_root / "runtime/lib"))
+src = _project_root / "runtime/bin/brain-dashboard"
 import importlib.machinery, importlib.util
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
