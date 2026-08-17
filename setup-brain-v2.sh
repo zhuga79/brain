@@ -45,6 +45,26 @@ USAGE
 done
 
 BRAIN="${BRAIN_PATH:-$HOME/brain}"
+
+# Отказ работать, если BRAIN — рабочее дерево git worktree. У worktree `.git`
+# — не каталог, а файл со ссылкой на общий gitdir основного чекаута
+# (`gitdir: .../.git/worktrees/<name>`), и `git config`/`git init` внутри
+# такого дерева по умолчанию пишет в ОБЩИЙ .git/config основного чекаута —
+# это поведение git, не наш баг, но bootstrap обязан о нём знать. 2026-08-16
+# так были испорчены /tmp/wt-federation и /tmp/wt-cwd: guard посчитал их
+# песочницей, bootstrap внутри вызвал `git init`, и это выставило
+# core.bare=true основному чекауту — git status/commit/diff там перестали
+# работать при полностью зелёном сьюте. Worktree как рабочее место сейчас не
+# поддержан — явно отказываем, а не молчим.
+if [ -f "$BRAIN/.git" ] && grep -q '^gitdir:' "$BRAIN/.git" 2>/dev/null; then
+  echo "ОТКАЗ: $BRAIN — git worktree (общий .git/config с основным чекаутом)." >&2
+  echo "  Bootstrap не поддерживает git worktree как рабочее дерево: git init" >&2
+  echo "  и авто-коммит внутри worktree пишут в общий конфиг основного чекаута" >&2
+  echo "  и могут его сломать (см. CONTRIBUTING.md)." >&2
+  echo "  Используйте обычный git clone/checkout вместо worktree." >&2
+  exit 3
+fi
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEM_ROOT="${BRAIN_SYSTEM_PATH:-$SCRIPT_DIR}"
 V2_TEMPLATES="$SCRIPT_DIR/runtime/templates/v2"

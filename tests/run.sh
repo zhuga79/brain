@@ -43,6 +43,14 @@ unset BRAIN_SYSTEM_PATH BRAIN_ENV_FILE
 # Признак песочницы для tests/lib/sandbox-guard.sh: кейс, запущенный в обход
 # раннера, увидит его отсутствие и откажется работать по боевым данным.
 export BRAIN_TEST_SANDBOX=1
+# Файл-маркер, самосогласованный со своим каталогом: содержит канонический
+# путь каталога, в котором лежит. Guard проверяет и совпадение содержимого,
+# и то, что BRAIN_PATH — потомок этого каталога, а не просто "что-то под
+# /tmp" (см. tests/lib/sandbox-guard.sh — расположение пути само по себе не
+# доказывает, что дерево ephemeral).
+BRAIN_TEST_SANDBOX_MARKER="$TMP_HOME/.brain-test-sandbox-marker"
+printf '%s' "$(CDPATH= cd -- "$TMP_HOME" && pwd -P)" > "$BRAIN_TEST_SANDBOX_MARKER"
+export BRAIN_TEST_SANDBOX_MARKER
 
 # Состав провайдерских CLI задаёт песочница, а не хост. Каталог заглушек идёт
 # первым в PATH и перекрывает настоящие codex/gemini/claude/opencode: без

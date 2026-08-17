@@ -17,6 +17,21 @@ if [ -z "${BRAIN_MODULE_INVOCATION:-}" ]; then
 fi
 
 BRAIN="${BRAIN_PATH:-$HOME/brain}"
+
+# Отказ работать, если BRAIN — git worktree: у worktree `.git` — файл со
+# ссылкой на общий gitdir основного чекаута, и git-автокоммит этого скрипта
+# ниже (PART 3) при первом запуске делает `git init`, который для такого
+# дерева по умолчанию пишет в ОБЩИЙ .git/config и может испортить основной
+# чекаут (сломал core.bare 2026-08-16, см. CONTRIBUTING.md). Тот же guard,
+# что и в setup-brain-v2.sh — этот скрипт вызывается и напрямую, в обход
+# него (tests/run.sh так и делает).
+if [ -f "$BRAIN/.git" ] && grep -q '^gitdir:' "$BRAIN/.git" 2>/dev/null; then
+  echo "ОТКАЗ: $BRAIN — git worktree (общий .git/config с основным чекаутом)." >&2
+  echo "  Git-автокоммит не поддерживает worktree как рабочее дерево." >&2
+  echo "  Используйте обычный git clone/checkout вместо worktree." >&2
+  exit 3
+fi
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 [ ! -f "$BRAIN/MEMORY.md" ] && { echo "Сначала setup-brain-v2.sh"; exit 1; }
@@ -145,8 +160,10 @@ fi
 # PART 3. Git auto-commit
 # =============================================================================
 
-# Init git если ещё нет
-if [ ! -d "$BRAIN/.git" ]; then
+# Init git если ещё нет. `-e`, а не `-d`: в worktree `.git` — файл, а не
+# каталог, и старая проверка `-d` этого не видела — считала репозиторий
+# отсутствующим и звала `git init` внутрь уже существующего worktree.
+if [ ! -e "$BRAIN/.git" ]; then
   if command -v git >/dev/null; then
     (cd "$BRAIN" && git init --quiet && git config user.name "brain" && git config user.email "brain@local")
     echo "✓ git initialized in $BRAIN"
