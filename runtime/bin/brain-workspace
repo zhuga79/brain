@@ -180,7 +180,14 @@ def cmd_init_template(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Brain folder-native workspace tools")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Brain folder-native workspace tools. Scoped to this folder's own "
+            "TASKS.md/LOG.md queue: it does not use the root queue, brain-lock, "
+            "or brain-council, and brain-validate does not check this folder's "
+            "schema. See spec/guide.md, section 'brain-workspace'."
+        )
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_discover = sub.add_parser("discover", help="Find workspaces by BRAIN.md marker")

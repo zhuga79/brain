@@ -540,6 +540,42 @@ Local task commands only edit the folder-local `TASKS.md` and `LOG.md`.
 They do not create a central task registry. Use them when an agent is working
 inside one project folder and needs a small queue close to the documents.
 
+#### Scope boundary: deliberately limited, not a second root queue
+
+A folder-native workspace is a **deliberately limited** contour, not a
+folder-scoped clone of the root queue. This is decided, not an oversight —
+see `docs/decisions/decision-runtime-core-boundaries.md`. Concretely:
+
+- `brain-task`, `brain-lock` and `brain-council` never read a workspace's
+  `TASKS.md`. They operate on `$BRAIN/tasks/active.md` only, and
+  `brain-validate` (`validate_queue_scope`) rejects a `client:` task placed
+  there — client/case work belongs in the workspace folder, not the root
+  queue, and the two queues are not meant to merge. Concurrency, ownership
+  and completion for a workspace's own queue are `brain-workspace
+  take|complete`, which already has its own lock and recovery journal
+  (`brain_workspace.py`); there is no second implementation to reconcile it
+  with.
+- `brain-workspace` never consults `BRAIN_PATH` or cwd auto-detection: it
+  resolves the workspace purely from an explicit `--workspace` or the
+  nearest parent `BRAIN.md` (`find_nearest_workspace`). If pointing
+  `brain-task`/`brain-lock` at a workspace folder seems necessary, that is a
+  sign the work belongs to the root queue instead, not a gap to work around
+  with `BRAIN_PATH`.
+- `brain-validate` does not check a workspace folder's contents at all: it
+  detects the `BRAIN.md` marker and returns a single INFO issue pointing at
+  `brain-workspace` instead of applying the root schema (`raw/`, `wiki/`,
+  `tasks/active.md`, `EXCLUSIVE_SYSTEM_DIRS`, ...). A workspace folder is
+  free to contain `docs/`, `tests/`, `config/` or any other name for its own
+  purposes — those restrictions exist only for the split-root system/data
+  boundary and were never meant to reach folder-native workspaces.
+- Case-specific personas (a persona relevant to one case only) are **not** a
+  supported workspace-local mechanism: a workspace's `Role Policy` section
+  (`core`/`available`/`gated`/`blocked`) scopes which *existing* system roles
+  apply here, it does not define new ones. A persona needed only inside one
+  workspace stays as prose guidance in that workspace's `BRAIN.md`; a persona
+  that should be recognized by `brain-council` and the routing matrix
+  system-wide is added once, normally, to the shared `roles/` directory.
+
 #### Workspace role policy
 
 Each workspace `BRAIN.md` is also the local authority for role access. Brain

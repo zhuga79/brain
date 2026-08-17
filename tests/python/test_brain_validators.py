@@ -9,6 +9,7 @@ from pathlib import Path
 
 from brain_wiki import (
     Issue,
+    is_folder_native_workspace,
     validate_paths,
     validate_raw_source,
     validate_wiki_page,
@@ -29,6 +30,7 @@ from brain_wiki.validators import (
     _check_state_matrix,
     _check_skill_status,
     _check_skill_metadata,
+    EXCLUSIVE_SYSTEM_DIRS,
     REQUIRED_DIRS,
     EXPECTED_DIRS,
     EXPECTED_FILES,
@@ -1157,3 +1159,78 @@ class TestValidateAll:
             if i.severity == "ERROR" and "wiki/" in i.path and "missing required" not in i.message
         ]
         assert content_errors == []
+
+
+# ---------------------------------------------------------------------------
+# TestIsFolderNativeWorkspace / TestValidateAllFolderNativeWorkspace
+#
+# t-2026-08-17-folder-native-workspace-contour: folder-native рабочая папка —
+# сознательно ограниченный контур (docs/decisions/decision-runtime-core-
+# boundaries.md, раздел 9). brain-validate не применяет к ней схему
+# системного корня — ни REQUIRED_DIRS, ни EXCLUSIVE_SYSTEM_DIRS.
+# ---------------------------------------------------------------------------
+
+def _make_workspace(tmp_path: Path) -> Path:
+    """A minimal folder-native workspace: BRAIN.md + TASKS.md + LOG.md,
+    deliberately without raw/, wiki/, tasks/active.md."""
+    (tmp_path / "BRAIN.md").write_text("# Case Folder\n\n> A client matter folder.\n")
+    (tmp_path / "TASKS.md").write_text(
+        "# Local Tasks\n\n- [ ] [P1] local-001 - Do the thing\n      role: developer\n"
+    )
+    (tmp_path / "LOG.md").write_text("# Local Log\n")
+    return tmp_path
+
+
+class TestIsFolderNativeWorkspace:
+    def test_true_when_brain_md_present(self, tmp_path):
+        _make_workspace(tmp_path)
+        assert is_folder_native_workspace(tmp_path) is True
+
+    def test_false_when_brain_md_absent(self, tmp_path):
+        brain = _make_brain(tmp_path)
+        assert is_folder_native_workspace(brain) is False
+
+    def test_false_when_brain_md_is_a_directory(self, tmp_path):
+        (tmp_path / "BRAIN.md").mkdir()
+        assert is_folder_native_workspace(tmp_path) is False
+
+
+class TestValidateAllFolderNativeWorkspace:
+    def test_no_errors_or_warnings(self, tmp_path):
+        workspace = _make_workspace(tmp_path)
+        issues = validate_all(str(workspace))
+        assert _errors(issues) == []
+        assert _warnings(issues) == []
+
+    def test_single_info_issue_points_at_brain_workspace(self, tmp_path):
+        workspace = _make_workspace(tmp_path)
+        issues = validate_all(str(workspace))
+        assert len(issues) == 1
+        assert issues[0].severity == "INFO"
+        assert "brain-workspace" in issues[0].message
+
+    def test_reserved_system_dir_names_are_not_flagged(self, tmp_path):
+        # These names are legal in a case folder for its own purposes; the
+        # system-root restriction (EXCLUSIVE_SYSTEM_DIRS) must not reach it.
+        workspace = _make_workspace(tmp_path)
+        for name in EXCLUSIVE_SYSTEM_DIRS:
+            (workspace / name).mkdir()
+        issues = validate_all(str(workspace))
+        assert _errors(issues) == []
+        assert not any(name in i.path for name in EXCLUSIVE_SYSTEM_DIRS for i in issues)
+
+    def test_missing_root_schema_dirs_are_not_flagged(self, tmp_path):
+        # raw/, wiki/, tasks/ are absent by contract in a folder-native
+        # workspace; REQUIRED_DIRS must not apply here.
+        workspace = _make_workspace(tmp_path)
+        issues = validate_all(str(workspace))
+        assert not any("missing required directory" in i.message for i in issues)
+
+    def test_workspace_queue_is_readable_by_brain_workspace_regardless(self, tmp_path):
+        # The workspace's own queue keeps working; brain-validate opting out
+        # does not touch brain_workspace's own parsing.
+        from brain_workspace import parse_local_tasks
+
+        workspace = _make_workspace(tmp_path)
+        tasks = parse_local_tasks(workspace / "TASKS.md")
+        assert [t.task_id for t in tasks] == ["local-001"]

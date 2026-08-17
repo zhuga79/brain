@@ -93,6 +93,20 @@ def validate_staged_write_path(brain: Path) -> list[Issue]:
     ]
 
 
+def is_folder_native_workspace(brain: Path) -> bool:
+    """Отличает folder-native рабочую папку от системного корня Brain.
+
+    Маркер — `BRAIN.md` в корне: `brain-workspace` полагается на тот же
+    признак (`find_nearest_workspace`), а системный корень (`~/brain` и его
+    дерево) его никогда не заводит. Схема такой папки не обязана иметь
+    `raw/`, `wiki/`, `tasks/active.md` — это не дефект, а другой контур: см.
+    `docs/decisions/decision-runtime-core-boundaries.md`, раздел про
+    folder-native workspace. Полная схема `validate_all` здесь неприменима
+    в принципе, а не нарушена, и её нельзя починить переименованием папок.
+    """
+    return (Path(brain) / "BRAIN.md").is_file()
+
+
 def validate_paths(brain: Path) -> list[Issue]:
     issues = []
     for d in REQUIRED_DIRS:
@@ -839,6 +853,20 @@ def validate_uiux_stale_references(brain: Path) -> list[Issue]:
 def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     from .pages import brain_path
     brain = brain_path(str(brain_value) if brain_value else None)
+    if is_folder_native_workspace(brain):
+        # Folder-native рабочая папка — сознательно ограниченный контур, не
+        # уменьшенная копия системного корня. У неё нет `raw/`, `wiki/index.md`
+        # и `tasks/active.md` по контракту, поэтому полная схема ниже здесь не
+        # проверяется вовсе: и REQUIRED_DIRS, и EXCLUSIVE_SYSTEM_DIRS были бы
+        # ошибками, которые оператор не может устранить переименованием
+        # рабочих папок. Проверка такой папки — задача `brain-workspace`, не
+        # `brain-validate`.
+        return [Issue(
+            "INFO",
+            "BRAIN.md",
+            "folder-native рабочая папка — вне области brain-validate; "
+            "используй `brain-workspace tasks --workspace .` для её очереди",
+        )]
     issues = validate_paths(brain)
     issues.extend(validate_staged_write_path(brain))
     if any(issue.severity == "ERROR" for issue in issues):
