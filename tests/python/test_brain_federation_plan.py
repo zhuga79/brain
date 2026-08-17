@@ -340,13 +340,206 @@ def test_append_imports_atomic(tmp_path):
     (brain / "tasks").mkdir()
     active = brain / "tasks" / "active.md"
     active.write_text("# Active tasks\n\n- [ ] [P1] existing\n")
-    
+
     imports = [{"id": "t1", "title": "New", "priority": "P2", "acceptance": "A"}]
-    append_imports_atomic(brain, imports)
-    
+    findings = append_imports_atomic(brain, imports)
+    assert findings == []
+
     content = active.read_text()
     assert "t1 — New" in content
     assert "existing" in content
+
+
+def test_append_imports_atomic_conflict_under_lock(tmp_path):
+    """live_task_conflicts is re-checked inside the queue lock: an id that
+    landed in active.md after the caller's own pre-check (e.g. a concurrent
+    writer) must block the write, not silently duplicate it."""
+    brain = tmp_path
+    (brain / "tasks").mkdir()
+    active = brain / "tasks" / "active.md"
+    active.write_text("# Active tasks\n\n- [ ] [P1] t1 — Already there\n      role: developer   mode: solo\n      acceptance: x\n")
+
+    imports = [{"id": "t1", "title": "New", "priority": "P2", "acceptance": "A"}]
+    findings = append_imports_atomic(brain, imports)
+
+    assert any(f.code == "task-duplicate-id-at-write" for f in findings)
+    content = active.read_text()
+    assert content.count("t1") == 1
+    assert "New" not in content
+
+
+def test_append_imports_atomic_uses_taskfile_queue_lock(tmp_path):
+    """The write must go through brain_core.taskfile.queue_lock, the same
+    mutex every other tasks/active.md writer (add/take/release/block/complete)
+    uses — not a separate, federation-only lock. Regression for
+    t-2026-08-16-federation-import-writes-activ."""
+    from brain_core import taskfile as taskfile_module
+
+    brain = tmp_path
+    (brain / "tasks").mkdir()
+    active = brain / "tasks" / "active.md"
+    active.write_text("# Active tasks\n")
+
+    calls = []
+    orig_queue_lock = taskfile_module.queue_lock
+
+    def spy_queue_lock(tasks_dir):
+        calls.append(Path(tasks_dir))
+        return orig_queue_lock(tasks_dir)
+
+    with patch("brain_federation.plan.taskfile.queue_lock", side_effect=spy_queue_lock):
+        imports = [{"id": "t1", "title": "New", "priority": "P2", "acceptance": "A"}]
+        findings = append_imports_atomic(brain, imports)
+
+    assert findings == []
+    assert calls == [brain / "tasks"]
+
+
+def test_append_imports_atomic_race_with_taskfile_take(tmp_path):
+    """Regression for t-2026-08-16-federation-import-writes-activ.
+
+    Before the fix, append_imports_atomic wrote tasks/active.md under its own
+    `.locks/tasks-active` directory lock, independent of
+    `taskfile.queue_lock` (`tasks/.taskfile.lock`) that `taskfile.take`
+    serializes through. A concurrent take() reading active.md, getting
+    preempted before its write, while a federation import ran its full
+    read-modify-write in that window, silently lost the imported task once
+    take() resumed and clobbered the file with its stale copy — with exit
+    code 0 on the import side (reproduced separately; see the ticket).
+
+    Forcing that exact interleaving is no longer possible as a *test* against
+    the fixed code without deadlocking it on purpose: both operations now
+    contend for the same flock, so pausing one mid-critical-section while the
+    other tries to acquire the same lock is exactly the contention the fix
+    introduces, not a bug. Instead, this test drives genuine lock contention
+    from two background threads — take() pauses while holding the lock, the
+    import is started concurrently and must block behind it, and only then is
+    take() released — and asserts the queue converges to both changes with
+    nothing lost."""
+    import threading
+    import time as time_module
+
+    from brain_core import taskfile as taskfile_module
+
+    brain = tmp_path
+    (brain / "tasks").mkdir()
+    active = brain / "tasks" / "active.md"
+    active.write_text(
+        "# Active tasks\n\n"
+        "- [ ] [P1] t-race — Race task\n"
+        "      role: developer   mode: solo\n"
+        "      acceptance: none\n"
+    )
+
+    paused = threading.Event()
+    release = threading.Event()
+    orig_read = taskfile_module._read
+
+    def paused_read(path):
+        text = orig_read(path)
+        if path == active and not paused.is_set():
+            paused.set()
+            release.wait(timeout=5)
+        return text
+
+    imports = [
+        {
+            "id": "t-import",
+            "title": "Imported task",
+            "priority": "P1",
+            "acceptance": "y",
+            "role": "developer",
+            "mode": "solo",
+        }
+    ]
+    import_findings: list[Finding] = []
+
+    def do_import():
+        nonlocal import_findings
+        import_findings = append_imports_atomic(brain, imports)
+
+    with patch("brain_core.taskfile._read", side_effect=paused_read):
+        take_thread = threading.Thread(
+            target=lambda: taskfile_module.take(active, "t-race", "agent-A")
+        )
+        take_thread.start()
+        assert paused.wait(timeout=5), "take() never reached the read pause point"
+
+        import_thread = threading.Thread(target=do_import)
+        import_thread.start()
+        # Best-effort: give the import thread a chance to actually block on
+        # the shared flock (held by take()) rather than racing ahead of it.
+        # Not load-bearing for correctness — the assertions below hold
+        # regardless of whether contention was actually observed.
+        time_module.sleep(0.2)
+
+        release.set()
+        take_thread.join(timeout=5)
+        import_thread.join(timeout=5)
+
+    assert not take_thread.is_alive() and not import_thread.is_alive()
+    assert import_findings == []
+    final = active.read_text()
+    assert "t-import" in final, "federation import was lost to a concurrent take()"
+    assert "[~] [P1] t-race" in final, "concurrent take() transition was lost"
+    assert final.count("t-race") == 1
+    assert final.count("t-import") == 1
+
+
+def test_append_imports_atomic_concurrent_stress(tmp_path):
+    """Unforced concurrent take()/import pairs, run repeatedly: real threads,
+    no monkeypatched pause points, letting the OS-level flock arbitrate
+    ordering. Directly exercises the acceptance criterion for
+    t-2026-08-16-federation-import-writes-activ — concurrent take + import
+    must not lose or duplicate queue lines, under whatever interleaving the
+    scheduler actually produces."""
+    import threading
+
+    from brain_core import taskfile as taskfile_module
+
+    for i in range(20):
+        brain = tmp_path / f"run-{i}"
+        (brain / "tasks").mkdir(parents=True)
+        active = brain / "tasks" / "active.md"
+        active.write_text(
+            "# Active tasks\n\n"
+            f"- [ ] [P1] t-race-{i} — Race task\n"
+            "      role: developer   mode: solo\n"
+            "      acceptance: none\n"
+        )
+        imports = [
+            {
+                "id": f"t-import-{i}",
+                "title": "Imported task",
+                "priority": "P1",
+                "acceptance": "y",
+                "role": "developer",
+                "mode": "solo",
+            }
+        ]
+        import_findings: list[Finding] = []
+
+        def do_take(active=active, i=i):
+            taskfile_module.take(active, f"t-race-{i}", "agent-A")
+
+        def do_import(brain=brain, imports=imports):
+            nonlocal import_findings
+            import_findings = append_imports_atomic(brain, imports)
+
+        t1 = threading.Thread(target=do_take)
+        t2 = threading.Thread(target=do_import)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert not t1.is_alive() and not t2.is_alive(), f"run {i}: thread did not finish"
+        assert import_findings == [], f"run {i}: unexpected conflict findings"
+        final = active.read_text()
+        assert final.count(f"t-race-{i}") == 1, f"run {i}: t-race duplicated or lost"
+        assert final.count(f"t-import-{i}") == 1, f"run {i}: t-import duplicated or lost"
+        assert f"[~] [P1] t-race-{i}" in final, f"run {i}: take() transition lost"
+
 
 def test_log_imports(tmp_path):
     brain = tmp_path
@@ -402,9 +595,43 @@ def test_cmd_import_tasks(tmp_path):
          patch("brain_federation.plan.acquire_import_lock", return_value=(True, "")), \
          patch("brain_federation.plan.release_import_lock"), \
          patch("brain_federation.plan.live_task_conflicts", return_value=[]), \
-         patch("brain_federation.plan.append_imports_atomic"), \
-         patch("brain_federation.plan.log_imports"):
+         patch("brain_federation.plan.append_imports_atomic", return_value=[]) as mock_append, \
+         patch("brain_federation.plan.log_imports") as mock_log:
         assert cmd_import_tasks(args) == 0
+        mock_append.assert_called_once()
+        mock_log.assert_called_once()
+
+
+def test_cmd_import_tasks_conflict_at_write_time(tmp_path):
+    """append_imports_atomic's re-check under the queue lock can find a
+    conflict even after the caller's own live_task_conflicts pre-check
+    passed (a concurrent writer landed in between). cmd_import_tasks must
+    surface that as a block finding, skip log_imports, and report the task
+    as not imported — not silently succeed."""
+    plan_file = tmp_path / "plan.json"
+    source_state_val = {"repo_head": "a", "repo_status_sha256": "b", "brain_active_sha256": "c", "brain_done_sha256": "d"}
+    plan_file.write_text(json.dumps({
+        "schema_version": 1, "mode": "plan",
+        "source_state": source_state_val,
+        "task_imports": [{"id": "t1", "title": "T", "priority": "P1", "acceptance": "A", "state": "open"}]
+    }))
+    args = argparse.Namespace(plan=str(plan_file), agent="agent-123", yes=True, json=True, allow_drift=False, allow_stale=False)
+
+    conflict_finding = Finding("task-duplicate-id-at-write", "block", "tasks/active.md:1", "task t1 already exists in active.md")
+    with patch("brain_federation.plan.source_state", return_value=source_state_val), \
+         patch("brain_federation.plan.acquire_import_lock", return_value=(True, "")), \
+         patch("brain_federation.plan.release_import_lock"), \
+         patch("brain_federation.plan.live_task_conflicts", return_value=[]), \
+         patch("brain_federation.plan.append_imports_atomic", return_value=[conflict_finding]), \
+         patch("brain_federation.plan.log_imports") as mock_log, \
+         patch("brain_federation.plan.emit") as mock_emit:
+        rc = cmd_import_tasks(args)
+
+    assert rc != 0
+    mock_log.assert_not_called()
+    data = mock_emit.call_args[0][0]
+    assert data["imported"] == []
+
 
 def test_cmd_write_wiki_proposals(tmp_path):
     plan_file = tmp_path / "plan.json"

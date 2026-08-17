@@ -8,10 +8,11 @@ import hashlib
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+from brain_core import taskfile
 
 from .core import (
     AGENT_ID_RE,
@@ -365,6 +366,28 @@ def stale_plan_findings(plan: dict[str, Any], args: argparse.Namespace) -> list[
 
 # ---------------------------------------------------------------------------
 # Import lock helpers
+#
+# t-2026-08-16-federation-import-writes-activ: `.locks/tasks-active` below is
+# a *business* lock — it single-flights `brain-federation import-tasks --yes`
+# against itself so two concurrent imports don't both compute "not yet
+# imported" from the same snapshot, and it gives a readable
+# "import lock held by <owner>" error instead of a silent retry. It is
+# deliberately NOT the mutex that makes the write to tasks/active.md safe.
+#
+# That job belongs to `taskfile.queue_lock` (flock on tasks/.taskfile.lock),
+# the single mutex every other queue writer (`add`/`take`/`release`/`block`/
+# `complete` in brain_core.taskfile, and brain_app.queue / the MCP tool on
+# top of it) already serializes through. Before this fix, `append_imports_atomic`
+# read tasks/active.md, appended its own entries and replaced the file under
+# `.locks/tasks-active` alone — a second, independent mutex over the same
+# file. A concurrent `brain-task take` (holding `.taskfile.lock`, not
+# `.locks/tasks-active`) could read-modify-write in the same window and the
+# last writer's stale in-memory copy would silently clobber the other's
+# change: an imported task vanishing, or a `take` transition reverting to
+# `[ ]` while its lock directory still claimed the task. Reproduced and
+# documented in tests/python/test_brain_federation_plan.py
+# (test_append_imports_atomic_race_with_taskfile_take and the reverse
+# ordering); see append_imports_atomic below for the fix.
 # ---------------------------------------------------------------------------
 
 def acquire_import_lock(brain: Path, agent: str, ttl: int = 600) -> tuple[bool, str]:
@@ -408,26 +431,32 @@ def release_import_lock(brain: Path, agent: str) -> None:
         pass
 
 
-def append_imports_atomic(brain: Path, imports: list[dict[str, Any]]) -> None:
+def append_imports_atomic(brain: Path, imports: list[dict[str, Any]]) -> list[Finding]:
+    """Дописать импортированные задачи в active.md под общей блокировкой очереди.
+
+    Пишет под `taskfile.queue_lock` — тем же мьютексом, что `brain_core.taskfile`
+    использует для `add`/`take`/`release`/`block`/`complete`. Конфликтная
+    проверка (`live_task_conflicts`) переисполняется здесь же, внутри лока: то,
+    что было true снаружи (до захвата лока), могло устареть к моменту записи —
+    другой писатель мог успеть добавить задачу с тем же id, пока этот вызов
+    ждал лок. Возвращает находки: непустой список — конфликт обнаружен под
+    локом, запись не выполнена и вызывающий обязан не считать импорт успешным.
+    """
     active_path = brain / "tasks" / "active.md"
-    active_path.parent.mkdir(parents=True, exist_ok=True)
-    text = (
-        active_path.read_text(encoding="utf-8", errors="replace")
-        if active_path.exists()
-        else "# Active tasks\n"
-    )
-    text = text.rstrip() + "\n\n"
-    text += "\n".join(task_import_block(task).rstrip() for task in imports)
-    text += "\n"
-    fd, tmp_name = tempfile.mkstemp(prefix=".active.", suffix=".tmp", dir=str(active_path.parent))
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        tmp_path.replace(active_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+    with taskfile.queue_lock(active_path.parent):
+        findings = live_task_conflicts(brain, imports)
+        if findings:
+            return findings
+        text = (
+            active_path.read_text(encoding="utf-8", errors="replace")
+            if active_path.exists()
+            else "# Active tasks\n"
+        )
+        text = text.rstrip() + "\n\n"
+        text += "\n".join(task_import_block(task).rstrip() for task in imports)
+        text += "\n"
+        taskfile.atomic_write(active_path, text)
+    return []
 
 
 def log_imports(
@@ -737,10 +766,17 @@ def cmd_import_tasks(args: argparse.Namespace) -> int:
         else:
             locked = True
             if not has_block(findings):
+                # Advisory pre-check: cheap, readable error before touching the
+                # queue lock. Not authoritative — a writer serialized only by
+                # taskfile.queue_lock can still land between this check and the
+                # write below, which is why append_imports_atomic re-checks
+                # under the lock itself.
                 findings.extend(live_task_conflicts(brain, imports))
             if not has_block(findings):
-                append_imports_atomic(brain, imports)
-                log_imports(brain, args.agent, plan_path, plan, imports)
+                write_findings = append_imports_atomic(brain, imports)
+                findings.extend(write_findings)
+                if not write_findings:
+                    log_imports(brain, args.agent, plan_path, plan, imports)
         imported = [task["id"] for task in imports] if locked and not has_block(findings) else []
         data = import_result(plan, plan_path, args.agent, False, findings, imported)
         emit(data, args.json)
