@@ -337,12 +337,28 @@ args = argparse.Namespace(brain=str(brain), port=port)
 # Start server in background thread (daemon so it dies with test)
 t = threading.Thread(target=mod.cmd_serve, args=(args,), daemon=True)
 t.start()
-time.sleep(0.5)  # let it bind
+
+# Ждём готовности сокета опросом, а не фиксированной паузой. Прежний
+# time.sleep(0.5) — предположение о скорости раннера: на CI поток не успевал
+# забиндиться, и кейс падал с ConnectionRefusedError на здоровом коммите
+# (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство — что
+# /events отдаёт event-stream, а не что сервер поднимается за полсекунды.
+s = None
+deadline = time.time() + 15
+while time.time() < deadline:
+    candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    candidate.settimeout(8)
+    try:
+        candidate.connect(("127.0.0.1", port))
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        candidate.close()
+        time.sleep(0.05)
+        continue
+    s = candidate
+    break
+assert s is not None, f"dashboard SSE server did not start listening on port {port} within 15s"
 
 # Use raw socket to talk HTTP/1.0 — avoids urllib's redirect/error handling on SSE
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(8)
-s.connect(("127.0.0.1", port))
 s.sendall(b"GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
 
 # Read response headers + first data line

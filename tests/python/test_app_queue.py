@@ -8,6 +8,7 @@ brain-shell и дашборде — и расходились. Тесты фик
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -93,7 +94,19 @@ def test_deps_tree_marks_a_cycle_instead_of_recursing(tmp_path):
 
 # ── запись ───────────────────────────────────────────────────────────────────
 
-def test_add_returns_a_free_id(brain):
+def test_add_returns_a_free_id(brain, monkeypatch):
+    """Второй add на том же заголовке получает суффикс, а не тот же id.
+
+    Часы фиксируются, и это не косметика. У заголовка кириллицей slug пустой,
+    поэтому new_task_id берёт запасной суффикс из `%H%M%S` — база id зависит
+    от секунды вызова. С живыми часами два add по разные стороны границы
+    секунды дают разные базы, и `second.startswith(first)` падает, хотя id
+    уникальны и поведение верное: тест ронял CI на здоровом коммите
+    (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство —
+    избежание коллизии, а не показания часов, поэтому время убрано из условия.
+    """
+    moment = datetime(2026, 8, 17, 6, 44, 11, tzinfo=timezone.utc)
+    monkeypatch.setattr(queue.clock, "now", lambda: moment)
     first = queue.add("Новая задача", brain)
     second = queue.add("Новая задача", brain)
     assert first != second and second.startswith(first)
