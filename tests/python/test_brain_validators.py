@@ -1194,6 +1194,32 @@ class TestIsFolderNativeWorkspace:
         (tmp_path / "BRAIN.md").mkdir()
         assert is_folder_native_workspace(tmp_path) is False
 
+    def test_a_marker_in_the_data_root_does_not_make_it_a_workspace(self, tmp_path):
+        """Маркер сам по себе не переводит корень данных в другой контур.
+
+        Признание папки рабочей отключает `validate_all` целиком — вместе с
+        `validate_system_paths_not_restored` и `validate_installer_shadows`,
+        которые держат границу корня данных (находка
+        `data-root-stale-installer-reti` родительского ревью). Если бы хватало
+        имени файла, случайный `BRAIN.md` в корне данных молча снимал бы эти
+        гейты: воспроизведено — подложенный маркер убирал четыре ERROR,
+        включая installer-тень. Тот же класс, что закрыт 2026-08-16 в
+        `tests/lib/sandbox-guard.sh`, где контур опознавался признаком,
+        появляющимся в живом дереве сам.
+        """
+        brain = _make_brain(tmp_path)
+        (brain / "BRAIN.md").write_text("# Не рабочая папка, а корень данных\n")
+        assert is_folder_native_workspace(brain) is False
+
+    def test_false_for_the_configured_data_root_even_without_its_schema(
+        self, tmp_path, monkeypatch
+    ):
+        """Настроенный `BRAIN_PATH` не становится рабочей папкой ни при каком
+        содержимом — даже если схемы корня в нём сейчас нет."""
+        workspace = _make_workspace(tmp_path)
+        monkeypatch.setenv("BRAIN_PATH", str(workspace))
+        assert is_folder_native_workspace(workspace) is False
+
 
 class TestValidateAllFolderNativeWorkspace:
     def test_no_errors_or_warnings(self, tmp_path):

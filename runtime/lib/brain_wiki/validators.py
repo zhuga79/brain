@@ -94,17 +94,47 @@ def validate_staged_write_path(brain: Path) -> list[Issue]:
 
 
 def is_folder_native_workspace(brain: Path) -> bool:
-    """Отличает folder-native рабочую папку от системного корня Brain.
+    """Отличает folder-native рабочую папку от корня данных Brain.
 
-    Маркер — `BRAIN.md` в корне: `brain-workspace` полагается на тот же
-    признак (`find_nearest_workspace`), а системный корень (`~/brain` и его
-    дерево) его никогда не заводит. Схема такой папки не обязана иметь
-    `raw/`, `wiki/`, `tasks/active.md` — это не дефект, а другой контур: см.
+    Маркер — `BRAIN.md` в корне: `brain-workspace` опознаёт папку по нему же
+    (`find_nearest_workspace`). Схема такой папки не обязана иметь `raw/`,
+    `wiki/`, `tasks/active.md` — это не дефект, а другой контур: см.
     `docs/decisions/decision-runtime-core-boundaries.md`, раздел про
     folder-native workspace. Полная схема `validate_all` здесь неприменима
     в принципе, а не нарушена, и её нельзя починить переименованием папок.
+
+    Одного маркера НЕДОСТАТОЧНО. Признание папки рабочей отключает
+    `validate_all` целиком, включая гейты, которые держат границу корня
+    данных: `validate_system_paths_not_restored` и `validate_installer_shadows`
+    (находка `data-root-stale-installer-reti` родительского ревью). Если бы
+    хватало имени файла, любой `BRAIN.md`, случайно оказавшийся в корне
+    данных, молча снимал бы эти проверки — тот же класс, что снятый
+    2026-08-16 в `tests/lib/sandbox-guard.sh`: контур опознавался признаком,
+    который в живом дереве появляется сам. Проверено: подложенный маркер
+    убирал четыре ERROR, включая installer-тень.
+
+    Поэтому опознание положительное и по свойству дерева: корень данных
+    исключается по конфигурации (`BRAIN_PATH`) и по собственной схеме
+    (`tasks/active.md`, `wiki/`), которой у рабочей папки по контракту нет.
     """
-    return (Path(brain) / "BRAIN.md").is_file()
+    from .pages import brain_path
+
+    brain = Path(brain)
+    if not (brain / "BRAIN.md").is_file():
+        return False
+    # Схема корня данных: рабочая папка ведёт очередь в TASKS.md рядом с
+    # BRAIN.md и каталога tasks/ не заводит.
+    if (brain / "tasks" / "active.md").is_file() or (brain / "wiki").is_dir():
+        return False
+    # Настроенный корень данных не становится рабочей папкой ни при каком
+    # содержимом: сравниваем разрешённые пути — ~/brain обычно симлинк.
+    try:
+        configured = brain_path(None).resolve()
+        if brain.resolve() == configured:
+            return False
+    except OSError:
+        return False
+    return True
 
 
 def validate_paths(brain: Path) -> list[Issue]:
