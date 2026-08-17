@@ -145,9 +145,40 @@ class TestReconcile:
         # Задача остаётся в работе: работа, скорее всего, идёт.
         assert "- [~] [P1] t-lock-take" in active.read_text(encoding="utf-8")
 
-    def test_reconcile_drops_an_orphan_lock(self, tree):
+    def test_live_lock_on_an_open_task_is_not_an_orphan(self, tree):
+        """t-2026-08-16-reconcile-fix-drops-a-live-loc.
+
+        Прежде эта проверка называлась test_reconcile_drops_an_orphan_lock и
+        утверждала обратное: что живой лок на `t-lock-other` (задача остаётся
+        `[ ]`, лок только что взят claim_lock, не протух) — это orphan_lock, и
+        `--fix` должен его снести. Это было неверно: протокол MEMORY.md прямо
+        предписывает сперва `brain-lock acquire`, потом `brain-task take`,
+        значит открытая задача под действующим локом — штатное переходное
+        окно между этими двумя шагами, а не рассинхрон. `--fix` удалял в этом
+        окне живой лок чужого агента — обход владения (класс B2). Теперь
+        reconcile это окно распознаёт и не трогает.
+        """
         brain, active = tree
         taskfile.claim_lock(active, "t-lock-other", "ghost-agent")
+        findings = taskfile.reconcile_locks(active, fix=True)
+        assert findings == []
+        assert _lock_owner(brain, "t-lock-other") == "ghost-agent"
+        assert "- [ ] [P2] t-lock-other" in active.read_text(encoding="utf-8")
+
+    def test_reconcile_drops_a_lock_on_a_nonexistent_task(self, tree):
+        """Настоящий orphan: лока владелец существует, а задачи в очереди нет."""
+        brain, active = tree
+        taskfile.claim_lock(active, "t-ghost-task", "ghost-agent")
+        findings = taskfile.reconcile_locks(active, fix=True)
+        assert [f["kind"] for f in findings] == ["orphan_lock"]
+        assert not (brain / ".locks" / "t-ghost-task").exists()
+
+    def test_reconcile_drops_a_stale_lock_on_an_open_task(self, tree):
+        """Протухший лок остаётся orphan, даже если задача открыта: acquire-
+        перед-take защищает только ДЕЙСТВУЮЩИЙ лок, не любой лок вообще."""
+        brain, active = tree
+        taskfile.claim_lock(active, "t-lock-other", "dead-agent")
+        _owner_file(brain, "t-lock-other").write_text("dead-agent|1|1\n", encoding="utf-8")
         findings = taskfile.reconcile_locks(active, fix=True)
         assert [f["kind"] for f in findings] == ["orphan_lock"]
         assert not (brain / ".locks" / "t-lock-other").exists()

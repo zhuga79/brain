@@ -516,6 +516,21 @@ def _lock_state(active: Path, tid: str) -> tuple[str, bool] | None:
     return (owner, int(time.time()) - started > ttl)
 
 
+def _task_states(txt: str) -> dict[str, str]:
+    """id задачи → символ состояния (` ~x!`), для задач в ЛЮБОМ состоянии.
+
+    В отличие от `_in_progress_owners` (только `[~]`), тут нужен весь спектр:
+    `reconcile_locks` должен отличить лок на открытой задаче от лока на задаче,
+    которой в очереди вообще нет.
+    """
+    out: dict[str, str] = {}
+    for match in grammar.BLOCK_RE.finditer(txt):
+        head = grammar.parse_head(match.group(1).splitlines()[0])
+        if head:
+            out[head.task_id] = head.state
+    return out
+
+
 def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object]]:
     """Свести владельца задачи и владельца лока к одному агенту.
 
@@ -530,7 +545,25 @@ def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object
     * `lock_missing`   — `[~] by: A`, лока нет;
     * `owner_missing`  — `[~]` вообще без `by:`;
     * `lock_stale`     — `[~] by: A`, лок A протух;
-    * `orphan_lock`    — лок есть, задача не в работе.
+    * `orphan_lock`    — лок не объясняется ни work-in-progress, ни окном
+      «acquire перед take» (см. ниже).
+
+    Контракт `orphan_lock` (t-2026-08-16-reconcile-fix-drops-a-live-loc).
+    Протокол в MEMORY.md предписывает сперва `brain-lock acquire`, потом
+    `brain-task take` — значит открытая задача `[ ]` под ДЕЙСТВУЮЩИМ (не
+    протухшим) локом — штатное переходное окно, а не рассинхрон; это же окно
+    распознаёт `_ensure_open_lock_owner`. Раньше `reconcile_locks` этого не
+    знал: любой лок на задаче не в `[~]` считался orphan, и `--fix` удалял
+    живой лок чужого агента прямо в этом окне (воспроизведено: kind=orphan_lock,
+    stale=False, fixed=True). Действующее правило:
+
+      - лок на задаче, которой в очереди нет вообще → orphan (как и раньше);
+      - лок на задаче `[!]`/`[x]` → orphan (не in-progress и не то самое
+        pre-take окно — окно определено только для `[ ]`);
+      - лок на задаче `[ ]`:
+          - протух (TTL истёк) → orphan, подлежит перехвату, как и любой
+            протухший лок;
+          - живой → НЕ finding, штатное pre-take окно, не трогаем.
 
     С `fix=True` расхождение устраняется: задача возвращается в `[ ]`, а лок
     снимается — кроме `lock_missing`, где лок восстанавливается на владельца
@@ -541,6 +574,7 @@ def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object
     with queue_lock(active.parent):
         txt = _read(active)
         owners = _in_progress_owners(txt)
+        states = _task_states(txt)
 
         locked_ids: set[str] = set()
         root = _locks_root(active)
@@ -557,6 +591,9 @@ def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object
             stale = bool(lock and lock[1])
 
             if task_owner is None:
+                if states.get(tid) == " " and not stale:
+                    # Живой лок на открытой задаче — окно acquire-перед-take.
+                    continue
                 kind = "orphan_lock"
             elif lock is None:
                 kind = "lock_missing"
