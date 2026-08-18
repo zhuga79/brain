@@ -15,12 +15,16 @@ def test_parse_skill_file_unclosed_frontmatter(tmp_path):
     assert res == {}
 
 def test_parse_skill_file_invalid_yaml(tmp_path):
+    """A construct outside the supported YAML subset (here: an unindented
+    top-level key followed by a stray indented line) is now a parse error,
+    not a value the old split(':', 1) reader happened to tolerate.
+    parse_skill_file catches FrontmatterError and returns {} — the skill is
+    treated as absent, not as one with silently mangled fields (the class of
+    bug that hit laravel-verification/SKILL.md)."""
     f = tmp_path / "skill.md"
     f.write_text("---\nname: test\n  bad: indent\n---\nbody")
     res = parse_skill_file(f)
-    # Simple parser strips and accepts this
-    assert res["name"] == "test"
-    assert res["bad"] == "indent"
+    assert res == {}
 
 def test_parse_skill_file_non_dict_yaml(tmp_path):
     f = tmp_path / "skill.md"
@@ -34,6 +38,27 @@ def test_parse_skill_file(tmp_path):
     res = parse_skill_file(f)
     assert res["name"] == "test"
     assert res["_content"] == "body"
+
+def test_parse_skill_file_unquoted_colon_in_description(tmp_path):
+    """Regression for the laravel-verification/SKILL.md incident: an
+    unquoted colon in `description` used to collapse frontmatter parsing
+    silently (name fell back to the directory name, allowed-tools/model
+    stopped applying, no warning). Once format_frontmatter quotes the
+    value on write, and parse_frontmatter reads the quoted value back
+    correctly, the field survives intact."""
+    f = tmp_path / "skill.md"
+    f.write_text(
+        "---\n"
+        "name: laravel-verification\n"
+        'description: "Verify Laravel code: routes, migrations, tests"\n'
+        "model: sonnet\n"
+        "---\n"
+        "body"
+    )
+    res = parse_skill_file(f)
+    assert res["name"] == "laravel-verification"
+    assert res["description"] == "Verify Laravel code: routes, migrations, tests"
+    assert res["model"] == "sonnet"
 
 def test_validate_skill_mcp():
     valid = {"name": "p", "type": "mcp", "applies_to": ["qa"], "supported_clients": ["claude"], "mcp_command": "npx"}

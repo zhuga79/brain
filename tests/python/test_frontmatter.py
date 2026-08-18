@@ -3,7 +3,13 @@
 Tests: parse_frontmatter, format_frontmatter, as_bool, as_list.
 """
 import pytest
-from brain_wiki import parse_frontmatter, format_frontmatter, as_bool, as_list
+from brain_wiki import (
+    FrontmatterError,
+    as_bool,
+    as_list,
+    format_frontmatter,
+    parse_frontmatter,
+)
 
 
 class TestParseFrontmatter:
@@ -185,3 +191,201 @@ class TestFormatFrontmatter:
         text = format_frontmatter({"title": "T"}, "")
         fm, body = parse_frontmatter(text)
         assert fm["title"] == "T"
+
+
+class TestQuotingRegression:
+    """The bug this module exists to fix: a colon in a plain scalar value
+    used to be written unescaped, which produces a document that looks like
+    YAML but breaks under a real YAML parser (`mapping values are not
+    allowed here`) and that a hand-written canonical YAML file (quoted or
+    block-list) used to be misread by the old split(':', 1) reader."""
+
+    def test_colon_in_value_is_quoted_on_write(self):
+        text = format_frontmatter({"title": "Разбор: что дальше"}, "")
+        line = next(l for l in text.splitlines() if l.startswith("title:"))
+        assert line == 'title: "Разбор: что дальше"'
+
+    def test_colon_in_value_roundtrips(self):
+        original = {"title": "Разбор: что дальше"}
+        text = format_frontmatter(original, "body\n")
+        fm, _ = parse_frontmatter(text)
+        assert fm["title"] == "Разбор: что дальше"
+
+    def test_description_with_colon_like_skill_incident(self):
+        """Regression for the laravel-verification/SKILL.md incident: an
+        unquoted colon in `description` used to collapse the whole
+        frontmatter block silently."""
+        original = {
+            "name": "laravel-verification",
+            "description": "Verify Laravel code: routes, migrations, tests",
+            "model": "sonnet",
+        }
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["name"] == "laravel-verification"
+        assert fm["description"] == "Verify Laravel code: routes, migrations, tests"
+        assert fm["model"] == "sonnet"
+
+    def test_double_quote_in_value_roundtrips(self):
+        original = {"title": 'He said "hi"'}
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["title"] == 'He said "hi"'
+
+    def test_newline_in_value_roundtrips(self):
+        original = {"note": "line one\nline two"}
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["note"] == "line one\nline two"
+
+    def test_unicode_value_roundtrips(self):
+        original = {"title": "Отчёт по делу — заключение 🎯"}
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["title"] == "Отчёт по делу — заключение 🎯"
+
+    def test_backslash_in_value_roundtrips(self):
+        original = {"path": "C:\\Users\\test"}
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["path"] == "C:\\Users\\test"
+
+    def test_list_item_with_colon_roundtrips(self):
+        original = {"tags": ["note: important", "plain"]}
+        text = format_frontmatter(original, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["tags"] == ["note: important", "plain"]
+
+    def test_leading_dash_value_is_quoted(self):
+        """A value starting with '-' is ambiguous with a block-sequence
+        marker; must be quoted so a real parser doesn't choke on it."""
+        text = format_frontmatter({"title": "- bullet-like"}, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["title"] == "- bullet-like"
+
+    def test_numeric_looking_string_stays_a_string(self):
+        text = format_frontmatter({"code": "007"}, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["code"] == "007"
+
+    def test_reserved_word_string_stays_a_string(self):
+        text = format_frontmatter({"status": "true"}, "")
+        fm, _ = parse_frontmatter(text)
+        assert fm["status"] == "true"
+        assert fm["status"] is not True
+
+
+class TestBlockListsCanonicalYaml:
+    """Canonical YAML block sequences must be read, not silently dropped.
+    Absorbs the block-list-parsing part of
+    t-2026-08-17-wiki-frontmatter-parser-narrow."""
+
+    def test_block_list_is_parsed(self):
+        text = "---\nsources:\n  - raw/a.md\n  - raw/b.md\n---\nbody\n"
+        fm, body = parse_frontmatter(text)
+        assert fm["sources"] == ["raw/a.md", "raw/b.md"]
+        assert body == "body\n"
+
+    def test_block_list_with_quoted_items(self):
+        text = '---\ntags:\n  - "with: colon"\n  - plain\n---\n'
+        fm, _ = parse_frontmatter(text)
+        assert fm["tags"] == ["with: colon", "plain"]
+
+    def test_block_list_mixed_with_scalar_keys(self):
+        text = "---\ntitle: X\nrelated:\n  - a\n  - b\ntype: concept\n---\n"
+        fm, _ = parse_frontmatter(text)
+        assert fm["title"] == "X"
+        assert fm["related"] == ["a", "b"]
+        assert fm["type"] == "concept"
+
+    def test_bare_key_with_no_items_is_null(self):
+        text = "---\ntags:\ntitle: X\n---\n"
+        fm, _ = parse_frontmatter(text)
+        assert fm["tags"] is None
+        assert fm["title"] == "X"
+
+
+class TestFrontmatterErrorsOnUnsupportedYaml:
+    """Constructs outside the supported subset must raise, not silently
+    return an empty value."""
+
+    def test_block_scalar_literal_raises(self):
+        text = "---\nnote: |\n  multi\n  line\n---\n"
+        with pytest.raises(FrontmatterError):
+            parse_frontmatter(text)
+
+    def test_flow_mapping_raises(self):
+        text = "---\nmeta: {a: 1}\n---\n"
+        with pytest.raises(FrontmatterError):
+            parse_frontmatter(text)
+
+    def test_unexpected_indent_raises(self):
+        text = "---\n  title: X\n---\n"
+        with pytest.raises(FrontmatterError):
+            parse_frontmatter(text)
+
+    def test_line_without_colon_raises(self):
+        text = "---\njust text here\n---\n"
+        with pytest.raises(FrontmatterError):
+            parse_frontmatter(text)
+
+    def test_anchor_raises(self):
+        text = "---\ntitle: &anchor X\n---\n"
+        with pytest.raises(FrontmatterError):
+            parse_frontmatter(text)
+
+
+class TestRealYamlCompat:
+    """Anything format_frontmatter writes must parse identically under a
+    real YAML parser. pyyaml is a test-only dependency (see
+    .github/workflows/tests.yml) — brain-runtime itself stays
+    dependency-free, per pyproject.toml."""
+
+    yaml = pytest.importorskip("yaml")
+
+    def _load_frontmatter_block(self, text: str):
+        assert text.startswith("---\n")
+        end = text.index("\n---", 4)
+        block = text[4:end]
+        return self.yaml.safe_load(block)
+
+    @pytest.mark.parametrize("value", [
+        "Разбор: что дальше",
+        "plain value",
+        'quote " inside',
+        "line one\nline two",
+        "Отчёт — заключение 🎯",
+        "C:\\Users\\test",
+        "- looks like a list item",
+        "007",
+        "true",
+        "",
+        "trailing colon:",
+    ])
+    def test_scalar_survives_real_yaml_parser(self, value):
+        text = format_frontmatter({"field": value}, "")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed["field"] == value
+
+    def test_list_survives_real_yaml_parser(self):
+        original = ["a", "note: important", "b, c"]
+        text = format_frontmatter({"tags": original}, "")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed["tags"] == original
+
+    def test_bool_survives_real_yaml_parser(self):
+        text = format_frontmatter({"protected": True, "draft": False}, "")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed["protected"] is True
+        assert parsed["draft"] is False
+
+    def test_full_document_parses_as_valid_yaml(self):
+        fm = {
+            "title": "Разбор: что дальше",
+            "type": "concept",
+            "tags": ["a", "b: c"],
+            "protected": True,
+        }
+        text = format_frontmatter(fm, "body\n")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed == fm

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # --- frontmatter -----------------------------------------------------------
 from .frontmatter import (
+    FrontmatterError,
     _format_scalar,
     _parse_scalar,
     _strip_quotes,
@@ -81,6 +82,7 @@ from .writers import (
 
 __all__ = [
     # frontmatter
+    "FrontmatterError",
     "_format_scalar",
     "_parse_scalar",
     "_strip_quotes",

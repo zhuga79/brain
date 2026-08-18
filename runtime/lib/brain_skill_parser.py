@@ -11,16 +11,32 @@ def parse_skill_file(filepath: Path) -> Dict[str, Any]:
         # Fallback if brain_wiki is somehow missing
         return {}
         
+    from brain_wiki.frontmatter import FrontmatterError
+
     try:
         content = filepath.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
         data, body = parse_frontmatter(content)
-        if not data:
-            return {}
-        data["_content"] = body.strip()
-        data["_filepath"] = str(filepath)
-        return data
+    except FrontmatterError as exc:
+        # Громко, а не молча. Скилл с frontmatter вне подмножества выпадает
+        # из выдачи целиком — это лучше, чем прежнее поведение, где поля
+        # терялись поштучно и скилл действовал с чужим именем и без
+        # allowed-tools. Но само выпадение обязано быть видимым: исходный
+        # инцидент (незакавыченное двоеточие в description) стоил дорого
+        # именно тем, что прошёл без единого предупреждения.
+        import sys
+
+        print(f"WARN: {filepath}: {exc} — скилл пропущен", file=sys.stderr)
+        return {}
     except Exception:
         return {}
+    if not data:
+        return {}
+    data["_content"] = body.strip()
+    data["_filepath"] = str(filepath)
+    return data
 
 def validate_skill(data: Dict[str, Any]) -> bool:
     """Validate that a skill has required fields."""

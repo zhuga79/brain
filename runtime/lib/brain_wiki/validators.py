@@ -13,7 +13,7 @@ from typing import Any
 
 from brain_core.paths import iter_system_files, resolve_system_asset, system_asset_rel
 
-from .frontmatter import as_list, parse_frontmatter, validate_date
+from .frontmatter import FrontmatterError, as_list, parse_frontmatter, validate_date
 from .pages import (
     Issue,
     all_page_slugs,
@@ -52,6 +52,21 @@ EXCLUSIVE_SYSTEM_DIRS = (
     "skills",
     "config",
 )
+
+
+def _parse_frontmatter_safe(rel: str, text: str) -> tuple[dict[str, Any], str, list[Issue]]:
+    """parse_frontmatter, but a construct outside the supported YAML subset
+    becomes an Issue instead of crashing the whole validate_all run.
+
+    Validators scan every file in the tree, including ones a human or an
+    external tool wrote by hand; one file outside the subset must not take
+    down validation for the rest of the tree.
+    """
+    try:
+        fm, body = parse_frontmatter(text)
+        return fm, body, []
+    except FrontmatterError as exc:
+        return {}, text, [Issue("ERROR", rel, f"frontmatter вне поддерживаемого подмножества YAML: {exc}")]
 
 
 def validate_staged_write_path(brain: Path) -> list[Issue]:
@@ -154,7 +169,9 @@ def validate_paths(brain: Path) -> list[Issue]:
 
 def validate_raw_source(brain: Path, path: Path) -> list[Issue]:
     rel = str(path.relative_to(brain))
-    fm, _body = parse_frontmatter(read_text(path))
+    fm, _body, fm_issues = _parse_frontmatter_safe(rel, read_text(path))
+    if fm_issues:
+        return fm_issues
     issues = []
     if not fm:
         return [Issue("ERROR", rel, "missing frontmatter")]
@@ -234,7 +251,9 @@ def validate_installer_shadows(brain: Path) -> list[Issue]:
 def validate_wiki_page(brain: Path, path: Path, slugs: set[str] | None = None) -> list[Issue]:
     rel = str(path.relative_to(brain))
     slugs = slugs if slugs is not None else all_page_slugs(brain)
-    fm, body = parse_frontmatter(read_text(path))
+    fm, body, fm_issues = _parse_frontmatter_safe(rel, read_text(path))
+    if fm_issues:
+        return fm_issues
     issues = []
     if not fm:
         return [Issue("ERROR", rel, "missing frontmatter")]
@@ -498,7 +517,10 @@ def validate_roles(brain: Path) -> list[Issue]:
 
     for path in role_files:
         rel = f"roles/{path.name}"
-        fm, _body = parse_frontmatter(read_text(path))
+        fm, _body, fm_issues = _parse_frontmatter_safe(rel, read_text(path))
+        if fm_issues:
+            issues.extend(fm_issues)
+            continue
 
         if not fm:
             issues.append(Issue("ERROR", rel,
@@ -803,7 +825,10 @@ def validate_uiux_skill_pack(brain: Path) -> list[Issue]:
             rel = system_asset_rel(path, brain=brain)
             slug = path.stem
             content = read_text(path)
-            fm, _body = parse_frontmatter(content)
+            fm, _body, fm_issues = _parse_frontmatter_safe(rel, content)
+            if fm_issues:
+                issues.extend(fm_issues)
+                continue
 
             if not fm:
                 issues.append(Issue("ERROR", rel, "missing frontmatter"))

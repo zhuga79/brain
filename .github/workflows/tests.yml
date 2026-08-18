@@ -29,7 +29,7 @@ jobs:
         # Без --user намеренно. tests/run.sh подменяет HOME на временный
         # каталог, поэтому user site раннера внутри песочницы не виден:
         # pytest, поставленный с --user, пропал бы ровно там, где нужен.
-        run: python3 -m pip install pytest
+        run: python3 -m pip install pytest pyyaml
 
       - name: Run tests/run.sh
         # Isolated runner: TMP_HOME + BRAIN_PATH. Do not invoke tests/cases
