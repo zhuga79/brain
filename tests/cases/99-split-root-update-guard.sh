@@ -27,6 +27,14 @@ exit 0
 EOF
 chmod +x "$system/tests/run.sh"
 git -C "$system" init >/dev/null 2>&1
+git -C "$system" config user.email "case@example.com"
+git -C "$system" config user.name "case"
+git -C "$system" add -A >/dev/null 2>&1
+git -C "$system" commit -m "system checkout" >/dev/null 2>&1
+system_remote="$BRAIN_FACTORY_TMP/system-remote.git"
+git init --bare "$system_remote" >/dev/null 2>&1
+git -C "$system" remote add origin "$system_remote"
+git -C "$system" push -u origin HEAD >/dev/null 2>&1
 
 mkdir -p "$data/wiki" "$data/tasks" "$data/raw" "$data/council" "$data/.locks" "$data/teams"
 cat > "$data/MEMORY.md" <<'EOF'
@@ -182,10 +190,14 @@ export BRAIN_SYSTEM_PATH="$system"
 mkdir -p "$BRAIN_FACTORY_TMP/bin"
 cat > "$BRAIN_FACTORY_TMP/bin/git" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1" = "-C" ]; then
-  shift 2
+# Only short-circuit `pull`; every other subcommand (including the upstream
+# checks brain-ops now runs first) must still see the original arguments —
+# in particular `-C <dir>` — or it silently falls back to the caller's cwd.
+sub="$1"
+if [ "$sub" = "-C" ]; then
+  sub="$3"
 fi
-if [ "${1:-}" = "pull" ]; then
+if [ "$sub" = "pull" ]; then
   exit 0
 fi
 exec /usr/bin/git "$@"

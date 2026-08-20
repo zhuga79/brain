@@ -150,9 +150,11 @@ printf '%s\n' "$ops_usage" | grep -q update || {
 }
 
 brain_factory
+git config --global user.email "case@example.com"
+git config --global user.name "case"
 td="$BRAIN_FACTORY_TMP"
 sys="$td/system"
-mkdir -p "$sys/.git" "$sys/tests" "$td/bin"
+mkdir -p "$sys/tests" "$td/bin"
 cat > "$sys/setup-brain-v2.sh" <<'EOF'
 #!/usr/bin/env bash
 echo install >> "$HOME/update-steps.txt"
@@ -163,13 +165,27 @@ cat > "$sys/tests/run.sh" <<'EOF'
 echo tests >> "$HOME/update-steps.txt"
 EOF
 chmod +x "$sys/tests/run.sh"
+# Real (if throwaway) git repo with a configured upstream — brain-ops update
+# now checks tracking before it ever calls `pull`, so a bare `.git/` stub
+# with no branch/remote would trip that check before reaching the stub below.
+git -C "$sys" init -q
+git -C "$sys" add -A
+git -C "$sys" commit -q -m init
+sys_remote="$td/system-remote.git"
+git init --bare -q "$sys_remote"
+git -C "$sys" remote add origin "$sys_remote"
+git -C "$sys" push -q -u origin HEAD
 cat > "$td/bin/git" <<'EOF'
 #!/usr/bin/env bash
 echo "git $*" >> "$HOME/update-git.txt"
-if [ "$1" = "-C" ]; then
-  shift 2
+# Only short-circuit `pull`; every other subcommand (including the upstream
+# checks brain-ops now runs first) must still see the original arguments —
+# in particular `-C <dir>` — or it silently falls back to the caller's cwd.
+sub="$1"
+if [ "$sub" = "-C" ]; then
+  sub="$3"
 fi
-if [ "${1:-}" = "pull" ]; then
+if [ "$sub" = "pull" ]; then
   echo pulled >> "$HOME/update-steps.txt"
   exit 0
 fi
