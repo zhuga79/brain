@@ -210,3 +210,149 @@ class TestQueueScope:
         from brain_wiki.validators import validate_queue_scope
 
         assert validate_queue_scope(tmp_path, tmp_path / "tasks" / "нет.md") == []
+
+
+class TestLeftoverRegistry:
+    """Шестое условие review-exit-criteria: leftover несёт role и due.
+
+    t-2026-08-17-leftover-registry-validator-f2 — F2 совета
+    t-2026-08-14-review-exit-criteria-define-th. Проверка устроена как
+    validate_queue_scope: тот же разбор блока, тот же риск прозы.
+    """
+
+    def _brain(self, tmp_path, body):
+        (tmp_path / "tasks").mkdir(exist_ok=True)
+        p = tmp_path / "tasks" / "active.md"
+        p.write_text(body, encoding="utf-8")
+        return tmp_path, p
+
+    def test_valid_leftover_passes(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-ok — Найдено на ревью\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #leftover\n"
+            "      due: 2099-01-01\n",
+        )
+        assert validate_leftover_registry(brain, path) == []
+
+    def test_leftover_without_role_and_due_is_rejected(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-bad — Найдено на ревью без owner\n"
+            "      tags: #leftover\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert len(issues) == 1
+        assert issues[0].severity == "ERROR"
+        assert "t-bad" in issues[0].message
+        assert "role" in issues[0].message and "due" in issues[0].message
+
+    def test_leftover_missing_only_due_is_rejected(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-noowner — Найдено на ревью\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #leftover\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert len(issues) == 1
+        assert issues[0].severity == "ERROR"
+        assert "due" in issues[0].message
+
+    def test_leftover_missing_only_role_is_rejected(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-nodue — Найдено на ревью\n"
+            "      tags: #leftover\n"
+            "      due: 2099-01-01\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert len(issues) == 1
+        assert issues[0].severity == "ERROR"
+        assert "role" in issues[0].message
+
+    def test_overdue_leftover_warns_not_errors(self, tmp_path):
+        """Просроченный due — не то же самое, что отсутствующий: запись всё ещё
+        структурно валидна, поднять в приоритете, не молчать про срок."""
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-late — Найдено на ревью, срок прошёл\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #leftover\n"
+            "      due: 2000-01-01\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert len(issues) == 1
+        assert issues[0].severity == "WARN"
+        assert "t-late" in issues[0].message
+
+    def test_malformed_due_is_rejected(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-baddate — Найдено на ревью\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #leftover\n"
+            "      due: скоро\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert len(issues) == 1
+        assert issues[0].severity == "ERROR"
+        assert "скоро" in issues[0].message
+
+    def test_non_leftover_task_without_due_is_fine(self, tmp_path):
+        """Обычная задача очереди без due — не leftover, проверка её не касается."""
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P1] t-plain — Обычная задача\n      role: developer   mode: solo\n",
+        )
+        assert validate_leftover_registry(brain, path) == []
+
+    def test_leftover_mentioned_in_prose_is_not_a_tag(self, tmp_path):
+        """Проза, упоминающая `#leftover`, тегом не является — как `client:` в прозе."""
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P1] t-prose — Обсуждает leftover\n"
+            "      role: developer   mode: solo\n"
+            "      context: эта запись про #leftover, но сама им не является\n",
+        )
+        assert validate_leftover_registry(brain, path) == []
+
+    def test_tags_field_name_in_prose_is_not_a_field(self, tmp_path):
+        """`tags:` внутри свободного текста (один пробел перед именем) — не поле.
+
+        Граница держится `brain_core.grammar._FIELD_START`: имя поля должно
+        стоять в начале строки либо после двух и более пробелов. Задача без
+        role/due не отвергается, потому что упоминание `tags:` в прозе не
+        делает её leftover-записью — именно риск, который назвал тикет.
+        """
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P1] t-mention — Описывает конвенцию\n"
+            "      role: developer   mode: solo\n"
+            "      context: не пиши `tags: #leftover` руками, это ломает разбор\n",
+        )
+        assert validate_leftover_registry(brain, path) == []
+
+    def test_missing_file_is_not_an_issue(self, tmp_path):
+        from brain_wiki.validators import validate_leftover_registry
+
+        assert validate_leftover_registry(tmp_path, tmp_path / "tasks" / "нет.md") == []

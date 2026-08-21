@@ -6,6 +6,7 @@ read-only: they report problems but never modify files.
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import shutil
 from pathlib import Path
@@ -376,6 +377,63 @@ def validate_queue_scope(brain: Path, path: Path) -> list[Issue]:
             f"{info.get('id', '?')}: клиентская задача в очереди разработки"
             f" (client: {client}) — перенеси в TASKS.md папки дела",
         ))
+    return issues
+
+
+def validate_leftover_registry(brain: Path, path: Path) -> list[Issue]:
+    """Шестое условие `doctrine/review-exit-criteria.md`: leftover несёт owner и due.
+
+    Запись без `role` и `due` — не leftover, а открытый тикет с чужим ярлыком:
+    её никто не обязан довести до конца и не с кем спросить, когда она
+    просрочена. Раньше это держалось вниманием ревьюера — на последнем ревью
+    внешний ревьюер сверял реестр разбором глазами. Признак ревьюера не
+    переживает смену ревьюера; признак здесь — машинный и переживает.
+
+    Признак — тег `#leftover` в поле `tags:`, найденный так же, как `client:`
+    в `validate_queue_scope`: через `brain_task_parser.parse_block`, который
+    отличает поле от прозы, упоминающей его имя (граница — `brain_core.grammar`).
+    Строка вида «эта задача — не leftover» в `context:` тегом не становится.
+
+    Просроченный `due` — отдельный факт от отсутствующего: доктрина требует
+    поднимать просроченный leftover в приоритете, а не продлевать его молча,
+    но не требует останавливать работу оператора над всей остальной очередью
+    из-за чужой просрочки. Поэтому отсутствие `role`/`due` — ERROR (запись
+    структурно не leftover), а просроченный `due` — WARN (запись leftover
+    валидна, но требует внимания). Смешивать их одной северностью значило бы
+    либо топить предупреждение в шуме ошибок, либо не ловить дефектную запись
+    вовсе.
+    """
+    if not path.exists():
+        return []
+    import brain_task_parser
+
+    rel = str(path.relative_to(brain))
+    issues: list[Issue] = []
+    for block in brain_task_parser.find_blocks(read_text(path)):
+        info = brain_task_parser.parse_block(block)
+        if not info:
+            continue
+        tags = info.get("tags", "").split()
+        if "#leftover" not in tags:
+            continue
+        tid = info.get("id", "?")
+        missing = [name for name in ("role", "due") if not info.get(name)]
+        if missing:
+            issues.append(Issue(
+                "ERROR", rel,
+                f"{tid}: leftover без {' и '.join(missing)} — запись без owner"
+                " и due не leftover, а открытый тикет",
+            ))
+            continue
+        due = info["due"]
+        if not validate_date(due):
+            issues.append(Issue("ERROR", rel, f"{tid}: due {due!r} — не дата ISO 8601"))
+        elif _dt.date.fromisoformat(due) < _dt.date.today():
+            issues.append(Issue(
+                "WARN", rel,
+                f"{tid}: leftover просрочен (due {due}) — поднять в приоритете,"
+                " а не продлевать due молча",
+            ))
     return issues
 
 
@@ -943,6 +1001,7 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     # было сделано и какой моделью. Переписывать его задним числом значило бы
     # подделать журнал.
     issues.extend(validate_queue_scope(brain, brain / "tasks" / "active.md"))
+    issues.extend(validate_leftover_registry(brain, brain / "tasks" / "active.md"))
     issues.extend(validate_routing(brain))
     issues.extend(validate_roles(brain))
     issues.extend(validate_escalation_matrix(brain))

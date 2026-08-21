@@ -31,7 +31,7 @@ def parse_block(block: str) -> dict[str, Any]:
 
     Returns keys: state, prio, id, title, role, mode, deps,
                   council, by, started, parent, client, project,
-                  acceptance, raw.
+                  acceptance, due, tags, raw.
 
     Returns empty dict if the block cannot be parsed.
     """
@@ -64,6 +64,8 @@ def parse_block(block: str) -> dict[str, Any]:
         "acceptance": "",
         "by": "",
         "started": "",
+        "due": "",
+        "tags": "",
         "raw": block,
     }
 
@@ -71,8 +73,11 @@ def parse_block(block: str) -> dict[str, Any]:
     # упомянутого в тексте задачи. Раньше здесь был `re.search` по всей строке
     # без привязки к началу, и проза молча подменяла значение — последнее
     # вхождение выигрывало, а поля стоят выше прозы.
-    single_token = ("role", "mode", "surface", "gate", "parent", "by", "started")
-    with_spaces = ("client", "project", "acceptance")
+    single_token = ("role", "mode", "surface", "gate", "parent", "by", "started", "due")
+    # tags может нести несколько токенов через пробел (`#leftover #other`),
+    # поэтому границу держит та же грамматика, что и у client/project —
+    # до следующего поля или конца строки, а не до первого пробела.
+    with_spaces = ("client", "project", "acceptance", "tags")
     for line in block.split("\n"):
         fields = grammar.parse_fields(line)
         for name in single_token:
