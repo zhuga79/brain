@@ -322,7 +322,7 @@ import importlib.machinery, importlib.util
 # PROJECT_ROOT раннер экспортирует явно (tests/run.sh), на него и опираемся.
 _project_root = Path(os.environ["PROJECT_ROOT"])
 sys.path.insert(0, str(_project_root / "tests/lib"))
-from wait_for_port import wait_for_port
+from wait_for_port import require_port
 
 src = _project_root / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
@@ -348,7 +348,7 @@ t.start()
 # ConnectionRefusedError на здоровом коммите (t-2026-08-17-ci-flakes-block-the-recheck).
 # Проверяемое свойство — что /events отдаёт event-stream, а не что сервер
 # поднимается за полсекунды.
-s = wait_for_port("127.0.0.1", port)
+s = require_port("127.0.0.1", port)
 
 # Use raw socket to talk HTTP/1.0 — avoids urllib's redirect/error handling on SSE
 s.sendall(b"GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")

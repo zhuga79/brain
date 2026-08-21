@@ -18,7 +18,7 @@ import importlib.machinery, importlib.util, os
 # PROJECT_ROOT, который явно экспортирует раннер (tests/run.sh).
 _project_root = Path(os.environ["PROJECT_ROOT"])
 sys.path.insert(0, str(_project_root / "tests/lib"))
-from wait_for_port import wait_for_port
+from wait_for_port import require_port
 src = _project_root / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
@@ -33,7 +33,7 @@ t = threading.Thread(target=mod.cmd_serve, args=(args,), daemon=True); t.start()
 # скорости раннера, тот же класс, что уже уронил CI на двух других кейсах
 # (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство —
 # доступность /api/audit, а не то, что сервер поднимается за 0.3с.
-wait_for_port("127.0.0.1", port).close()
+require_port("127.0.0.1", port).close()
 # Use no-proxy opener to avoid system HTTP_PROXY interfering with localhost
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def _get(url): return _opener.open(url, timeout=5)

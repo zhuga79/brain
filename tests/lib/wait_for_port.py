@@ -58,3 +58,20 @@ def wait_for_port(
         f"service did not start listening on {host}:{port} within {deadline_s}s"
         + (f" (last error: {last_error})" if last_error else "")
     )
+
+
+def require_port(host: str, port: int, **kwargs) -> socket.socket:
+    """То же ожидание, но с отказом в стиле смоук-кейса, а не трассировкой.
+
+    `wait_for_port` кидает AssertionError — это правильно для pytest, где
+    трассировка и есть отчёт. В bash-кейсе heredoc печатает её целиком, и
+    оператор читает четыре строки служебного кадра ради последней. Все
+    прочие проверки этих кейсов отказывают строкой `FAILED: ...` и кодом 1;
+    ожидание порта не должно быть исключением, иначе диагностика кейса
+    зависит от того, какая именно проверка в нём упала.
+    """
+    try:
+        return wait_for_port(host, port, **kwargs)
+    except AssertionError as exc:
+        print(f"FAILED: {exc}")
+        raise SystemExit(1) from None
