@@ -414,9 +414,24 @@ def validate_leftover_registry(brain: Path, path: Path) -> list[Issue]:
         if not info:
             continue
         tags = info.get("tags", "").split()
-        if "#leftover" not in tags:
+        # Опознаём тег по нормализованному виду, а не по точному написанию.
+        # Точное сравнение с «#leftover» молчало на `#Leftover` и на `leftover`
+        # без решётки: запись, заведомо задуманная как leftover, выпадала из
+        # проверки без следа — ровно то молчание, ради устранения которого
+        # проверка и заводится. Форма при этом остаётся канонической: не тот
+        # регистр или пропущенная решётка дают WARN, чтобы реестр не расползся
+        # в написании и тег оставался пригоден для поиска.
+        canonical = [t for t in tags if t == "#leftover"]
+        loose = [t for t in tags if t.strip("#,").lower() == "leftover" and t not in canonical]
+        if not canonical and not loose:
             continue
         tid = info.get("id", "?")
+        for token in loose:
+            issues.append(Issue(
+                "WARN", rel,
+                f"{tid}: тег {token!r} — неканоническая запись leftover,"
+                " канон «#leftover»",
+            ))
         missing = [name for name in ("role", "due") if not info.get(name)]
         if missing:
             issues.append(Issue(

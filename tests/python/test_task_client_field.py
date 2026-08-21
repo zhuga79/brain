@@ -356,3 +356,60 @@ class TestLeftoverRegistry:
         from brain_wiki.validators import validate_leftover_registry
 
         assert validate_leftover_registry(tmp_path, tmp_path / "tasks" / "нет.md") == []
+
+    def test_wrong_case_is_still_recognised_as_leftover(self, tmp_path):
+        """`#Leftover` — та же запись, а не чужой тег.
+
+        Найдено при приёмке. Точное сравнение с «#leftover» молчало здесь
+        полностью: запись без due проходила валидацию, хотя заведена она
+        именно как leftover. Молчание на записи, задуманной как leftover, —
+        ровно то, ради устранения чего проверка и заводится, поэтому
+        опознание идёт по нормализованному виду; неканоническое написание
+        при этом отмечается отдельным WARN.
+        """
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-case — Регистр\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #Leftover\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert [i.severity for i in issues] == ["WARN", "ERROR"]
+        assert "неканоническая" in issues[0].message
+        assert "без due" in issues[1].message
+
+    def test_missing_hash_is_still_recognised_as_leftover(self, tmp_path):
+        """`tags: leftover` без решётки — пропущенная решётка, не другой тег.
+
+        Найдено при приёмке вместе с регистром. Здесь запись валидна по
+        существу (role и due на месте), поэтому ERROR нет — остаётся WARN о
+        написании, чтобы реестр не расползался и тег оставался пригоден для
+        поиска.
+        """
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-nohash — Без решётки\n"
+            "      role: developer   mode: solo\n"
+            "      tags: leftover\n"
+            "      due: 2099-01-01\n",
+        )
+        issues = validate_leftover_registry(brain, path)
+        assert [i.severity for i in issues] == ["WARN"]
+        assert "канон «#leftover»" in issues[0].message
+
+    def test_an_unrelated_tag_stays_out_of_scope(self, tmp_path):
+        """Нормализация не должна затянуть чужие теги: проверка касается
+        только leftover, задача с другим тегом и без due её не интересует."""
+        from brain_wiki.validators import validate_leftover_registry
+
+        brain, path = self._brain(
+            tmp_path,
+            "- [ ] [P2] t-other — Чужой тег\n"
+            "      role: developer   mode: solo\n"
+            "      tags: #urgent #leftovers-are-fine\n",
+        )
+        assert validate_leftover_registry(brain, path) == []
