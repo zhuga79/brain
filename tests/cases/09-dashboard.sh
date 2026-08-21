@@ -320,7 +320,11 @@ import importlib.machinery, importlib.util
 # Скрипт выполняется как heredoc через "python3 -", поэтому __file__ == "<stdin>"
 # и Path(__file__).parent не значит "рядом с этим кейсом" — это cwd вызывающего.
 # PROJECT_ROOT раннер экспортирует явно (tests/run.sh), на него и опираемся.
-src = Path(os.environ["PROJECT_ROOT"]) / "runtime/bin/brain-dashboard"
+_project_root = Path(os.environ["PROJECT_ROOT"])
+sys.path.insert(0, str(_project_root / "tests/lib"))
+from wait_for_port import wait_for_port
+
+src = _project_root / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
 mod = importlib.util.module_from_spec(spec)
@@ -338,25 +342,13 @@ args = argparse.Namespace(brain=str(brain), port=port)
 t = threading.Thread(target=mod.cmd_serve, args=(args,), daemon=True)
 t.start()
 
-# Ждём готовности сокета опросом, а не фиксированной паузой. Прежний
-# time.sleep(0.5) — предположение о скорости раннера: на CI поток не успевал
-# забиндиться, и кейс падал с ConnectionRefusedError на здоровом коммите
-# (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство — что
-# /events отдаёт event-stream, а не что сервер поднимается за полсекунды.
-s = None
-deadline = time.time() + 15
-while time.time() < deadline:
-    candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    candidate.settimeout(8)
-    try:
-        candidate.connect(("127.0.0.1", port))
-    except (ConnectionRefusedError, socket.timeout, OSError):
-        candidate.close()
-        time.sleep(0.05)
-        continue
-    s = candidate
-    break
-assert s is not None, f"dashboard SSE server did not start listening on port {port} within 15s"
+# Ждём готовности сокета опросом, а не фиксированной паузой — см.
+# tests/lib/wait_for_port.py. Прежний time.sleep(0.5) — предположение о
+# скорости раннера: на CI поток не успевал забиндиться, и кейс падал с
+# ConnectionRefusedError на здоровом коммите (t-2026-08-17-ci-flakes-block-the-recheck).
+# Проверяемое свойство — что /events отдаёт event-stream, а не что сервер
+# поднимается за полсекунды.
+s = wait_for_port("127.0.0.1", port)
 
 # Use raw socket to talk HTTP/1.0 — avoids urllib's redirect/error handling on SSE
 s.sendall(b"GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")

@@ -16,7 +16,10 @@ from pathlib import Path
 import importlib.machinery, importlib.util, os
 # __file__ == "<stdin>" в heredoc-скрипте — не путь к кейсу. Берём
 # PROJECT_ROOT, который явно экспортирует раннер (tests/run.sh).
-src = Path(os.environ["PROJECT_ROOT"]) / "runtime/bin/brain-dashboard"
+_project_root = Path(os.environ["PROJECT_ROOT"])
+sys.path.insert(0, str(_project_root / "tests/lib"))
+from wait_for_port import wait_for_port
+src = _project_root / "runtime/bin/brain-dashboard"
 loader = importlib.machinery.SourceFileLoader("brain_dashboard", str(src))
 spec = importlib.util.spec_from_loader("brain_dashboard", loader)
 mod = importlib.util.module_from_spec(spec)
@@ -24,7 +27,13 @@ loader.exec_module(mod)
 brain = Path(os.environ.get("BRAIN_PATH", str(Path.home() / "brain")))
 sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
 args = argparse.Namespace(brain=str(brain), port=port)
-t = threading.Thread(target=mod.cmd_serve, args=(args,), daemon=True); t.start(); time.sleep(0.3)
+t = threading.Thread(target=mod.cmd_serve, args=(args,), daemon=True); t.start()
+# Ждём готовности сокета опросом, а не фиксированной паузой — см.
+# tests/lib/wait_for_port.py. Прежний time.sleep(0.3) — предположение о
+# скорости раннера, тот же класс, что уже уронил CI на двух других кейсах
+# (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство —
+# доступность /api/audit, а не то, что сервер поднимается за 0.3с.
+wait_for_port("127.0.0.1", port).close()
 # Use no-proxy opener to avoid system HTTP_PROXY interfering with localhost
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def _get(url): return _opener.open(url, timeout=5)
