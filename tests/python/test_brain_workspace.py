@@ -1012,3 +1012,501 @@ blocked:
 
     assert task is not None
     assert task.task_id == "local-001"
+
+
+# --- depends_on tests ---
+
+def test_parse_local_tasks_extracts_depends_on_forward_reference(tmp_path):
+    """depends_on can reference tasks defined later in the file."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Done after task-a.
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_local_tasks(tasks)
+    task_b = next(t for t in parsed if t.task_id == "task-b")
+    task_a = next(t for t in parsed if t.task_id == "task-a")
+
+    assert task_b.depends_on == ("task-a",)
+    assert task_a.depends_on == ()
+
+
+def test_parse_local_tasks_depends_on_missing_dependency_raises(tmp_path):
+    """Missing dependency (not in file) raises precise error at parse time."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-x]
+      acceptance: Depends on missing task-x.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "missing dependency" in str(exc).lower()
+        assert "task-x" in str(exc)
+    else:
+        raise AssertionError("parse should have failed for missing dependency")
+
+
+def test_parse_local_tasks_depends_on_malformed_list_raises(tmp_path):
+    """Malformed depends_on list (not bracketed) raises precise error."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: task-x, task-y
+      acceptance: Malformed list.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "malformed" in str(exc).lower() or "bracket" in str(exc).lower()
+    else:
+        raise AssertionError("parse should have failed for malformed depends_on")
+
+
+def test_parse_local_tasks_depends_on_duplicate_ids_raises(tmp_path):
+    """Duplicate dependency IDs raise precise error."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-x, task-x]
+      acceptance: Duplicate deps.
+- [ ] [P1] task-x - Dependency
+      role: developer
+      acceptance: Exists.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "duplicate" in str(exc).lower()
+        assert "task-x" in str(exc)
+    else:
+        raise AssertionError("parse should have failed for duplicate dependencies")
+
+
+def test_parse_local_tasks_depends_on_self_dependency_raises(tmp_path):
+    """Self-dependency raises precise error."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Self dependency.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "self" in str(exc).lower()
+        assert "task-a" in str(exc)
+    else:
+        raise AssertionError("parse should have failed for self-dependency")
+
+
+def test_parse_local_tasks_depends_on_cycle_raises(tmp_path):
+    """Cycle in dependencies raises precise error."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-b]
+      acceptance: Depends on b.
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on a.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "cycle" in str(exc).lower()
+    else:
+        raise AssertionError("parse should have failed for dependency cycle")
+
+
+def test_next_local_task_skips_open_task_with_unmet_dependency(tmp_path):
+    """next_local_task skips open tasks whose deps are not all done."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+""",
+        encoding="utf-8",
+    )
+
+    # task-b depends on task-a which is open, so task-b should be skipped
+    # task-a has no deps, should be returned
+    task = next_local_task(tasks, role="developer")
+    assert task is not None
+    assert task.task_id == "task-a"
+
+
+def test_next_local_task_returns_task_when_deps_are_done(tmp_path):
+    """next_local_task returns task when all dependencies are done."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+""",
+        encoding="utf-8",
+    )
+
+    # task-a is done, so task-b should be available
+    task = next_local_task(tasks, role="developer")
+    assert task is not None
+    assert task.task_id == "task-b"
+
+
+def test_next_local_task_dependency_order_in_file_irrelevant(tmp_path):
+    """Dependency order in file doesn't matter; topological availability does."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-c - Third task
+      role: developer
+      depends_on: [task-b]
+      acceptance: Depends on task-b.
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: Done.
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+""",
+        encoding="utf-8",
+    )
+
+    # task-a is done, task-b depends on task-a (done), task-c depends on task-b (open)
+    # Should return task-b first
+    task = next_local_task(tasks, role="developer")
+    assert task is not None
+    assert task.task_id == "task-b"
+
+
+def test_take_local_task_rejects_unmet_dependency_no_mutation(tmp_path):
+    """take_local_task rejects task with unmet deps before any mutation."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    try:
+        take_local_task(workspace, "task-b", "agent-a")
+    except ValueError as exc:
+        assert "dependenc" in str(exc).lower() or "unmet" in str(exc).lower()
+    else:
+        raise AssertionError("take should have failed for unmet dependency")
+
+    # Verify no mutation occurred
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [ ] [P1] task-b" in content
+    assert "started:" not in content
+    assert "by: agent-a" not in content
+    log_content = (workspace / "LOG.md").read_text(encoding="utf-8")
+    assert "took task-b" not in log_content
+
+
+def test_complete_local_task_rejects_unmet_dependency_no_mutation(tmp_path):
+    """complete_local_task rejects task with unmet deps before any mutation."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [~] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    try:
+        complete_local_task(workspace, "task-b", "agent-a", "openai-gpt-5.4", "done")
+    except ValueError as exc:
+        assert "dependenc" in str(exc).lower() or "unmet" in str(exc).lower()
+    else:
+        raise AssertionError("complete should have failed for unmet dependency")
+
+    # Verify no mutation occurred
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [~] [P1] task-b" in content
+    assert "model: openai-gpt-5.4" not in content
+    assert "completed:" not in content
+    log_content = (workspace / "LOG.md").read_text(encoding="utf-8")
+    assert "completed task-b" not in log_content
+
+
+def test_take_local_task_succeeds_when_deps_met(tmp_path):
+    """take_local_task succeeds when all dependencies are done."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T10:00:00Z
+      by: agent-x
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    task = take_local_task(workspace, "task-b", "agent-a")
+
+    assert task.task_id == "task-b"
+    assert task.state == "in-progress"
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [~] [P1] task-b" in content
+    assert "started:" in content
+    assert "by: agent-a" in content
+
+
+def test_complete_local_task_succeeds_when_deps_met(tmp_path):
+    """complete_local_task succeeds when all dependencies are done."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T10:00:00Z
+      by: agent-x
+
+- [~] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+      started: 2026-08-14T11:00:00Z
+      by: agent-a
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    task = complete_local_task(workspace, "task-b", "agent-a", "openai-gpt-5.4", "done")
+
+    assert task.state == "done"
+    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    assert "- [x] [P1] task-b" in content
+    assert "model: openai-gpt-5.4" in content
+    assert "completed:" in content
+
+
+def test_take_local_task_concurrent_with_dependency_completion(tmp_path):
+    """Concurrent take and dependency completion - serialization via lock."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    (workspace / "TASKS.md").write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+""",
+        encoding="utf-8",
+    )
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    import threading
+    import time
+
+    results = {"take_b": None, "complete_a": None}
+
+    def take_b():
+        try:
+            # Small delay to let complete_a potentially run first
+            time.sleep(0.01)
+            results["take_b"] = take_local_task(workspace, "task-b", "agent-b")
+        except Exception as exc:
+            results["take_b"] = exc
+
+    def complete_a():
+        # First take task-a, then complete it
+        take_local_task(workspace, "task-a", "agent-a")
+        time.sleep(0.01)
+        results["complete_a"] = complete_local_task(workspace, "task-a", "agent-a", "openai-gpt-5.4", "done")
+
+    t1 = threading.Thread(target=take_b)
+    t2 = threading.Thread(target=complete_a)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Either take_b failed (because a wasn't done yet) or succeeded (after a completed)
+    # Both are valid outcomes due to serialization
+    assert results["take_b"] is not None
+    assert results["complete_a"] is not None
+    # At the end, task-a should be done
+    tasks = parse_local_tasks(workspace / "TASKS.md")
+    task_a = next(t for t in tasks if t.task_id == "task-a")
+    assert task_a.state == "done"
+
+
+def test_recover_workspace_transaction_preserves_depends_on(tmp_path):
+    """Journal recovery preserves depends_on field."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tasks_path = workspace / "TASKS.md"
+    log_path = workspace / "LOG.md"
+    tasks_before = """# Local Tasks
+
+- [x] [P1] task-x - Dependency task
+      role: developer
+      acceptance: Done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T09:00:00Z
+      by: agent-y
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-x]
+      acceptance: Depends on x.
+"""
+    tasks_after = """# Local Tasks
+
+- [x] [P1] task-x - Dependency task
+      role: developer
+      acceptance: Done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T09:00:00Z
+      by: agent-y
+
+- [~] [P1] task-a - First task
+      role: developer
+      depends_on: [task-x]
+      acceptance: Depends on x.
+      started: 2026-08-14T10:00:00Z
+      by: agent-a
+"""
+    log_before = "# Local Log\n"
+    log_after = """# Local Log
+
+## 2026-08-14T10:00:00Z | agent-a | took task-a
+
+- Moved task-a to in-progress.
+"""
+    tasks_path.write_text(tasks_after, encoding="utf-8")
+    log_path.write_text(log_before, encoding="utf-8")
+
+    import brain_workspace as _W
+    _W._write_workspace_journal(
+        workspace,
+        operation="take",
+        task_id="task-a",
+        tasks_before=tasks_before,
+        log_before=log_before,
+        tasks_after=tasks_after,
+        log_after=log_after,
+    )
+
+    _W._recover_workspace_transaction(workspace)
+
+    assert tasks_path.read_text(encoding="utf-8") == tasks_after
+    assert log_path.read_text(encoding="utf-8") == log_after
+    assert not (workspace / ".workspace-queue-journal.json").exists()
+
+    # Verify depends_on is preserved in parsed task
+    recovered = parse_local_tasks(tasks_path)
+    task_a = next(t for t in recovered if t.task_id == "task-a")
+    assert task_a.depends_on == ("task-x",)
