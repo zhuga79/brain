@@ -156,7 +156,10 @@ def _field_value(line: str, name: str) -> str:
 
 
 def _parse_depends_on(value: str) -> tuple[str, ...]:
-    """Parse depends_on field value like '[task-a, task-b]' into a tuple of IDs."""
+    """Parse depends_on field value like '[task-a, task-b]' into a tuple of IDs.
+
+    Rejects empty components: [,], [dep,], [,dep], [dep,,other].
+    """
     value = value.strip()
     if not (value.startswith("[") and value.endswith("]")):
         raise ValueError(f"Malformed depends_on list (expected bracketed list): {value}")
@@ -164,10 +167,12 @@ def _parse_depends_on(value: str) -> tuple[str, ...]:
     if not inner:
         return ()
     # Split by comma, strip whitespace
-    deps = [dep.strip() for dep in inner.split(",")]
-    # Filter empty strings (handles trailing commas)
-    deps = [dep for dep in deps if dep]
-    return tuple(deps)
+    raw_deps = [dep.strip() for dep in inner.split(",")]
+    # Reject empty components (fail-closed)
+    for dep in raw_deps:
+        if not dep:
+            raise ValueError(f"Malformed depends_on list (empty component): {value}")
+    return tuple(raw_deps)
 
 
 def _validate_depends_on(task_id: str, depends_on: tuple[str, ...], all_task_ids: set[str]) -> None:
@@ -224,33 +229,49 @@ def _detect_cycles(tasks: list[LocalTask]) -> None:
 def parse_local_tasks_from_text(text: str) -> list[LocalTask]:
     tasks: list[LocalTask] = []
     current: dict[str, str] | None = None
+    current_depends_on_seen = False
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         match = TASK_RE.match(line)
         if match:
             if current is not None:
                 tasks.append(LocalTask(**current))
+            task_id = match.group("task_id")
             current = {
                 "state": _state_from_mark(match.group("mark")),
                 "priority": match.group("priority"),
-                "task_id": match.group("task_id"),
+                "task_id": task_id,
                 "title": match.group("title").strip(),
                 "role": "",
                 "acceptance": "",
                 "depends_on": (),
             }
+            current_depends_on_seen = False
             continue
         if current is None:
             continue
         stripped = line.strip()
-        if stripped.startswith("role:"):
-            current["role"] = _field_value(stripped, "role")
-        elif stripped.startswith("acceptance:"):
-            current["acceptance"] = _field_value(stripped, "acceptance")
-        elif stripped.startswith("depends_on:"):
-            current["depends_on"] = _parse_depends_on(_field_value(stripped, "depends_on"))
+        # Use shared grammar to parse all fields on the line
+        fields = grammar.parse_fields(stripped)
+        for name, value in fields.items():
+            if name == "role":
+                current["role"] = value
+            elif name == "acceptance":
+                current["acceptance"] = value
+            elif name == "depends_on":
+                if current_depends_on_seen:
+                    raise ValueError(f"Task {current['task_id']} has duplicate depends_on field")
+                current_depends_on_seen = True
+                current["depends_on"] = _parse_depends_on(value)
     if current is not None:
         tasks.append(LocalTask(**current))
+
+    # Reject duplicate task IDs deterministically before any graph/selection/mutation
+    seen_ids: dict[str, int] = {}
+    for i, task in enumerate(tasks):
+        if task.task_id in seen_ids:
+            raise ValueError(f"Duplicate task ID: {task.task_id} (first at line ~{seen_ids[task.task_id]}, second at line ~{i})")
+        seen_ids[task.task_id] = i
 
     # Validate all depends_on after parsing all tasks (for forward references)
     all_task_ids = {task.task_id for task in tasks}
