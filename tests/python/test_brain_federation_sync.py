@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -85,7 +86,8 @@ def test_cmd_sync_not_repo(mock_is_git):
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
 @patch("brain_federation.sync.git_push")
-def test_cmd_sync_success(mock_push, mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_success(mock_log, mock_push, mock_pull, mock_is_git):
     mock_is_git.return_value = True
     
     mock_pull_res = MagicMock()
@@ -98,10 +100,12 @@ def test_cmd_sync_success(mock_push, mock_pull, mock_is_git):
     
     args = DummyArgs(repo=".", json=True)
     assert cmd_sync(args) == 0
+    mock_log.assert_called_once()
 
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
-def test_cmd_sync_pull_fail(mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_pull_fail(mock_log, mock_pull, mock_is_git):
     mock_is_git.return_value = True
     
     mock_pull_res = MagicMock()
@@ -111,21 +115,61 @@ def test_cmd_sync_pull_fail(mock_pull, mock_is_git):
     
     args = DummyArgs(repo=".", json=True)
     assert cmd_sync(args) == 1
+    assert mock_log.call_args[0][2] == "pull-failed"
+
 
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
 @patch("brain_federation.sync.git_push")
-def test_cmd_sync_push_fail(mock_push, mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_push_fail(mock_log, mock_push, mock_pull, mock_is_git):
     mock_is_git.return_value = True
-    
+
     mock_pull_res = MagicMock()
     mock_pull_res.returncode = 0
     mock_pull.return_value = mock_pull_res
-    
+
     mock_push_res = MagicMock()
     mock_push_res.returncode = 1
     mock_push_res.stderr = "Rejected"
     mock_push.return_value = mock_push_res
-    
+
     args = DummyArgs(repo=".", json=True)
     assert cmd_sync(args) == 1
+    assert mock_log.call_args[0][2] == "push-failed"
+
+
+def test_cmd_sync_logs_node_audit_row(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "carol@example.org"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Carol"], check=True)
+
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        mock_pull.return_value = MagicMock(returncode=0)
+        mock_push.return_value = MagicMock(returncode=0)
+        assert cmd_sync(args) == 0
+
+    log = tmp_path / "wiki" / "log.md"
+    assert log.exists()
+    content = log.read_text()
+    assert "federation-sync |" in content
+    assert "node=carol@example.org" in content
+    assert "status=ok" in content
+
+
+def test_cmd_sync_logs_node_audit_row_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID", "sync-env-node")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "carol@example.org"], check=True)
+
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        mock_pull.return_value = MagicMock(returncode=0)
+        mock_push.return_value = MagicMock(returncode=0)
+        assert cmd_sync(args) == 0
+
+    log = tmp_path / "wiki" / "log.md"
+    assert "node=sync-env-node" in log.read_text()

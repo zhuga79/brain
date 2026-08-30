@@ -23,6 +23,7 @@ from .core import (
     emit,
     exit_code,
     has_block,
+    node_id,
     result,
 )
 from .checks import (
@@ -469,13 +470,14 @@ def log_imports(
     log_path = brain / "wiki" / "log.md"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     plan_ref = plan.get("plan_id", str(plan_path))
+    node = node_id(brain)
     with log_path.open("a", encoding="utf-8") as handle:
         for task in imports:
             handle.write(
-                f"## [{utc_now()}] federation-import-task | {task['id']} | {agent} | plan={plan_ref}\n"
+                f"## [{utc_now()}] federation-import-task | {task['id']} | {agent} | node={node} | plan={plan_ref}\n"
             )
         handle.write(
-            f"## [{utc_now()}] federation-import-summary | import-tasks | {agent} | count={len(imports)} plan={plan_ref}\n"
+            f"## [{utc_now()}] federation-import-summary | import-tasks | {agent} | node={node} | count={len(imports)} plan={plan_ref}\n"
         )
 
 

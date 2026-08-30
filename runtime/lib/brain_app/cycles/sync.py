@@ -72,6 +72,17 @@ def autocommit_journal(repo: Path) -> bool:
     return commit.returncode == 0
 
 
+def commit_journal_after_sync(repo: Path, already_committed: bool) -> bool:
+    """Коммитим node-атрибутированные audit-строки, добавленные
+    `brain-federation sync` в wiki/log.md после pull/push.
+
+    Без этого следующий же прогон цикла блокировался dirty-worktree: журнал
+    остаётся единственной незакоммиченной durable-правкой, и её нужно забрать
+    в коммит так же, как до-синковые автозаписи проб и циклов.
+    """
+    return autocommit_journal(repo) or already_committed
+
+
 def collect_findings(repo: Path) -> list[Finding]:
     if not repo.exists() or not repo.is_dir():
         return [Finding(
@@ -167,6 +178,7 @@ def apply_sync(args: argparse.Namespace) -> int:
             ["brain-federation", "sync", "--repo", str(repo), "--json"], cwd=repo, timeout=args.timeout
         )
     except subprocess.TimeoutExpired:
+        journal_committed = commit_journal_after_sync(repo, journal_committed)
         findings.append(Finding(
             "sync-timeout", "block", str(repo),
             f"brain-federation sync exceeded {args.timeout}s",
@@ -177,6 +189,7 @@ def apply_sync(args: argparse.Namespace) -> int:
         return 1
 
     if sync_proc.returncode != 0:
+        journal_committed = commit_journal_after_sync(repo, journal_committed)
         findings.append(Finding(
             "sync-failed", "block", str(repo), "brain-federation sync failed",
             (sync_proc.stderr or sync_proc.stdout).strip(),
@@ -186,6 +199,8 @@ def apply_sync(args: argparse.Namespace) -> int:
                     sync_stdout=sync_proc.stdout.strip(),
                     sync_stderr=sync_proc.stderr.strip()), args.json)
         return 1
+
+    journal_committed = commit_journal_after_sync(repo, journal_committed)
 
     rebuild_data: dict[str, Any] = {}
     if args.rebuild_index:

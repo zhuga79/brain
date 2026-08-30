@@ -430,6 +430,69 @@ def test_sync_without_args_prints_help_and_does_not_start_dry_run(capsys, monkey
     assert "--dry-run" in text
 
 
+def test_commit_journal_after_sync_commits_sync_audit_row(tmp_path):
+    """t-2026-08-16-multi-user-federation-readines-s1: brain-federation sync
+    appends node-attributed audit rows to wiki/log.md; the sync cycle must
+    commit that journal dirt so the next apply is not blocked by
+    dirty-worktree."""
+    repo = tmp_path / "repo"
+    (repo / "wiki").mkdir(parents=True)
+    (repo / "tasks").mkdir(parents=True)
+    (repo / "MEMORY.md").write_text("# Test Brain\n")
+    (repo / "tasks" / "active.md").write_text("# Active\n")
+    (repo / "wiki" / "log.md").write_text("# Log\n")
+    (repo / ".gitignore").write_text(
+        ".locks/\n.brain/\n.provider-health.json\nhandoff/ORCHESTRATOR_HANDOFF.md\nwiki/_views/\n"
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "cycle@example.org"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Cycle"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+    with (repo / "wiki" / "log.md").open("a", encoding="utf-8") as handle:
+        handle.write("## [2026-08-30T00:00:00Z] federation-sync | /repo | node=n1 | status=ok\n")
+
+    assert sync.commit_journal_after_sync(repo, already_committed=False) is True
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", "wiki/log.md"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert status == ""
+    last = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%s"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert last == "chore: автозаписи журнала (brain-sync)"
+
+
+def test_commit_journal_after_sync_leaves_unrelated_dirt(tmp_path):
+    """If durable dirt beyond the journal exists, the audit row stays for a
+    manual commit — nothing is force-committed."""
+    repo = tmp_path / "repo"
+    (repo / "wiki").mkdir(parents=True)
+    (repo / "tasks").mkdir(parents=True)
+    (repo / "wiki" / "log.md").write_text("# Log\n")
+    (repo / "tasks" / "active.md").write_text("# Active\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "cycle@example.org"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Cycle"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+    (repo / "tasks" / "active.md").write_text("# Active\n- [ ] [P1] t-x — New task\n")
+    (repo / "wiki" / "log.md").write_text(
+        "# Log\n## [2026-08-30T00:00:00Z] federation-sync | /repo | node=n1 | status=ok\n"
+    )
+
+    assert sync.commit_journal_after_sync(repo, already_committed=False) is False
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert "wiki/log.md" in status
+
+
 @pytest.mark.parametrize(
     "module, required",
     [

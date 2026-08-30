@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ SCHEMA_VERSION = 1
 SEVERITIES = ("block", "review", "warn", "info")
 TASK_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]+$")
 AGENT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]+$")
+
+NODE_ID_ENV = "BRAIN_NODE_ID"
+FEDERATION_CONFIG_FILE = "config/federation.json"
+NODE_ID_DEFAULT = "anonymous"
 
 RUNTIME_PATHS = (
     ".locks/",
@@ -49,6 +54,65 @@ class Finding:
 
 def brain_path(value: str | None) -> Path:
     return Path(value or os.environ.get("BRAIN_PATH", str(Path.home() / "brain"))).expanduser()
+
+
+def _config_node_id(brain: Path) -> str:
+    """Read node identity from <brain>/config/federation.json, if present."""
+    cfg = brain / FEDERATION_CONFIG_FILE
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    value = data.get("node_id")
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _git_email(brain: Path) -> str:
+    """Read `git config --get user.email` inside the vault (repo root == vault)."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(brain), "config", "--get", "user.email"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return ""
+    if res.returncode != 0:
+        return ""
+    return res.stdout.strip()
+
+
+def node_id(brain: Path | None = None) -> str:
+    """Resolve the stable federation node identity for this vault.
+
+    Precedence:
+      1. ``$BRAIN_NODE_ID`` env var — explicit operator override;
+      2. ``<brain>/config/federation.json`` → ``node_id`` field;
+      3. ``git config --get user.email`` in the vault (git repo root);
+      4. ``"anonymous"`` — deterministic fallback so a single-user vault with
+         no federation config always keeps working and never raises.
+
+    The value feeds ``node=...`` audit rows in ``wiki/log.md`` written by
+    import-tasks and sync, so every operation is attributable to the node
+    that produced it (t-2026-08-16-multi-user-federation-readines-s1).
+    """
+    env = os.environ.get(NODE_ID_ENV, "").strip()
+    if env:
+        return env
+    vault = brain_path(brain)
+    configured = _config_node_id(vault)
+    if configured:
+        return configured
+    email = _git_email(vault)
+    if email:
+        return email
+    return NODE_ID_DEFAULT
 
 
 def result(mode: str, repo: Path | None, brain: Path | None, findings: list[Finding]) -> dict[str, Any]:

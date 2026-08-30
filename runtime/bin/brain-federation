@@ -38,7 +38,7 @@ def cmd_support(args: argparse.Namespace) -> int:
         "brain-federation plan --repo <path> [--brain <path>] [--json] [--out <plan.json>]",
         "brain-federation import-tasks --plan <plan.json> --as <agent-id> [--yes] [--json]",
         "brain-federation write-wiki-proposals --plan <plan.json> --as <agent-id> [--yes] [--json]",
-        "brain-federation sync [--repo <path>] [--json]",
+        "brain-federation sync [--repo <path>] [--brain <path>] [--json]",
         "brain-federation merge-tasks --base <path> --local <path> --remote <path> [--out <path>]",
     ]
     data["read_only"] = True
@@ -132,6 +132,7 @@ def main() -> int:
 
     sync = sub.add_parser("sync", help="Pull (rebase) and push the federation repository")
     sync.add_argument("--repo", default=None, help="Repository path (default: current directory)")
+    sync.add_argument("--brain", default=None, help="Brain path (default: repo path — vault root)")
     sync.add_argument("--json", action="store_true")
     sync.set_defaults(func=cmd_sync)
 
