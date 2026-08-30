@@ -1600,6 +1600,74 @@ def test_parse_local_tasks_rejects_duplicate_depends_on_fields(tmp_path):
         raise AssertionError("parse should have failed for duplicate depends_on fields")
 
 
+@pytest.mark.parametrize("fields_line", [
+    # Same continuation line, depends_on repeated at various positions
+    "      depends_on: [task-x]   depends_on: [task-y]   role: developer",
+    "      role: developer   depends_on: [task-x]   depends_on: [task-y]",
+    "      role: developer   depends_on: [task-x]   acceptance: Done.   depends_on: [task-y]",
+    "      depends_on: [task-x]   role: developer   depends_on: [task-y]   acceptance: Done.",
+])
+def test_parse_local_tasks_rejects_duplicate_depends_on_on_same_line(tmp_path, fields_line):
+    """Duplicate depends_on on the same continuation line must be rejected.
+
+    grammar.parse_fields returns a dict and silently drops repeated fields, so
+    this must be detected before the dict collapses them. Rejection must hold
+    for arbitrary field order on the line.
+    """
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        f"""# Local Tasks
+
+- [ ] [P1] task-a - First task
+{fields_line}
+      acceptance: Duplicate depends_on on one line.
+- [ ] [P1] task-x - Dep X
+      role: developer
+      acceptance: Exists.
+- [ ] [P1] task-y - Dep Y
+      role: developer
+      acceptance: Exists.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "duplicate depends_on" in str(exc).lower()
+    else:
+        raise AssertionError(f"parse should have failed for duplicate depends_on on same line: {fields_line}")
+
+
+def test_parse_local_tasks_rejects_duplicate_depends_on_across_lines(tmp_path):
+    """Duplicate depends_on spread across separate continuation lines rejected."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: [task-x]
+      acceptance: First.
+      depends_on: [task-y]
+- [ ] [P1] task-x - Dep X
+      role: developer
+      acceptance: Exists.
+- [ ] [P1] task-y - Dep Y
+      role: developer
+      acceptance: Exists.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "duplicate depends_on" in str(exc).lower()
+    else:
+        raise AssertionError("parse should have failed for duplicate depends_on across lines")
+
+
 # --- Issue 1c: Reject empty comma components in depends_on ---
 
 @pytest.mark.parametrize("bad_list", [
@@ -1687,18 +1755,15 @@ def test_parse_local_tasks_duplicate_ids_rejected_before_depends_on_validation(t
         raise AssertionError("parse should have failed for duplicate task IDs first")
 
 
-# --- Issue 3: Replace weak concurrency test with deterministic barrier test ---
+# --- Issue 3: Replace fake concurrency tests with deterministic lock-contending tests ---
+#
+# Both tests use a threading.Barrier so all contenders attempt take_local_task
+# simultaneously. They contend at the *real* workspace queue lock (_queue_lock):
+# if that lock were replaced with a nullcontext, the contenders would not
+# serialize and the "exactly one success" invariant would break, failing the
+# test. No sleeps are used.
 
-def test_take_local_task_concurrent_deterministic_ordering_completion_first(tmp_path):
-    """When dependency completes first, exactly one waiting take succeeds.
-
-    Uses a two-phase gate to enforce serialization order:
-    1. complete_a acquires workspace lock, completes task-a, releases lock
-    2. take_b then acquires workspace lock and succeeds
-    """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
+def _workspace_fixture(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
@@ -1717,157 +1782,151 @@ def test_take_local_task_concurrent_deterministic_ordering_completion_first(tmp_
         encoding="utf-8",
     )
     (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+    return workspace
 
-    # Phase gate: complete_a runs phase 1, then take_b runs phase 2
-    phase = {"current": 0}
-    phase_lock = threading.Lock()
-    phase_cv = threading.Condition(phase_lock)
-    results = {}
 
-    def complete_a():
-        with phase_cv:
-            # Phase 1: complete task-a
-            take_local_task(workspace, "task-a", "agent-a")
-            complete_local_task(workspace, "task-a", "agent-a", "openai-gpt-5.4", "done a")
-            results["complete_a"] = "ok"
-            phase["current"] = 2
-            phase_cv.notify_all()
+def test_take_local_task_lock_contention_completion_first_exactly_one_success(tmp_path):
+    """Completion-first: task-a done first, then contending child takers at the
+    real queue lock serialize so exactly one take succeeds; task/log state exact.
 
-    def take_b():
-        with phase_cv:
-            # Wait for phase 2 (after task-a is done)
-            while phase["current"] < 2:
-                phase_cv.wait()
-            # Phase 2: take task-b (should succeed now)
-            try:
-                take_local_task(workspace, "task-b", "agent-b")
-                results["take_b"] = "success"
-            except ValueError as exc:
-                results["take_b"] = f"failed: {exc}"
+    Fails if _queue_lock is swapped for a nullcontext: contenders then race and
+    more than one (or none deterministically) can succeed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f1 = executor.submit(complete_a)
-        f2 = executor.submit(take_b)
-        for f in as_completed([f1, f2]):
-            f.result()
+    workspace = _workspace_fixture(tmp_path)
 
-    # take_b should succeed because task-a was completed first
-    assert results["take_b"] == "success", f"take_b failed: {results['take_b']}"
-    assert results["complete_a"] == "ok"
+    # Complete the dependency first -> forces completion-first ordering.
+    take_local_task(workspace, "task-a", "agent-a")
+    complete_local_task(workspace, "task-a", "agent-a", "openai-gpt-5.4", "done a")
 
-    # Verify final state: task-a done, task-b in-progress
+    agents = [f"agent-b{i}" for i in range(1, 9)]
+    n = len(agents)
+    start = threading.Barrier(n)
+
+    def contender(agent):
+        start.wait()  # all child takers attempt simultaneously
+        try:
+            take_local_task(workspace, "task-b", agent)
+            return "success"
+        except ValueError as exc:
+            return f"failed: {exc}"
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        results = [f.result() for f in [ex.submit(contender, ag) for ag in agents]]
+
+    successes = [r for r in results if r == "success"]
+    assert len(successes) == 1, f"expected exactly one success, got {successes}"
+
+    tasks = parse_local_tasks(workspace / "TASKS.md")
+    task_a = next(t for t in tasks if t.task_id == "task-a")
+    task_b = next(t for t in tasks if t.task_id == "task-b")
+    assert task_a.state == "done"
+    assert task_b.state == "in-progress"
+    assert task_b.role == "developer"
+    assert task_b.depends_on == ("task-a",)
+
+    # Exact task/log state: the winning take wrote started/by; only one took.
+    lines = (workspace / "TASKS.md").read_text(encoding="utf-8").splitlines()
+    header_i = next(i for i, ln in enumerate(lines) if "] task-b " in ln)
+    body = lines[header_i + 1:]
+    body = body[: next((i for i, ln in enumerate(body) if ln.startswith("- [")), len(body))]
+    block = "\n".join(body)
+    assert "started:" in block
+    assert "by:" in block
+    log = (workspace / "LOG.md").read_text(encoding="utf-8")
+    assert log.count("took task-b") == 1, f"expected exactly one 'took task-b' log entry, got:\n{log}"
+
+
+def test_take_local_task_lock_contention_take_first_rejected_then_permitted(tmp_path):
+    """Take-first: contending child takers while the dep is open all reject with
+    no mutation; after the dep completes the take is permitted. Final state exact.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    workspace = _workspace_fixture(tmp_path)
+
+    initial_tasks = (workspace / "TASKS.md").read_text(encoding="utf-8")
+    initial_log = (workspace / "LOG.md").read_text(encoding="utf-8")
+
+    # Contending takers on task-b while task-a is still open.
+    agents = [f"agent-b{i}" for i in range(1, 5)]
+    n = len(agents)
+    start = threading.Barrier(n)
+
+    def contender(agent):
+        start.wait()
+        try:
+            take_local_task(workspace, "task-b", agent)
+            return "success"
+        except ValueError as exc:
+            return f"failed: {exc}"
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        results = [f.result() for f in [ex.submit(contender, ag) for ag in agents]]
+
+    # All must reject with an unmet-dependency error.
+    assert results and all(r == "failed" or "failed" in r for r in results), results
+    for r in results:
+        assert "dependenc" in r.lower() or "unmet" in r.lower(), r
+
+    # No mutation from the failed takes: TASKS.md and LOG.md are byte-identical.
+    assert (workspace / "TASKS.md").read_text(encoding="utf-8") == initial_tasks
+    assert (workspace / "LOG.md").read_text(encoding="utf-8") == initial_log
+
+    # Prove the permitted outcome after the dependency completes.
+    take_local_task(workspace, "task-a", "agent-a")
+    complete_local_task(workspace, "task-a", "agent-a", "openai-gpt-5.4", "done a")
+    take_local_task(workspace, "task-b", "agent-b")
+
     tasks = parse_local_tasks(workspace / "TASKS.md")
     task_a = next(t for t in tasks if t.task_id == "task-a")
     task_b = next(t for t in tasks if t.task_id == "task-b")
     assert task_a.state == "done"
     assert task_b.state == "in-progress"
 
-
-def test_take_local_task_concurrent_deterministic_ordering_take_first_rejected(tmp_path):
-    """When take_b runs first (before dep complete), it rejects cleanly with no mutation.
-
-    Uses a two-phase gate to enforce serialization order:
-    1. take_b acquires workspace lock, fails (unmet dep), releases lock
-    2. complete_a then acquires workspace lock and completes task-a
-    3. Final state: task-a done, task-b still open (no mutation from failed take)
-    """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
-    (workspace / "TASKS.md").write_text(
-        """# Local Tasks
-
-- [ ] [P1] task-a - First task
-      role: developer
-      acceptance: First task done.
-
-- [ ] [P1] task-b - Second task
-      role: developer
-      depends_on: [task-a]
-      acceptance: Depends on task-a.
-""",
-        encoding="utf-8",
-    )
-    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
-
-    # Phase gate: take_b runs phase 1, then complete_a runs phase 2
-    phase = {"current": 0}
-    phase_lock = threading.Lock()
-    phase_cv = threading.Condition(phase_lock)
-    results = {}
-
-    def take_b():
-        with phase_cv:
-            # Phase 1: attempt take_b while task-a is still open
-            try:
-                take_local_task(workspace, "task-b", "agent-b")
-                results["take_b"] = "success"
-            except ValueError as exc:
-                results["take_b"] = f"failed: {exc}"
-            phase["current"] = 2
-            phase_cv.notify_all()
-
-    def complete_a():
-        with phase_cv:
-            # Wait for phase 2 (after take_b has attempted and failed)
-            while phase["current"] < 2:
-                phase_cv.wait()
-            # Phase 2: complete task-a
-            take_local_task(workspace, "task-a", "agent-a")
-            complete_local_task(workspace, "task-a", "agent-a", "openai-gpt-5.4", "done a")
-            results["complete_a"] = "ok"
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f1 = executor.submit(take_b)
-        f2 = executor.submit(complete_a)
-        for f in as_completed([f1, f2]):
-            f.result()
-
-    # take_b should have FAILED because it ran while task-a was still open
-    assert "failed" in results["take_b"], f"take_b unexpectedly succeeded: {results['take_b']}"
-    assert "dependenc" in results["take_b"].lower() or "unmet" in results["take_b"].lower()
-
-    # Verify NO mutation occurred for task-b
-    content = (workspace / "TASKS.md").read_text(encoding="utf-8")
-    assert "- [ ] [P1] task-b" in content, "task-b was mutated despite failed take"
-    # Check that task-b specifically has no started/by fields (task-a will have them)
-    task_b_section = content.split("- [ ] [P1] task-b")[1].split("- [")[0] if "- [ ] [P1] task-b" in content else ""
-    assert "started:" not in task_b_section, f"task-b has started field: {task_b_section}"
-    assert "by: agent-b" not in task_b_section, f"task-b has by field: {task_b_section}"
-    log_content = (workspace / "LOG.md").read_text(encoding="utf-8")
-    assert "took task-b" not in log_content, "log was mutated despite failed take"
-
-    # task-a should be done
-    tasks = parse_local_tasks(workspace / "TASKS.md")
-    task_a = next(t for t in tasks if t.task_id == "task-a")
-    assert task_a.state == "done"
-
-    # task-b should still be open
-    task_b = next(t for t in tasks if t.task_id == "task-b")
-    assert task_b.state == "open"
+    log = (workspace / "LOG.md").read_text(encoding="utf-8")
+    assert "took task-b" in log
+    assert "took task-b" not in initial_log
 
 
-# --- Issue 4: Documentation acceptance tests ---
+# --- Issue 4/5: Documentation, template parity and installer packaging ---
 
-def test_docs_state_depends_on_syntax(tmp_path):
-    """Verify documentation states exact depends_on syntax."""
-    # This test will pass once docs are updated; for now it documents the requirement.
-    # The depends_on syntax must be:
-    #   depends_on: [task-id-1, task-id-2, ...]
-    # - bracketed list
-    # - comma-separated
-    # - no empty components
-    # - no duplicate IDs within the list
-    pass
+def test_tasks_schema_documents_depends_on_syntax_and_fail_closed():
+    """tasks/SCHEMA.md documents exact depends_on syntax and fail-closed
+    next/take/complete semantics."""
+    schema = (REPO / "tasks" / "SCHEMA.md").read_text(encoding="utf-8")
+    assert "depends_on: [task-id-1, task-id-2" in schema
+    assert "Пустые компоненты запрещены" in schema
+    assert "только один раз" in schema
+    assert "**строго отклоняет**" in schema
+    assert "next_local_task" in schema
+    assert "take_local_task" in schema
+    assert "complete_local_task" in schema
+    assert "не мутирует файлы" in schema.lower()
 
 
-def test_docs_state_fail_closed_behavior(tmp_path):
-    """Verify documentation states fail-closed behavior for next/take/complete."""
-    # This test will pass once docs are updated; for now it documents the requirement.
-    # - next_local_task: skips tasks with unmet deps (returns None if none available)
-    # - take_local_task: rejects with ValueError if unmet deps, no mutation
-    # - complete_local_task: rejects with ValueError if unmet deps, no mutation
-    pass
+def test_v2_tasks_schema_parity_with_tasks_schema():
+    """runtime/templates/v2/tasks/SCHEMA.md must match tasks/SCHEMA.md so setup
+    does not overwrite the new contract on the next run (setup-brain-v2.sh copies
+    the v2 template over tasks/SCHEMA.md when they differ)."""
+    v2 = (REPO / "runtime" / "templates" / "v2" / "tasks" / "SCHEMA.md").read_text(encoding="utf-8")
+    live = (REPO / "tasks" / "SCHEMA.md").read_text(encoding="utf-8")
+    assert v2 == live
+
+
+def test_workspace_template_tasks_documents_depends_on_syntax():
+    """The folder-native workspace TASKS.md template carries the exact
+    depends_on syntax that init-template ships into new workspaces."""
+    template = (REPO / "runtime" / "templates" / "workspace" / "TASKS.md").read_text(encoding="utf-8")
+    assert "depends_on: [local-001]" in template
+
+
+def test_guide_documents_fail_closed_dependency_semantics():
+    """spec/guide.md documents exact depends_on syntax and fail-closed
+    next/take/complete behavior for folder-native workspaces."""
+    guide = (REPO / "spec" / "guide.md").read_text(encoding="utf-8")
+    assert "depends_on: [task-id-1, task-id-2" in guide
+    assert "next_local_task" in guide
+    assert "take_local_task" in guide
+    assert "complete_local_task" in guide

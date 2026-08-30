@@ -251,6 +251,11 @@ def parse_local_tasks_from_text(text: str) -> list[LocalTask]:
         if current is None:
             continue
         stripped = line.strip()
+        # Duplicate depends_on within the same continuation line: the shared
+        # grammar collapses repeated fields into a dict, so detect them here
+        # before the dict loses entries. Works regardless of field order.
+        if len(grammar.field_re("depends_on").findall(stripped)) > 1:
+            raise ValueError(f"Task {current['task_id']} has duplicate depends_on field")
         # Use shared grammar to parse all fields on the line
         fields = grammar.parse_fields(stripped)
         for name, value in fields.items():

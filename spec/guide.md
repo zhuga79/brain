@@ -636,6 +636,50 @@ Action gates are stricter than role access. If an action appears under
 `requires_user_approval`, an agent must stop and get explicit user approval
 even if its role is otherwise allowed.
 
+#### Folder-local `TASKS.md`: format and fail-closed dependencies
+
+A workspace's `TASKS.md` is a folder-local queue parsed by `brain_workspace.py`.
+Task blocks use the same continuation-line format as the root queue:
+
+```
+- [ ] [P1] local-001 - First task
+      role: developer
+      acceptance: State the concrete completion check.
+
+- [ ] [P2] local-002 - Second task depending on the first
+      role: developer
+      depends_on: [local-001]
+      acceptance: Runs after local-001 is done.
+```
+
+`depends_on` syntax is exact:
+
+- `depends_on: [task-id-1, task-id-2, ...]` — a bracketed, comma-separated list
+  of task ids that must be done before this task becomes available.
+- Empty components are rejected: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`.
+- Duplicate ids inside the list are rejected (`[task-x, task-x]`).
+- The `depends_on` field may appear at most once per task — a repeated field on
+  the same continuation line or across lines is rejected. Field order on the
+  line does not matter (shared `grammar.parse_fields` parser).
+
+Parsing is fail-closed: `parse_local_tasks` rejects malformed or duplicate
+`depends_on`, duplicate task ids, self- and cyclic dependencies, and missing
+dependencies `before` building the graph, selecting or mutating anything. The
+operations behave as follows:
+
+- `next_local_task` — skips tasks with unmet dependencies (returns `None` when
+  nothing is available). Never mutates files.
+- `take_local_task` — if a task has unmet dependencies, rejects with `ValueError`
+  before mutating `TASKS.md` or `LOG.md`; the task stays `[ ]` and no log entry
+  is written.
+- `complete_local_task` — if a task has unmet dependencies, rejects with
+  `ValueError` before mutating `TASKS.md` or `LOG.md`; the task stays `[~]` and
+  no log entry is written.
+
+Contending `take`/`complete` calls serialize on the workspace queue lock
+(`.workspace-queue.lock`); a take that wins the lock is the only one that
+mutates the queue, so exactly one contender can take a task.
+
 ### `brain-federation` — controlled federation import and sync
 
 ```
