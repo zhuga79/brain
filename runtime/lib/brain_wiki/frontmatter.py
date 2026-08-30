@@ -14,7 +14,11 @@ Supported subset, symmetric between writer and reader:
   - inline flow lists ``key: [a, b, "c, d"]``
   - a block list opened by ``key:`` (empty value) followed by ``  - item``
     lines, one level of indentation, scalar items only
-  - booleans ``true``/``false`` (case-insensitive on read)
+  - booleans ``true``/``false`` and the YAML 1.1 aliases ``yes``/``no``/
+    ``on``/``off`` in their canonical spellings (lowercase, Titlecase,
+    UPPERCASE — exactly the forms pyyaml's YAML 1.1 resolver matches; any
+    other case mixture such as ``yES`` stays a string). ``y``/``n`` are
+    excluded: pyyaml does not resolve them as booleans either.
 
 Anything outside the subset (block scalars ``|``/``>``, flow mappings,
 anchors/aliases/tags, nested block mappings, multi-line unquoted values)
@@ -45,6 +49,12 @@ _KEY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.\-]*):(.*)$")
 # *first* character of a YAML plain scalar.
 _PLAIN_UNSAFE_START = set("!&*-?:,[]{}#|>'\"%@`")
 _RESERVED_WORDS = {"true", "false", "null", "~", "yes", "no", "on", "off"}
+# Canonical YAML 1.1 boolean spellings, matching pyyaml's resolver regex
+# ^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$.
+# Mixed case (yES, oFF, nO, tRUe, FaLSe) and y/n/Y/N are NOT resolved by pyyaml,
+# so they must stay strings here too.
+_YAML11_TRUE = frozenset({"true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON"})
+_YAML11_FALSE = frozenset({"false", "False", "FALSE", "no", "No", "NO", "off", "Off", "OFF"})
 _NUMERIC_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
 
 _DOUBLE_QUOTE_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
@@ -152,9 +162,9 @@ def _parse_scalar_token(value: str, lineno: int) -> Any:
         raise FrontmatterError(
             f"строка {lineno}: неподдерживаемая YAML-конструкция «{value}»"
         )
-    if value.lower() == "true":
+    if value in _YAML11_TRUE:
         return True
-    if value.lower() == "false":
+    if value in _YAML11_FALSE:
         return False
     return value
 
@@ -294,6 +304,11 @@ def as_bool(value: Any, *, strict: bool = False, default: bool = False) -> bool:
     Truthy literals:  1, true, yes, y, on, t  (case-insensitive)
     Falsy literals:   0, false, no, n, off, f, ""  (case-insensitive)
     Bool pass-through: returned as-is.
+
+    The lexicon is deliberately broader than the read-path bool words in
+    ``_parse_scalar_token`` (which must track pyyaml exactly): ``as_bool`` is a
+    lenient coercion helper for callers, not a YAML 1.1 resolver — accepting
+    ``y``/``n``/``t``/``f`` here is intended, not a forgotten sync.
 
     Unknown values:
       - strict=True  → raise ValueError("ambiguous bool: …")

@@ -108,4 +108,23 @@ assert as_bool(0) is False
 print('OK')
 " | grep -q "OK" || { echo "FAILED: Test 10 as_list/as_bool"; exit 1; }
 
-echo ">>> All 10 frontmatter tests passed"
+# ── Test 11: YAML 1.1 boolean aliases ─────────────────────────────────────────
+echo ">>> Test 11: YAML 1.1 boolean aliases (yes/no/on/off)"
+run_py "
+fm, body = parse_frontmatter('---\nenabled: yes\nchecked: off\n---\n')
+assert fm.get('enabled') is True, f'FAIL enabled={fm.get(\"enabled\")}'
+assert fm.get('checked') is False, f'FAIL checked={fm.get(\"checked\")}'
+assert fm.get('enabled') != 'yes', f'FAIL alias stayed string: {fm.get(\"enabled\")}'
+print('OK')
+" | grep -q "OK" || { echo "FAILED: Test 11 YAML 1.1 boolean aliases"; exit 1; }
+
+# ── Test 12: quoted aliases stay strings ──────────────────────────────────────
+echo ">>> Test 12: quoted alias words stay strings"
+run_py "
+fm, body = parse_frontmatter('---\nstatus: \"yes\"\n---\n')
+assert fm.get('status') == 'yes', f'FAIL status={fm.get(\"status\")}'
+assert fm.get('status') is not True, f'FAIL quoted alias resolved as bool'
+print('OK')
+" | grep -q "OK" || { echo "FAILED: Test 12 quoted alias"; exit 1; }
+
+echo ">>> All 12 frontmatter tests passed"
