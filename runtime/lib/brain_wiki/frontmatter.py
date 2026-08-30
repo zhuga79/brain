@@ -14,7 +14,8 @@ Supported subset, symmetric between writer and reader:
   - inline flow lists ``key: [a, b, "c, d"]``
   - a block list opened by ``key:`` (empty value) followed by ``  - item``
     lines, one level of indentation, scalar items only
-  - booleans ``true``/``false`` (case-insensitive on read)
+  - booleans ``true``/``false`` and the YAML 1.1 aliases ``yes``/``no``/
+    ``on``/``off`` (all case-insensitive, matching a real YAML 1.1 parser)
 
 Anything outside the subset (block scalars ``|``/``>``, flow mappings,
 anchors/aliases/tags, nested block mappings, multi-line unquoted values)
@@ -152,9 +153,9 @@ def _parse_scalar_token(value: str, lineno: int) -> Any:
         raise FrontmatterError(
             f"строка {lineno}: неподдерживаемая YAML-конструкция «{value}»"
         )
-    if value.lower() == "true":
+    if value.lower() in {"true", "yes", "on"}:
         return True
-    if value.lower() == "false":
+    if value.lower() in {"false", "no", "off"}:
         return False
     return value
 

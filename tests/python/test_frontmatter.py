@@ -51,6 +51,33 @@ class TestParseFrontmatter:
         assert fm["protected"] is True
         assert fm["draft"] is False
 
+    @pytest.mark.parametrize("alias,expected", [
+        ("yes", True), ("Yes", True), ("YES", True),
+        ("no", False), ("No", False), ("NO", False),
+        ("on", True), ("On", True), ("ON", True),
+        ("off", False), ("Off", False), ("OFF", False),
+    ])
+    def test_yaml11_boolean_aliases(self, alias, expected):
+        """YAML 1.1 aliases must read as bools, exactly like a real YAML 1.1
+        parser (pyyaml SafeLoader) resolves them."""
+        fm, _ = parse_frontmatter(f"---\nenabled: {alias}\n---\n")
+        assert fm["enabled"] is expected
+
+    def test_yaml11_boolean_aliases_inside_flow_list(self):
+        fm, _ = parse_frontmatter("---\nflags: [on, off, yes, no]\n---\n")
+        assert fm["flags"] == [True, False, True, False]
+
+    def test_yaml11_aliases_in_block_list(self):
+        fm, _ = parse_frontmatter("---\nflags:\n  - on\n  - no\n---\n")
+        assert fm["flags"] == [True, False]
+
+    def test_yaml11_words_stay_strings_when_quoted(self):
+        """Quoted aliases are strings, not bools — on the write side they are
+        quoted precisely so a real parser keeps them as strings."""
+        fm, _ = parse_frontmatter('---\nstatus: "yes"\n---\n')
+        assert fm["status"] == "yes"
+        assert fm["status"] is not True
+
     def test_list_value(self):
         fm, _ = parse_frontmatter("---\ntags: [a, b, c]\n---\n")
         assert fm["tags"] == ["a", "b", "c"]
@@ -268,10 +295,11 @@ class TestQuotingRegression:
         fm, _ = parse_frontmatter(text)
         assert fm["code"] == "007"
 
-    def test_reserved_word_string_stays_a_string(self):
-        text = format_frontmatter({"status": "true"}, "")
+    @pytest.mark.parametrize("word", ["true", "yes", "no", "on", "off"])
+    def test_reserved_word_string_stays_a_string(self, word):
+        text = format_frontmatter({"status": word}, "")
         fm, _ = parse_frontmatter(text)
-        assert fm["status"] == "true"
+        assert fm["status"] == word
         assert fm["status"] is not True
 
 
@@ -359,6 +387,8 @@ class TestRealYamlCompat:
         "- looks like a list item",
         "007",
         "true",
+        "yes",
+        "off",
         "",
         "trailing colon:",
     ])
@@ -378,6 +408,29 @@ class TestRealYamlCompat:
         parsed = self._load_frontmatter_block(text)
         assert parsed["protected"] is True
         assert parsed["draft"] is False
+
+    @pytest.mark.parametrize("alias,expected", [
+        ("yes", True), ("no", False), ("on", True), ("off", False),
+        ("Yes", True), ("NO", False), ("ON", True), ("Off", False),
+    ])
+    def test_yaml11_alias_reads_match_real_parser(self, alias, expected):
+        """The reader must resolve YAML 1.1 boolean aliases to the same value
+        a real YAML 1.1 parser produces for the same hand-written block."""
+        text = f"---\nenabled: {alias}\n---\n"
+        fm, _ = parse_frontmatter(text)
+        real = self.yaml.safe_load(f"enabled: {alias}\n")["enabled"]
+        assert fm["enabled"] == real == expected
+
+    def test_yaml11_string_words_roundtrip_under_real_parser(self):
+        """Strings that collide with YAML 1.1 bool words must survive our
+        writer as quoted strings and read back as strings, under pyyaml."""
+        for word in ("yes", "no", "on", "off", "true", "false"):
+            text = format_frontmatter({"status": word}, "")
+            parsed = self._load_frontmatter_block(text)
+            assert parsed["status"] == word
+            assert parsed["status"] is not True
+            fm, _ = parse_frontmatter(text)
+            assert fm["status"] == word
 
     def test_full_document_parses_as_valid_yaml(self):
         fm = {
