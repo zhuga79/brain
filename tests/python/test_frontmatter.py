@@ -412,6 +412,10 @@ class TestRealYamlCompat:
     @pytest.mark.parametrize("alias,expected", [
         ("yes", True), ("no", False), ("on", True), ("off", False),
         ("Yes", True), ("NO", False), ("ON", True), ("Off", False),
+        # Mixed-case spellings pyyaml's resolver does NOT resolve as booleans;
+        # the reader must return the exact-case string, identical to pyyaml.
+        ("yES", "yES"), ("oFF", "oFF"), ("nO", "nO"), ("YeS", "YeS"),
+        ("tRUe", "tRUe"), ("FaLSe", "FaLSe"), ("y", "y"), ("n", "n"),
     ])
     def test_yaml11_alias_reads_match_real_parser(self, alias, expected):
         """The reader must resolve YAML 1.1 boolean aliases to the same value
