@@ -241,16 +241,26 @@ from pathlib import Path
 # недоступна (PYTHONPATH не поднят), тихо деградируем к пустому списку — как JIT-блок
 # выше: промпт собирается, доктрины просто не подгружаются и brain-run не падает.
 try:
-    from brain_wiki import as_list, parse_frontmatter
+    from brain_wiki import FrontmatterError, as_list, parse_frontmatter
 except ImportError:
+    # Библиотека недоступна (PYTHONPATH не поднят) — тихо деградируем к пустому списку:
+    # промпт собирается, доктрины просто не подгружаются и brain-run не падает.
+    FrontmatterError = Exception
     as_list = None
     parse_frontmatter = None
 
 path = Path(sys.argv[1])
 slugs = []
 if path.exists() and parse_frontmatter is not None:
-    fm, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
-    slugs = as_list(fm.get("doctrine"))
+    # Любая ошибка разбора (в т.ч. FrontmatterError на нестандартном frontmatter роли,
+    # или исключение при недоступном окружении) не должна валить brain-run целиком под
+    # set -e. Тихо деградируем к пустому списку doctrine, как и обещано в комментарии выше.
+    try:
+        fm, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if as_list is not None:
+            slugs = as_list(fm.get("doctrine"))
+    except (FrontmatterError, Exception):
+        slugs = []
 for slug in slugs:
     print(f"doctrine/{slug}.md")
 PY
