@@ -11,6 +11,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from brain_wiki import FrontmatterError, format_frontmatter, parse_frontmatter
+
 _VALID_STATUSES = {"pending", "approved", "active", "rejected", "deprecated"}
 _VALID_SEVERITIES = {"low", "medium", "high"}
 _VALID_SOURCES = {
@@ -43,38 +45,32 @@ def ensure_dirs(brain: Path) -> None:
 # ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Return (frontmatter_dict, body) from a document with --- delimiters."""
-    if not text.startswith("---"):
+    """Return (frontmatter_dict, body) from a document with --- delimiters.
+
+    Delegates to the shared `brain_wiki` parser (restricted YAML subset) so
+    incident/lesson files inherit the same quoting rules as wiki pages — the
+    local naive `split(":", 1)` reader duplicated the defect class closed in
+    `brain_wiki.frontmatter`. A construct outside the subset is reported on
+    stderr and treated as "no frontmatter" instead of taking down the whole
+    brain-learn command (the same pattern as `parse_skill_file`).
+    """
+    try:
+        return parse_frontmatter(text)
+    except FrontmatterError as exc:
+        sys.stderr.write(
+            f"brain_learning: frontmatter вне поддерживаемого подмножества YAML: {exc}\n"
+        )
         return {}, text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}, text
-    fm_text = text[3:end].strip()
-    body = text[end + 4:].lstrip("\n")
-    fm: dict = {}
-    for line in fm_text.splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            v = v.strip()
-            if v.startswith("[") and v.endswith("]"):
-                inner = v[1:-1]
-                fm[k.strip()] = [x.strip() for x in inner.split(",") if x.strip()]
-            else:
-                fm[k.strip()] = v
-    return fm, body
 
 
 def _render_frontmatter(fm: dict, body: str) -> str:
-    lines = ["---"]
-    for k, v in fm.items():
-        if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(v)}]")
-        else:
-            lines.append(f"{k}: {v}")
-    lines.append("---")
-    lines.append("")
-    lines.append(body.lstrip("\n"))
-    return "\n".join(lines)
+    """Serialize (fm, body) with the shared `brain_wiki` formatter.
+
+    Values get YAML-safe quoting (colons, quotes, leading dashes, reserved
+    words …), so what is written round-trips under a real YAML parser — see
+    tests/python/test_brain_learning.py::TestFrontmatterRealYamlCompat.
+    """
+    return format_frontmatter(fm, body)
 
 
 # ── ID generation ──────────────────────────────────────────────────────────────

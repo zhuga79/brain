@@ -56,6 +56,7 @@ if TypedDict is not None:
         missing_links: list
         word_count: int
         mtime: float
+        error: str               # present when frontmatter is outside the YAML subset
 
     class RawRecord(TypedDict, total=False):
         """Record for a raw source file in the index.
@@ -70,6 +71,7 @@ if TypedDict is not None:
         fetched: str
         word_count: int
         mtime: float
+        error: str               # present when frontmatter is outside the YAML subset
 
     class SearchDoc(TypedDict):
         """A document in the BM25 search corpus."""
@@ -226,11 +228,28 @@ def task_paths(brain: Path) -> list:
 # Record builders
 # ---------------------------------------------------------------------------
 
+def _parse_frontmatter_safe(rel: str, text: str) -> tuple[dict, str, str]:
+    """parse_frontmatter that degrades for a single file instead of crashing
+    the whole index build — the pattern `brain_wiki/validators.py` already
+    uses. Returns (fm, body, error): when the construct is outside the
+    supported YAML subset, fm is {} and error carries the reason, so the
+    caller can flag the record and keep walking the tree.
+    """
+    try:
+        fm, body = brain_wiki.parse_frontmatter(text)
+        return fm, body, ""
+    except brain_wiki.FrontmatterError as exc:
+        sys.stderr.write(
+            "warning: frontmatter вне поддерживаемого подмножества YAML в {}: {}\n".format(rel, exc)
+        )
+        return {}, text, str(exc)
+
+
 def page_record(brain: Path, path: Path, all_slugs: set) -> dict:
     text = brain_wiki.read_text(path)
-    fm, body = brain_wiki.parse_frontmatter(text)
+    fm, body, fm_error = _parse_frontmatter_safe(relpath(brain, path), text)
     links = sorted(set(brain_wiki.extract_wikilinks(body)))
-    return {
+    record = {
         "slug": path.stem,
         "path": relpath(brain, path),
         "title": str(fm.get("title") or path.stem),
@@ -251,12 +270,15 @@ def page_record(brain: Path, path: Path, all_slugs: set) -> dict:
         "word_count": len(tokenize(body)),
         "mtime": path.stat().st_mtime,
     }
+    if fm_error:
+        record["error"] = "frontmatter: {}".format(fm_error)
+    return record
 
 
 def raw_record(brain: Path, path: Path) -> dict:
     text = brain_wiki.read_text(path)
-    fm, body = brain_wiki.parse_frontmatter(text)
-    return {
+    fm, body, fm_error = _parse_frontmatter_safe(relpath(brain, path), text)
+    record = {
         "slug": path.stem,
         "path": relpath(brain, path),
         "title": str(fm.get("title") or path.stem),
@@ -266,6 +288,9 @@ def raw_record(brain: Path, path: Path) -> dict:
         "word_count": len(tokenize(body)),
         "mtime": path.stat().st_mtime,
     }
+    if fm_error:
+        record["error"] = "frontmatter: {}".format(fm_error)
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +316,7 @@ def search_doc(
                 where text is read directly and id is derived from the stem.
     """
     if kind == "wiki":
-        _fm, body = brain_wiki.parse_frontmatter(brain_wiki.read_text(path))
+        _fm, body, _err = _parse_frontmatter_safe(record["path"], brain_wiki.read_text(path))
         return {
             "id": record["slug"],
             "path": record["path"],
@@ -302,7 +327,7 @@ def search_doc(
             "mtime": record["mtime"],
         }
     elif kind == "raw":
-        _fm, body = brain_wiki.parse_frontmatter(brain_wiki.read_text(path))
+        _fm, body, _err = _parse_frontmatter_safe(record["path"], brain_wiki.read_text(path))
         return {
             "id": "raw/{}".format(record["slug"]),
             "path": record["path"],

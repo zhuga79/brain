@@ -3,9 +3,9 @@ from pathlib import Path
 from datetime import date, datetime
 import pytest
 from brain_learning import (
-    ensure_dirs,
     _parse_frontmatter,
     _render_frontmatter,
+    ensure_dirs,
     new_incident_id,
     new_lesson_id,
     write_incident,
@@ -110,7 +110,7 @@ def test_lesson_io(tmp_path):
     
     fm, body = read_lesson(tmp_path, les["id"])
     assert fm["rule"] == "Always test"
-    assert body == "Body"
+    assert body.strip() == "Body"
     
     lessons = list_lessons(tmp_path, "pending")
     assert len(lessons) == 1
@@ -217,3 +217,60 @@ def test_prune_expired_lessons(tmp_path):
     
     fm, _ = read_lesson(tmp_path, "les-expired")
     assert fm["status"] == "deprecated"
+
+
+class TestFrontmatterRealYamlCompat:
+    """Anything `_render_frontmatter` writes must parse identically under a
+    real YAML parser — the same contract `brain_wiki`'s TestRealYamlCompat
+    enforces, so the learning-loop writer can't drift back to unquoted
+    `str(value)` output (the defect closed in t-2026-08-18 ...). pyyaml is a
+    test-only dependency, same as test_frontmatter.py."""
+
+    yaml = pytest.importorskip("yaml")
+
+    def _load_frontmatter_block(self, text):
+        assert text.startswith("---\n")
+        end = text.index("\n---", 4)
+        block = text[4:end]
+        return self.yaml.safe_load(block)
+
+    @pytest.mark.parametrize("value", [
+        "plain value",
+        "Разбор: что дальше",
+        "[AUTO from phase1] Review fixing commit: fix thing",
+        'quote " inside',
+        "- looks like a list item",
+    ])
+    def test_rule_with_colon_roundtrips_under_real_yaml(self, value):
+        text = _render_frontmatter({"rule": value}, "body\n")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed == {"rule": value}
+
+    def test_full_lesson_document_parses_as_valid_yaml(self):
+        fm = {
+            "id": "les-1",
+            "status": "pending",
+            "severity": "high",
+            "roles": ["developer", "reviewer"],
+            "approved_by": "",
+            "rule": "[AUTO from phase1] Review fixing commit: fix thing",
+        }
+        text = _render_frontmatter(fm, "## Rule\n...\n")
+        parsed = self._load_frontmatter_block(text)
+        assert parsed == fm
+
+    def test_unsupported_frontmatter_falls_back_with_warning(self, capsys):
+        text = "---\nnote: |\n  multi\n  line\n---\nBody"
+        fm, body = _parse_frontmatter(text)
+        assert fm == {}
+        assert body == text
+        err = capsys.readouterr().err
+        assert "подмножества" in err
+
+    def test_roundtrip_through_write_read_lesson(self, tmp_path):
+        les = {"rule": "Always test: with colon", "severity": "high"}
+        write_lesson(tmp_path, les, body="Body")
+        fm, body = read_lesson(tmp_path, les["id"])
+        assert fm["rule"] == "Always test: with colon"
+        assert fm["severity"] == "high"
+        assert "Body" in body
