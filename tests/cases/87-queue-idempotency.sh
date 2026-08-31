@@ -119,7 +119,9 @@ grep -q "укажи исполнителя" <<< "$out" || { echo "FAILED: неп
 grep -q "$tid" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: задача закрыта без владельца"; exit 1; }
 echo "OK: complete требует владельца"
 
-# ── 9. stale lock blocks mutation until explicitly renewed ──
+# ── 9. stale lock does not reject the owner's complete ──
+# t-2026-08-14-lock-ttl-versus-agent-task-dur: expiry frees the lock for
+# someone else, it does not veto the holder finishing their own work.
 python3 - "$BRAIN_PATH/.locks/$tid/owner" <<'PY'
 from pathlib import Path
 import time
@@ -128,26 +130,8 @@ path = Path(sys.argv[1])
 owner, _ts, ttl = path.read_text(encoding="utf-8").strip().split("|")
 path.write_text(f"{owner}|{int(time.time())-1000}|{ttl}\n", encoding="utf-8")
 PY
-cp "$BRAIN_PATH/tasks/active.md" "$snapshot_dir/active.stale.before"
-cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.stale.before"
-cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.stale.before"
-cp "$BRAIN_PATH/.locks/$tid/owner" "$snapshot_dir/owner.stale.before"
-set +e
-out="$(BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid" --as me 2>&1)"
-rc=$?
-set -e
-[ "$rc" -ne 0 ] || { echo "FAILED: complete with stale lock passed"; exit 1; }
-grep -q "task lock is stale" <<< "$out" || { echo "FAILED: stale lock error unclear: $out"; exit 1; }
-cmp -s "$snapshot_dir/active.stale.before" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: stale-lock complete changed active.md"; exit 1; }
-cmp -s "$snapshot_dir/done.stale.before" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: stale-lock complete changed done.md"; exit 1; }
-cmp -s "$snapshot_dir/log.stale.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: stale-lock complete changed wiki/log.md"; exit 1; }
-cmp -s "$snapshot_dir/owner.stale.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: stale-lock complete changed owner"; exit 1; }
-brain-lock acquire "$tid" --as me --ttl 600 >/dev/null || { echo "FAILED: renew stale lock"; exit 1; }
-echo "OK: stale lock blocks mutation until renewed"
-
-cp "$BRAIN_PATH/.locks/$tid/owner" "$snapshot_dir/owner.renewed.before"
 BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid" --as me >/dev/null || {
-  echo "FAILED: complete владельцем"
+  echo "FAILED: owner complete after TTL expiry"
   exit 1
 }
 grep -q "$tid" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: задача не попала в done"; exit 1; }

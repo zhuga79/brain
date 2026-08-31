@@ -31,7 +31,9 @@ LOCK_NAME = ".taskfile.lock"
 COMPLETE_JOURNAL_DIR = ".taskfile-complete"
 COMPLETE_JOURNAL_VERSION = "2"
 TASK_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-LOCK_TTL_DEFAULT = 600
+# Typical agent work is ~40 min (t-2026-08-14-lock-ttl-versus-agent-task-dur).
+# A 10-minute lease expired before `complete` on a live session.
+LOCK_TTL_DEFAULT = 3600
 
 
 def queue_lock(tasks_dir: Path):
@@ -141,14 +143,20 @@ def _extract_owner(body: str) -> str:
 
 
 def _ensure_lock_owner(active: Path, tid: str, agent: str) -> None:
+    """Проверить, что переход делает владелец лока.
+
+    TTL здесь не вето: протухание значит, что другой агент *может*
+    перехватить лок, а не что держатель обязан заново acquire, чтобы
+    закончить свою работу. Отказ по таймеру на живой сессии — это
+    t-2026-08-14-lock-ttl-versus-agent-task-dur. Если лок уже чужой
+    (в том числе после stale-takeover) — отказ по владельцу, как и раньше.
+    """
     owner_file = _lock_owner_path(active, tid)
     if not owner_file.is_file():
         raise TaskError(f"task lock missing: {tid}")
-    lock_owner, started, ttl = _parse_lock_owner(_read(owner_file))
+    lock_owner, _started, _ttl = _parse_lock_owner(_read(owner_file))
     if lock_owner != agent:
         raise TaskError(f"lock owned by {lock_owner}, not {agent}")
-    if int(time.time()) - started > ttl:
-        raise TaskError(f"task lock is stale: {tid}")
 
 
 def _ensure_open_lock_owner(active: Path, tid: str, agent: str | None) -> None:
@@ -212,7 +220,7 @@ def _ensure_in_progress_owner(active: Path, tid: str, body: str, agent: str | No
     if not owner_file.is_file():
         # Исторические прямые вызовы brain_app.queue.take/complete не создают
         # lock-файл. Там всё ещё есть смысл сверить `by:` до записи, а строгую
-        # проверку owner/stale выполнять только когда lock реально присутствует.
+        # проверку владельца лока выполнять только когда lock реально присутствует.
         return
     _ensure_lock_owner(active, tid, agent)
 

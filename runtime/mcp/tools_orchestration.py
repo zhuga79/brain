@@ -5,6 +5,7 @@ import shutil
 from common import mcp, BRAIN, ACTIVE, DONE, LOCKS, append_log, git_commit, ts, find_task_block, parse_block
 import brain_task_parser
 from brain_app import queue
+from brain_core.taskfile import LOCK_TTL_DEFAULT
 from result import ok, error
 
 _LOCK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -55,7 +56,7 @@ def _require_model(model: str) -> str | None:
         return None
 
 @mcp.tool()
-def acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
+def acquire_lock(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> dict:
     """Acquire a lock on a task. Returns ok or info about existing owner."""
     task = _require_lock_id(task_id)
     if not task:
@@ -145,7 +146,7 @@ def release_lock(task_id: str, agent_id: str = "", force: bool = False, reason: 
     return ok()
 
 @mcp.tool()
-def refresh_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict:
+def refresh_lock(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> dict:
     """Refresh TTL of a lock (only if you own it)."""
     task = _require_lock_id(task_id)
     if not task:
@@ -224,7 +225,7 @@ def cleanup_locks() -> dict:
     return {"cleaned": n}
 
 @mcp.tool()
-def take_task(task_id: str, agent_id: str, ttl: int = 600) -> dict:
+def take_task(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> dict:
     """Acquire lock and mark task in-progress.
     Returns error if already locked by someone else."""
     agent = _require_agent_id(agent_id)

@@ -88,13 +88,18 @@ def test_complete_rejects_wrong_owner_before_write(queue):
     _assert_same(before)
 
 
-def test_complete_rejects_stale_lock_before_write(queue):
+def test_complete_allows_owner_on_stale_lock(queue):
+    """t-2026-08-14-lock-ttl-versus-agent-task-dur: timer is not a veto of own work.
+
+    TTL expiry lets another agent take over an abandoned lock. It must not
+    reject the holder who is still finishing — `complete` used to raise
+    `task lock is stale` after a live ~40 min session.
+    """
     _brain, active, done, owner = queue
     owner.write_text("owner-agent|1|1\n", encoding="utf-8")
-    before = _snapshot(active, done, owner)
-    with pytest.raises(taskfile.TaskError, match="task lock is stale: t-owner-guard"):
-        taskfile.complete(active, done, "t-owner-guard", "owner-agent", "good-model")
-    _assert_same(before)
+    taskfile.complete(active, done, "t-owner-guard", "owner-agent", "good-model")
+    assert "t-owner-guard" not in active.read_text(encoding="utf-8")
+    assert "model: good-model" in done.read_text(encoding="utf-8")
 
 
 def test_owner_happy_path_mutates_only_active_and_done(queue):

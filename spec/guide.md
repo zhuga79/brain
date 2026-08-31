@@ -307,9 +307,9 @@ brain-task webhook-replay               переотправить записи 
 ### `brain-lock` — блокировки
 
 ```
-brain-lock acquire <id> --as <agent-id> [--ttl 600]
+brain-lock acquire <id> --as <agent-id> [--ttl 3600]
 brain-lock release <id> [--as <agent-id>]
-brain-lock refresh <id> --as <agent-id> [--ttl 600]
+brain-lock refresh <id> --as <agent-id> [--ttl 3600]
 brain-lock status [<id>]
 brain-lock cleanup
 ```
@@ -1058,7 +1058,7 @@ add_task(text: str, role: str = "developer", mode: str = "solo",
          acceptance: str = "TODO") -> dict
 # возвращает {"id": "t-...", "status": "added"}
 
-take_task(task_id: str, agent_id: str, ttl: int = 600) -> dict
+take_task(task_id: str, agent_id: str, ttl: int = 3600) -> dict
 # acquire_lock + установка [~] + started/by
 
 release_task(task_id: str, agent_id: str = "") -> dict
@@ -1076,14 +1076,14 @@ get_task_deps(task_id: str) -> dict
 #### Locks (5 tools)
 
 ```python
-acquire_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict
+acquire_lock(task_id: str, agent_id: str, ttl: int = 3600) -> dict
 # {"status": "ok"} | {"status": "locked", "owner": ..., "age_seconds": ..., "ttl": ...}
 # Stale-локи перехватываются автоматически.
 
 release_lock(task_id: str, agent_id: str = "") -> dict
 # Если agent_id передан — проверяется владение.
 
-refresh_lock(task_id: str, agent_id: str, ttl: int = 600) -> dict
+refresh_lock(task_id: str, agent_id: str, ttl: int = 3600) -> dict
 
 lock_status(task_id: str = "") -> dict
 # Без аргумента — все локи.
