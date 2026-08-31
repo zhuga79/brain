@@ -2,7 +2,7 @@
 title: Decisions Log
 type: decision
 created: 2026-05-03
-updated: 2026-08-14
+updated: 2026-08-31
 curation: agent
 protected: false
 source_policy: advisory
@@ -26,5 +26,6 @@ visibility: public
 - [[decision-public-source-of-truth]] — инверсия публикации: системный код живёт в публичном репозитории и является источником, приватное дерево — слой данных; PR принимаются напрямую (2026-08-10)
 - [[decision-corrective-recurrence]] — рецидив корректирующей задачи после закрытия заводит новую; воскрешение в окне 72ч невозможно (2026-08-13)
 - [[decision-post-inversion-cycle]] — следующий цикл: живая инверсия двух корней, без новых продуктовых функций (2026-08-14)
+- [[decision-setup-runtime-pth-and-pytest-pythonpath]] — порт data-root: `.pth` всегда после pip; `pythonpath` в pyproject отклонён (2026-08-31)
 
 Связанные страницы: [[about-brain]], [[roles-overview]].

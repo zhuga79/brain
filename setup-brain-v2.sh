@@ -251,20 +251,25 @@ if python3 -m pip install --user -e "$SCRIPT_DIR" --quiet 2>/dev/null; then
 else
   # PEP 668: дистрибутивы помечают системный интерпретатор как externally-managed
   # и pip отказывается ставить в него что-либо. Ломать окружение
-  # (--break-system-packages) ради этого нельзя, поэтому подключаем дерево так
-  # же, как это сделал бы editable-install, — файлом .pth в user site-packages.
-  python3 - "$SCRIPT_DIR" <<'PYEOF'
+  # (--break-system-packages) ради этого нельзя — остаётся .pth ниже.
+  echo "! pip отказал (externally-managed или нет pip) — ядро через .pth"
+fi
+
+# .pth пишем всегда и на текущее дерево. Иначе путь от прошлого чекаута
+# остаётся в sys.path даже после успешного pip, и brain-status врёт
+# «unpackaged» из чужой копии.
+python3 - "$SCRIPT_DIR" <<'PYEOF'
 import site
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1]).resolve()
+root = Path(sys.argv[1])
 target = Path(site.getusersitepackages())
 target.mkdir(parents=True, exist_ok=True)
-(target / "brain-runtime.pth").write_text(str(root / "runtime" / "lib") + "\n", encoding="utf-8")
-print(f"✓ .pth в {target} (pip отказал: externally-managed)")
+desired = str(root / "runtime" / "lib") + "\n"
+(target / "brain-runtime.pth").write_text(desired, encoding="utf-8")
+print(f"✓ .pth → {desired.strip()}")
 PYEOF
-fi
 
 # Старые копии удаляем: пока они лежат на месте, они участвуют в разрешении
 # импорта и способны перебить дерево.

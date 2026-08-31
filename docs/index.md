@@ -29,6 +29,7 @@
 - [[decision-public-source-of-truth]]
 - [[decision-role-model-routing]]
 - [[decision-runtime-core-boundaries]]
+- [[decision-setup-runtime-pth-and-pytest-pythonpath]]
 - [[decisions-log]]
 - [[phase-13-prd]]
 
