@@ -117,6 +117,16 @@ def parse_fields(line: str) -> dict[str, str]:
     return out
 
 
+def count_field_starts(line: str, name: str) -> int:
+    """Count how many times *name* appears as a parsed field start on *line*.
+
+    Uses ``_FIELD_START`` so prose or backticked mentions (e.g.
+    ``acceptance: use depends_on: [a] for context``) are **not** counted.
+    Only true field starts — at line start or after two+ spaces — count.
+    """
+    return sum(1 for m in _FIELD_START.finditer(line) if m.group(1) == name)
+
+
 class Head(NamedTuple):
     state: str
     prio: str | None

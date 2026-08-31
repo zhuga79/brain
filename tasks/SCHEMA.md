@@ -47,15 +47,15 @@
 
 ## Fail-closed поведение зависимостей
 
-Парсер (`parse_local_tasks` / `parse_local_tasks_from_text`) **строго отклоняет** невалидные задачи **до** построения графа/селекции/мутации. Порядок проверок:
+Парсер (`parse_local_tasks` / `parse_local_tasks_from_text`) **строго отклоняет** невалидные задачи **до** построения графа/селекции/мутации. Проверяемые случаи (перечисление не задаёт порядок выполнения):
 
-1. **Дубликаты task_id** — если в файле встречаются два блока с одинаковым id, парсинг прерывается с `ValueError: Duplicate task ID: <id>`. Это гарантирует детерминизм: карта состояний не зависит от порядка блоков.
-2. **Пустые компоненты `depends_on`** — `[,]`, `[task-a,]`, `[,task-a]`, `[task-a,,task-b]` → `ValueError: Malformed depends_on list (empty component): <value>`.
-3. **Дубликаты внутри `depends_on`** — `[task-x, task-x]` → `ValueError: Task <id> has duplicate dependency: task-x`.
-4. **Дубликаты поля `depends_on`** — два `depends_on:` в одном блоке → `ValueError: Task <id> has duplicate depends_on field`.
-5. **Самозависимость** — `depends_on: [task-a]` в задаче `task-a` → `ValueError: Task task-a has self-dependency in depends_on`.
-6. **Отсутствующие зависимости** — `depends_on: [missing-id]` → `ValueError: Task <id> has missing dependency: missing-id`.
-7. **Циклы** — `A → B → A` → `ValueError: Dependency cycle detected involving: <node>`.
+- **Дубликаты task_id** — если в файле встречаются два блока с одинаковым id, парсинг прерывается с `ValueError: Duplicate task ID: <id>`. Это гарантирует детерминизм: карта состояний не зависит от порядка блоков.
+- **Пустые компоненты `depends_on`** — `[,]`, `[task-a,]`, `[,task-a]`, `[task-a,,task-b]` → `ValueError: Malformed depends_on list (empty component): <value>`.
+- **Дубликаты внутри `depends_on`** — `[task-x, task-x]` → `ValueError: Task <id> has duplicate dependency: task-x`.
+- **Дубликаты поля `depends_on`** — два `depends_on:` в одном блоке → `ValueError: Task <id> has duplicate depends_on field`.
+- **Самозависимость** — `depends_on: [task-a]` в задаче `task-a` → `ValueError: Task task-a has self-dependency in depends_on`.
+- **Отсутствующие зависимости** — `depends_on: [missing-id]` → `ValueError: Task <id> has missing dependency: missing-id`.
+- **Циклы** — `A → B → A` → `ValueError: Dependency cycle detected involving: <node>`.
 
 **Поведение операций `next_local_task` / `take_local_task` / `complete_local_task`:**
 
