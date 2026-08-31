@@ -8,6 +8,7 @@ brain-shell и дашборде — и расходились. Тесты фик
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -94,16 +95,47 @@ def test_deps_tree_marks_a_cycle_instead_of_recursing(tmp_path):
 
 # ── запись ───────────────────────────────────────────────────────────────────
 
+def test_slugify_transliterates_cyrillic_instead_of_empty():
+    """Заголовок без латиницы не должен схлопываться в пустой slug.
+
+    `brain-task add "Смоук-кейсы ждут…"` выдавал t-YYYY-MM-DD-HHMMSS, хотя
+    у соседей по очереди осмысленный хвост. Транслитерация — дешёвый фикс
+    в том же проходе, что и журнал add.
+    """
+    slug = queue.slugify("Смоук-кейсы ждут…")
+    assert slug
+    assert re.fullmatch(r"[a-z0-9-]+", slug)
+    assert "smouk" in slug
+    assert slug != queue.clock.now().strftime("%H%M%S")
+
+
+def test_new_task_id_keeps_readable_tail_for_cyrillic_title(tmp_path, monkeypatch):
+    moment = datetime(2026, 8, 21, 5, 6, 54, tzinfo=timezone.utc)
+    monkeypatch.setattr(queue.clock, "now", lambda: moment)
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    (tasks / "active.md").write_text("# Active Tasks\n", encoding="utf-8")
+    (tasks / "done.md").write_text("", encoding="utf-8")
+    tid = queue.new_task_id("Смоук-кейсы ждут…", tmp_path)
+    assert tid.startswith("t-2026-08-21-")
+    assert not tid.endswith("-050654")
+    assert "smouk" in tid
+    assert re.fullmatch(r"t-2026-08-21-[a-z0-9-]+", tid)
+
+
+def test_slugify_keeps_latin_and_digits():
+    assert queue.slugify("Smoke cases wait") == "smoke-cases-wait"
+    assert queue.slugify("???") == ""
+
+
 def test_add_returns_a_free_id(brain, monkeypatch):
     """Второй add на том же заголовке получает суффикс, а не тот же id.
 
-    Часы фиксируются, и это не косметика. У заголовка кириллицей slug пустой,
-    поэтому new_task_id берёт запасной суффикс из `%H%M%S` — база id зависит
-    от секунды вызова. С живыми часами два add по разные стороны границы
-    секунды дают разные базы, и `second.startswith(first)` падает, хотя id
-    уникальны и поведение верное: тест ронял CI на здоровом коммите
-    (t-2026-08-17-ci-flakes-block-the-recheck). Проверяемое свойство —
-    избежание коллизии, а не показания часов, поэтому время убрано из условия.
+    Часы фиксируются, и это не косметика. База id несёт дату; с живыми часами
+    два add по разные стороны границы секунды или дня дают разные базы, и
+    `second.startswith(first)` падает, хотя id уникальны и поведение верное:
+    тест ронял CI на здоровом коммите (t-2026-08-17-ci-flakes-block-the-recheck).
+    Проверяемое свойство — избежание коллизии, а не показания часов.
     """
     moment = datetime(2026, 8, 17, 6, 44, 11, tzinfo=timezone.utc)
     monkeypatch.setattr(queue.clock, "now", lambda: moment)

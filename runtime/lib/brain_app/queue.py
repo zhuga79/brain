@@ -157,8 +157,21 @@ def deps_tree(task_id: str, brain: Path | None = None, *, depth_limit: int = 10)
 
 # ── запись ───────────────────────────────────────────────────────────────────
 
+# Кириллица в хвосте id, иначе заголовок без латиницы даёт пустой slug и
+# запасной суффикс %H%M%S — t-YYYY-MM-DD-050654 вместо читаемого хвоста.
+_CYRILLIC_SLUG = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    "і": "i", "ї": "yi", "є": "ye", "ґ": "g",
+})
+
+
 def slugify(text: str, limit: int = 30) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower())[:limit].strip("-")
+    mapped = text.lower().translate(_CYRILLIC_SLUG)
+    return re.sub(r"[^a-z0-9]+", "-", mapped)[:limit].strip("-")
 
 
 def validate_model_signature(model: str) -> str:

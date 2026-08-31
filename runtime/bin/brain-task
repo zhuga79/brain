@@ -133,7 +133,20 @@ case "$cmd" in
     # Выдача идентификатора и сборка блока — часть контракта очереди, поэтому
     # живут в brain_app.queue: свои копии здесь и в MCP расходились в правилах
     # слага и в проверке занятости id.
+    # Журнал и коммит — только после подтверждённой мутации: argparse --help
+    # выходит с нулём и печатает справку в stdout, это не id задачи.
+    set +e
     id="$(_py brain_app.queue --brain "$BRAIN" add "$text" --role "$role" --mode "$mode" --prio "$prio")"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      [ -n "$id" ] && printf '%s\n' "$id" >&2
+      exit "$rc"
+    fi
+    if ! validate_id "идентификатор задачи" "$id"; then
+      echo "error: python-слой не подтвердил создание задачи" >&2
+      exit 2
+    fi
     log_op "task-add" "$id" "" "role=$role mode=$mode prio=$prio"
     git_commit "task-add: $id"
     _py brain_core.rebuild "${_BIN_DIR}/brain-index" >/dev/null 2>&1 &
@@ -261,7 +274,7 @@ case "$cmd" in
     _py brain_app.queue "${args[@]}"
     rc=$?
     set -e
-    if $fix; then
+    if $fix && [ "$rc" -eq 0 ]; then
       log_op "task-reconcile" "" "" "fix=1"
       git_commit "task-reconcile: lock/owner divergence"
     fi
