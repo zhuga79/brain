@@ -69,14 +69,53 @@ brain_resolve_system() {
   fi
 }
 
-# TEAMS — каталог для листинга. Файл команды всегда через brain_resolve_system:
-# иначе пустой локальный teams/ перекрыл бы системный.
-export TEAMS
-if [ -e "$BRAIN/teams" ]; then
-  TEAMS="$BRAIN/teams"
-else
-  TEAMS="$BRAIN_SYSTEM/teams"
-fi
+# Canonical system catalog. Listing cannot use one directory: an empty
+# $BRAIN/teams would hide SYSTEM/teams, and a populated data catalog would
+# drop system-only ids. File resolve stays brain_resolve_system; listing
+# merges through brain_iter_team_files (data-local precedence, samefile
+# is origin:system, not an override).
+export TEAMS="$BRAIN_SYSTEM/teams"
+
+# id<TAB>path<TAB>origin   origin: system | data | data-override
+brain_iter_team_files() {
+  local data_dir="$BRAIN/teams"
+  local sys_dir="$BRAIN_SYSTEM/teams"
+  local lines="" id f origin seen=" "
+
+  if [ -d "$data_dir" ]; then
+    for f in "$data_dir"/*.md; do
+      [ -f "$f" ] || continue
+      id="${f##*/}"
+      id="${id%.md}"
+      if [ -e "$sys_dir/$id.md" ] && [ "$f" -ef "$sys_dir/$id.md" ]; then
+        origin=system
+      elif [ -e "$sys_dir/$id.md" ]; then
+        origin=data-override
+      else
+        origin=data
+      fi
+      lines+="${id}"$'\t'"${f}"$'\t'"${origin}"$'\n'
+      seen+="${id} "
+    done
+  fi
+
+  if [ -d "$sys_dir" ]; then
+    if [ ! -d "$data_dir" ] || [ ! "$data_dir" -ef "$sys_dir" ]; then
+      for f in "$sys_dir"/*.md; do
+        [ -f "$f" ] || continue
+        id="${f##*/}"
+        id="${id%.md}"
+        case "$seen" in
+          *" ${id} "*) continue ;;
+        esac
+        lines+="${id}"$'\t'"${f}"$'\t'"system"$'\n'
+      done
+    fi
+  fi
+
+  [ -n "$lines" ] || return 0
+  printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1
+}
 
 CLI_DEFAULT="${CLI_DEFAULT:-claude}"
 
