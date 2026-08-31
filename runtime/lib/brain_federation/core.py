@@ -17,6 +17,17 @@ AGENT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]+$")
 NODE_ID_ENV = "BRAIN_NODE_ID"
 FEDERATION_CONFIG_FILE = "config/federation.json"
 NODE_ID_DEFAULT = "anonymous"
+# Git email is operator PII and is only published to the synced audit log
+# when the operator explicitly opts in (env or federation.json), never by
+# default. See node_id().
+NODE_GIT_EMAIL_ENV = "BRAIN_NODE_ID_FROM_GIT"
+NODE_GIT_EMAIL_CONFIG = "node_id_from_git"
+# Charset for node identity as it appears in wiki/log.md audit rows. This is
+# the same defensive intent as AGENT_ID_RE/TASK_ID_RE: the value is embedded
+# verbatim in a `## [ts] op | id | agent | extra` line, so newlines and the
+# positional `|` separator must never reach the journal. `@` is allowed so
+# email-derived identities remain usable.
+NODE_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:@+-]+$")
 
 RUNTIME_PATHS = (
     ".locks/",
@@ -56,23 +67,54 @@ def brain_path(value: str | None) -> Path:
     return Path(value or os.environ.get("BRAIN_PATH", str(Path.home() / "brain"))).expanduser()
 
 
-def _config_node_id(brain: Path) -> str:
-    """Read node identity from <brain>/config/federation.json, if present."""
+def _federation_config(brain: Path) -> dict[str, Any]:
+    """Return <brain>/config/federation.json as a dict ({} on any problem)."""
     cfg = brain / FEDERATION_CONFIG_FILE
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        return {}
     if not isinstance(data, dict):
-        return ""
-    value = data.get("node_id")
+        return {}
+    return data
+
+
+def _config_node_id(brain: Path) -> str:
+    """Read node identity from <brain>/config/federation.json, if present."""
+    value = _federation_config(brain).get("node_id")
     if isinstance(value, str):
         return value.strip()
     return ""
 
 
+def _git_email_enabled(brain: Path) -> bool:
+    """Whether git user.email may be published as node identity — explicit opt-in only.
+
+    Default is *off*: git user.email is operator PII and must not leak into a
+    journal that is synced and pushed to every federation peer unless the
+    operator explicitly allows it. Enabled via $BRAIN_NODE_ID_FROM_GIT=1 or
+    `"node_id_from_git": true` in config/federation.json.
+    """
+    flag = os.environ.get(NODE_GIT_EMAIL_ENV, "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    configured = _federation_config(brain).get(NODE_GIT_EMAIL_CONFIG)
+    return configured is True
+
+
+_git_email_cache: dict[str, str] = {}
+
+
 def _git_email(brain: Path) -> str:
-    """Read `git config --get user.email` inside the vault (repo root == vault)."""
+    """Read (and cache per-vault) `git config --get user.email`."""
+    try:
+        key = str(brain.resolve())
+    except OSError:
+        return ""
+    if key in _git_email_cache:
+        return _git_email_cache[key]
     try:
         res = subprocess.run(
             ["git", "-C", str(brain), "config", "--get", "user.email"],
@@ -81,11 +123,31 @@ def _git_email(brain: Path) -> str:
             text=True,
             timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
+        _git_email_cache[key] = ""
         return ""
     if res.returncode != 0:
+        _git_email_cache[key] = ""
         return ""
-    return res.stdout.strip()
+    _git_email_cache[key] = res.stdout.strip()
+    return _git_email_cache[key]
+
+
+def _validated_or_raise(value: str, source: str) -> str:
+    """Validate a node identity before it is embedded in a journal row.
+
+    A configured identity that does not fit the charset (newline, `|`, or any
+    char outside ``NODE_ID_RE``) is an explicit-config error: raising (rather
+    than silently falling back) surfaces the misconfiguration so the audit log
+    can never be forged by an injected value.
+    """
+    if not NODE_ID_RE.match(value):
+        raise ValueError(
+            f"invalid federation node identity in {source}: value must match "
+            f"{NODE_ID_RE.pattern!r} and must not contain a newline or '|'; "
+            f"got {value!r}"
+        )
+    return value
 
 
 def node_id(brain: Path | None = None) -> str:
@@ -94,25 +156,44 @@ def node_id(brain: Path | None = None) -> str:
     Precedence:
       1. ``$BRAIN_NODE_ID`` env var — explicit operator override;
       2. ``<brain>/config/federation.json`` → ``node_id`` field;
-      3. ``git config --get user.email`` in the vault (git repo root);
-      4. ``"anonymous"`` — deterministic fallback so a single-user vault with
-         no federation config always keeps working and never raises.
+      3. git user.email — ONLY when the operator explicitly opts in
+         (``$BRAIN_NODE_ID_FROM_GIT=1`` or ``"node_id_from_git": true`` in
+         federation.json). Never used by default: it is operator PII that would
+         otherwise leak into a journal synced to every federation peer.
+      4. ``"anonymous"`` — deterministic default so a single-user vault with no
+         federation config keeps working and never leaks identity.
 
-    The value feeds ``node=...`` audit rows in ``wiki/log.md`` written by
-    import-tasks and sync, so every operation is attributable to the node
-    that produced it (t-2026-08-16-multi-user-federation-readines-s1).
+    The value feeds ``node=...`` audit rows in ``wiki/log.md``. It is
+    **self-declared and advisory** — a node names itself; nothing here verifies
+    that claim, so the rows are an audit aid, not authentication. A configured
+    identity (env or config) that would break the journal format raises
+    ``ValueError`` rather than silently falling back (t-2026-08-16-...).
     """
     env = os.environ.get(NODE_ID_ENV, "").strip()
     if env:
-        return env
+        return _validated_or_raise(env, f"${NODE_ID_ENV}")
     vault = brain_path(brain)
     configured = _config_node_id(vault)
     if configured:
-        return configured
-    email = _git_email(vault)
-    if email:
-        return email
+        return _validated_or_raise(configured, FEDERATION_CONFIG_FILE)
+    if _git_email_enabled(vault):
+        email = _git_email(vault)
+        if email:
+            return _validated_or_raise(email, "git config user.email")
     return NODE_ID_DEFAULT
+
+
+def node_audit_extra(node: str, *parts: str) -> str:
+    """Build the journal extra slot with ``node=`` always first.
+
+    Federation audit rows use the canonical four-slot line
+    (``op | id | agent | extra``). Node identity is self-declared and
+    advisory, and it always lives in extra — never in the agent slot — so
+    parsers see a stable ``node=`` token.
+    """
+    bits = [f"node={node}"]
+    bits.extend(part for part in parts if part)
+    return " | ".join(bits)
 
 
 def result(mode: str, repo: Path | None, brain: Path | None, findings: list[Finding]) -> dict[str, Any]:

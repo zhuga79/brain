@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import subprocess
 import sys
 from datetime import timedelta
@@ -464,6 +465,71 @@ def test_commit_journal_after_sync_commits_sync_audit_row(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert last == "chore: автозаписи журнала (brain-sync)"
+
+
+def _cycle_repo(root: Path) -> Path:
+    repo = root / "repo"
+    (repo / "wiki").mkdir(parents=True)
+    (repo / "tasks").mkdir(parents=True)
+    (repo / "MEMORY.md").write_text("# Test Brain\n")
+    (repo / "tasks" / "active.md").write_text("# Active\n")
+    (repo / "wiki" / "log.md").write_text("# Log\n")
+    (repo / ".gitignore").write_text(
+        ".locks/\n.brain/\n.provider-health.json\nhandoff/ORCHESTRATOR_HANDOFF.md\nwiki/_views/\n"
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "cycle@example.org"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Cycle"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+    return repo
+
+
+def test_apply_sync_passes_brain_and_commits_journal(tmp_path, monkeypatch, capsys):
+    """Successful cycle path: --brain is forwarded and post-sync journal is committed."""
+    repo = _cycle_repo(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_command_run(cmd, *, cwd=None, timeout=300):
+        seen["cmd"] = list(cmd)
+        seen["cwd"] = cwd
+        log = repo / "wiki" / "log.md"
+        log.write_text(
+            log.read_text(encoding="utf-8")
+            + "## [2026-08-30T00:00:00Z] federation-sync | /repo |  | node=n1 | status=ok\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"ok": true, "status": "synced"}', stderr="")
+
+    monkeypatch.setattr(sync, "command_run", fake_command_run)
+    args = argparse.Namespace(
+        brain=str(repo),
+        repo=str(repo),
+        timeout=30,
+        json=True,
+        apply=True,
+        rebuild_index=False,
+        dry_run=False,
+    )
+    assert sync.apply_sync(args) == 0
+    expected_repo = str(repo.resolve())
+    assert seen["cmd"] == [
+        "brain-federation", "sync", "--repo", expected_repo,
+        "--brain", expected_repo, "--json",
+    ]
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", "wiki/log.md"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert status == ""
+    last = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%s"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert last == "chore: автозаписи журнала (brain-sync)"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "synced"
+    assert payload["journal_committed"] is True
 
 
 def test_commit_journal_after_sync_leaves_unrelated_dirt(tmp_path):

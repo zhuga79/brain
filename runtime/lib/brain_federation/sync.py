@@ -5,21 +5,36 @@ import argparse
 import sys
 from pathlib import Path
 from .git_ops import git_pull_rebase, git_push, is_git_repo
-from .core import result, emit, exit_code, Finding, node_id
+from .core import (
+    result,
+    emit,
+    exit_code,
+    Finding,
+    node_id,
+    node_audit_extra,
+    FEDERATION_CONFIG_FILE,
+)
 from .merger import merge_blocks
-from .plan import utc_now
+from brain_core import journal
 import brain_task_parser
 
 
 def log_sync(brain: Path, repo: Path, status: str) -> None:
-    """Append a node-attributed federation-sync audit row to wiki/log.md."""
-    log_path = brain / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    node = node_id(brain)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"## [{utc_now()}] federation-sync | {repo} | node={node} | status={status}\n"
-        )
+    """Append a node-attributed federation-sync audit row to wiki/log.md.
+
+    The row is written through the shared journal lock (``journal.append_line``)
+    so concurrent timers/agents that read and rewrite the whole log cannot lose
+    this writer's line. ``node=`` always lives in the extra (4th) slot.
+    """
+    journal.append_line(
+        journal.format_entry(
+            "federation-sync",
+            str(repo),
+            "",
+            node_audit_extra(node_id(brain), f"status={status}"),
+        ),
+        brain,
+    )
 
 
 def cmd_merge_tasks(args: argparse.Namespace) -> int:
@@ -82,7 +97,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     brain = Path(args.brain).expanduser() if getattr(args, "brain", None) else repo
     findings: list[Finding] = []
-    
+
+    try:
+        node_id(brain)
+    except ValueError as exc:
+        findings.append(Finding(
+            "federation-node-invalid", "block", FEDERATION_CONFIG_FILE,
+            str(exc),
+            "fix the node identity (or $BRAIN_NODE_ID) to a charset-safe value",
+        ))
+        data = result("sync", repo, brain, findings)
+        emit(data, args.json)
+        return exit_code(findings)
+
     print(f"Syncing {repo}...")
     
     # 1. Pull --rebase

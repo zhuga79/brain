@@ -175,7 +175,8 @@ def apply_sync(args: argparse.Namespace) -> int:
 
     try:
         sync_proc = command_run(
-            ["brain-federation", "sync", "--repo", str(repo), "--json"], cwd=repo, timeout=args.timeout
+            ["brain-federation", "sync", "--repo", str(repo), "--brain", str(brain), "--json"],
+            cwd=repo, timeout=args.timeout,
         )
     except subprocess.TimeoutExpired:
         journal_committed = commit_journal_after_sync(repo, journal_committed)

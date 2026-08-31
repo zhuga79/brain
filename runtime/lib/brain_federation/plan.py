@@ -12,18 +12,20 @@ import time
 from pathlib import Path
 from typing import Any
 
-from brain_core import taskfile
+from brain_core import journal, taskfile
 
 from .core import (
     AGENT_ID_RE,
     SCHEMA_VERSION,
     TASK_ID_RE,
+    FEDERATION_CONFIG_FILE,
     Finding,
     brain_path,
     emit,
     exit_code,
     has_block,
     node_id,
+    node_audit_extra,
     result,
 )
 from .checks import (
@@ -467,18 +469,27 @@ def log_imports(
     plan: dict[str, Any],
     imports: list[dict[str, Any]],
 ) -> None:
-    log_path = brain / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     plan_ref = plan.get("plan_id", str(plan_path))
     node = node_id(brain)
-    with log_path.open("a", encoding="utf-8") as handle:
-        for task in imports:
-            handle.write(
-                f"## [{utc_now()}] federation-import-task | {task['id']} | {agent} | node={node} | plan={plan_ref}\n"
-            )
-        handle.write(
-            f"## [{utc_now()}] federation-import-summary | import-tasks | {agent} | node={node} | count={len(imports)} plan={plan_ref}\n"
+    for task in imports:
+        journal.append_line(
+            journal.format_entry(
+                "federation-import-task",
+                task["id"],
+                agent,
+                node_audit_extra(node, f"plan={plan_ref}"),
+            ),
+            brain,
         )
+    journal.append_line(
+        journal.format_entry(
+            "federation-import-summary",
+            "import-tasks",
+            agent,
+            node_audit_extra(node, f"count={len(imports)} plan={plan_ref}"),
+        ),
+        brain,
+    )
 
 
 def import_result(
@@ -684,13 +695,18 @@ def write_proposal_artifacts(
     (proposal_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    log_path = brain / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"## [{utc_now()}] federation-proposal-batch | write-wiki-proposals | {agent}"
-            f" | count={len(written)} plan={plan.get('plan_id', str(plan_path))}\n"
-        )
+    journal.append_line(
+        journal.format_entry(
+            "federation-proposal-batch",
+            "write-wiki-proposals",
+            agent,
+            node_audit_extra(
+                node_id(brain),
+                f"count={len(written)} plan={plan.get('plan_id', str(plan_path))}",
+            ),
+        ),
+        brain,
+    )
     return proposal_dir, written, findings
 
 
@@ -758,6 +774,18 @@ def cmd_import_tasks(args: argparse.Namespace) -> int:
         emit(data, args.json)
         return exit_code(findings)
 
+    try:
+        node_id(brain)
+    except ValueError as exc:
+        findings.append(Finding(
+            "federation-node-invalid", "block", FEDERATION_CONFIG_FILE,
+            str(exc),
+            "fix the node identity (or $BRAIN_NODE_ID) to a charset-safe value",
+        ))
+        data = import_result(plan, plan_path, args.agent, False, findings, [])
+        emit(data, args.json)
+        return exit_code(findings)
+
     locked = False
     try:
         ok, owner = acquire_import_lock(brain, args.agent)
@@ -805,6 +833,18 @@ def cmd_write_wiki_proposals(args: argparse.Namespace) -> int:
 
     if dry_run:
         data = proposal_result(plan, plan_path, args.agent, True, findings)
+        emit(data, args.json)
+        return exit_code(findings)
+
+    try:
+        node_id(brain)
+    except ValueError as exc:
+        findings.append(Finding(
+            "federation-node-invalid", "block", FEDERATION_CONFIG_FILE,
+            str(exc),
+            "fix the node identity (or $BRAIN_NODE_ID) to a charset-safe value",
+        ))
+        data = proposal_result(plan, plan_path, args.agent, False, findings, None, [])
         emit(data, args.json)
         return exit_code(findings)
 
