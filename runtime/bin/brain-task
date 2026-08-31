@@ -22,6 +22,7 @@ brain-task — управление очередью задач
   brain-task show <id> [--json]       подробности задачи
   brain-task deps <id>                граф зависимостей задачи
   brain-task add "<text>" [--role R] [--mode M] [--prio P0|P1|P2|P3]
+                          [--acceptance A] [--council R,R] [--depends-on ID,ID]
   brain-task take <id> --as <agent-id>     лок + пометить [~]
   brain-task release <id> --as <agent-id>  снять лок + вернуть [ ]
   brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
@@ -119,24 +120,49 @@ case "$cmd" in
     ;;
 
   add)
-    text="${1:-}"; shift || true
-    [ -z "$text" ] && { echo 'brain-task add "text" [--role R] [--mode M] [--prio P]'; exit 1; }
+    text=""
     role="developer"; mode="solo"; prio="P2"
+    acceptance=""; council=""; depends_on=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --role) role="$2"; shift 2;;
-        --mode) mode="$2"; shift 2;;
-        --prio) prio="$2"; shift 2;;
-        *) shift;;
+        --role|--mode|--prio|--acceptance|--council|--depends-on)
+          [ $# -ge 2 ] || { echo "error: $1 требует значение" >&2; exit 2; }
+          case "$1" in
+            --role) role="$2";;
+            --mode) mode="$2";;
+            --prio) prio="$2";;
+            --acceptance) acceptance="$2";;
+            --council) council="$2";;
+            --depends-on) depends_on="$2";;
+          esac
+          shift 2;;
+        -h|--help)
+          usage
+          exit 0;;
+        --*)
+          echo "error: неизвестная опция: $1" >&2
+          exit 2;;
+        *)
+          if [ -n "$text" ]; then
+            echo "error: неожиданный аргумент: $1" >&2
+            exit 2
+          fi
+          text="$1"
+          shift;;
       esac
     done
+    [ -z "$text" ] && { echo 'brain-task add "text" [--role R] [--mode M] [--prio P] [--acceptance A] [--council R,R] [--depends-on ID,ID]'; exit 1; }
     # Выдача идентификатора и сборка блока — часть контракта очереди, поэтому
     # живут в brain_app.queue: свои копии здесь и в MCP расходились в правилах
     # слага и в проверке занятости id.
     # Журнал и коммит — только после подтверждённой мутации: argparse --help
     # выходит с нулём и печатает справку в stdout, это не id задачи.
+    py_args=(--brain "$BRAIN" add "$text" --role "$role" --mode "$mode" --prio "$prio")
+    [ -n "$acceptance" ] && py_args+=(--acceptance "$acceptance")
+    [ -n "$council" ] && py_args+=(--council "$council")
+    [ -n "$depends_on" ] && py_args+=(--depends-on "$depends_on")
     set +e
-    id="$(_py brain_app.queue --brain "$BRAIN" add "$text" --role "$role" --mode "$mode" --prio "$prio")"
+    id="$(_py brain_app.queue "${py_args[@]}")"
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then

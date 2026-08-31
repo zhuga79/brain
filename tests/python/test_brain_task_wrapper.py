@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from brain_app import queue
+
 REPO = Path(__file__).resolve().parents[2]
 BIN = REPO / "runtime" / "bin"
 BRAIN_TASK = BIN / "brain-task"
@@ -110,9 +112,9 @@ def test_add_help_does_not_journal_or_commit(tmp_path):
     assert (brain / "tasks" / "active.md").read_text(encoding="utf-8") == active_before
     assert _commits(brain) == commits_before
     assert not any("usage:" in subject for subject in _commits(brain))
-    # Справка может печататься, но мутации нет. Ненулевой код тоже допустим:
-    # python-слой с --help выходит 0, обёртка обязана отказать без журнала.
-    assert result.returncode != 0 or "usage:" in (result.stdout + result.stderr)
+    # Справка — не мутация. Обёртка может показать свой usage и выйти 0;
+    # python-слой с --help выходит 0 со справкой argparse. Журнала нет в обоих случаях.
+    assert "brain-task add" in (result.stdout + result.stderr) or result.returncode != 0
 
 
 @pytest.mark.integration
@@ -213,3 +215,104 @@ def test_every_journal_branch_gates_log_op():
             assert re.search(r'\[ "\$rc" -eq 0 \]', block)
         else:
             assert "|| exit" in block or "if !" in block, name
+
+
+# ── t-2026-08-14-task-add-option-passthrough ──────────────────────────────
+
+
+def _added_id(result: subprocess.CompletedProcess) -> str:
+    match = re.search(r"added: (t-[A-Za-z0-9_.-]+)", result.stdout)
+    assert match, result.stdout + result.stderr
+    return match.group(1)
+
+
+def _usage_text() -> str:
+    source = BRAIN_TASK.read_text(encoding="utf-8")
+    start = source.index("cat <<'USAGE'")
+    end = source.index("USAGE", start + len("cat <<'USAGE'"))
+    return source[start:end]
+
+
+ADD_OPTION_CASES = (
+    ("--role", "architect", "role", "architect"),
+    ("--mode", "council", "mode", "council"),
+    ("--prio", "P0", "prio", "P0"),
+    ("--acceptance", "критерий готов", "acceptance", "критерий готов"),
+    ("--council", "architect,reviewer", "council", ["architect", "reviewer"]),
+    ("--depends-on", "t-dep-one", "deps", ["t-dep-one"]),
+)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("flag", "value", "field", "expected"), ADD_OPTION_CASES)
+def test_add_forwards_each_documented_option(tmp_path, flag, value, field, expected):
+    """Каждая опция из help доходит до ядра; --acceptance не остаётся TODO."""
+    home = tmp_path / "home"
+    home.mkdir()
+    brain = _brain(tmp_path)
+    result = _run(brain, home, "add", "Passthrough option", flag, value)
+    assert result.returncode == 0, result.stdout + result.stderr
+    info, raw = queue.find(_added_id(result), brain)
+    assert info[field] == expected
+    if field == "acceptance":
+        assert "acceptance: TODO" not in raw
+
+
+@pytest.mark.integration
+def test_add_unknown_option_is_rejected(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    brain = _brain(tmp_path)
+    active_before = (brain / "tasks" / "active.md").read_text(encoding="utf-8")
+    log_before = _log_text(brain)
+
+    result = _run(brain, home, "add", "Unknown flag", "--bogus", "1")
+    assert result.returncode != 0, result.stdout
+    combined = result.stdout + result.stderr
+    assert "bogus" in combined.lower() or "неизвестн" in combined
+    assert (brain / "tasks" / "active.md").read_text(encoding="utf-8") == active_before
+    assert _log_text(brain) == log_before
+
+
+def test_add_help_declares_every_forwarded_option():
+    usage = _usage_text()
+    assert "brain-task add" in usage
+    for opt in ("--role", "--mode", "--prio", "--acceptance", "--council", "--depends-on"):
+        assert opt in usage, opt
+
+
+@pytest.mark.integration
+def test_cli_and_mcp_add_produce_identical_blocks(tmp_path):
+    """CLI-обёртка и MCP add_task (оба через queue.add) дают один блок полей."""
+    home = tmp_path / "home"
+    home.mkdir()
+    cli_brain = _brain(tmp_path / "cli")
+    mcp_brain = tmp_path / "mcp"
+    (mcp_brain / "tasks").mkdir(parents=True)
+    (mcp_brain / "wiki").mkdir()
+    (mcp_brain / "tasks" / "active.md").write_text("# Active Tasks\n", encoding="utf-8")
+    (mcp_brain / "tasks" / "done.md").write_text("# Done\n", encoding="utf-8")
+
+    title = "Same block both paths"
+    cli = _run(
+        cli_brain, home, "add", title,
+        "--role", "architect", "--mode", "council", "--prio", "P1",
+        "--acceptance", "готово",
+        "--council", "architect,reviewer",
+        "--depends-on", "t-open",
+    )
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    _, cli_raw = queue.find(_added_id(cli), cli_brain)
+
+    mcp_id = queue.add(
+        title, mcp_brain, role="architect", mode="council", priority="P1",
+        council=["architect", "reviewer"], depends_on=["t-open"], acceptance="готово",
+    )
+    _, mcp_raw = queue.find(mcp_id, mcp_brain)
+
+    def _norm(raw: str) -> str:
+        return re.sub(r"t-[0-9]{4}-[0-9]{2}-[0-9]{2}-[A-Za-z0-9_.-]+", "t-ID", raw).strip()
+
+    assert _norm(cli_raw) == _norm(mcp_raw)
+    assert "acceptance: готово" in cli_raw
+    assert "acceptance: TODO" not in cli_raw
