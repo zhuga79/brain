@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from brain_core import clock, journal
+from brain_core import atomic, clock, journal
 
 from . import corrective, runner, systemd
 
@@ -36,16 +37,58 @@ def corrective_title(down: dict[str, dict[str, str]]) -> str:
     return f"Fix down providers: {summary}"
 
 
-def append_corrective_task(brain: Path, down: dict[str, dict[str, str]]) -> tuple[bool, str]:
+def failure_report_path(brain: Path, ts: dt.datetime) -> Path:
+    """Куда ложится отчёт об упавшем провайдере — wiki под временной меткой."""
+    return brain / "wiki" / f"provider-probe-{clock.stamp_for_filename(ts)}.md"
+
+
+def write_failure_report(brain: Path, ts: dt.datetime, down: dict[str, dict[str, str]]) -> Path:
+    """Записать список упавших провайдеров в момент отказа.
+
+    Тот же контракт, что у validate/model-fleet: corrective-задаче остаётся
+    «diagnosed», опираясь на записанное здесь, а не на память.
+    """
+    path = failure_report_path(brain, ts)
+    lines = [
+        "---",
+        "title: Provider Probe Failure",
+        "type: concept",
+        f"created: {ts.strftime('%Y-%m-%d')}",
+        f"updated: {ts.strftime('%Y-%m-%d')}",
+        "curation: agent",
+        "source_policy: ignored",
+        "tags: [provider-probe]",
+        "---",
+        "",
+        f"# Provider Probe Failure {clock.utc_now(ts)}",
+        "",
+        f"- source: {SOURCE}",
+        "",
+        "## Down providers",
+        "",
+    ]
+    if down:
+        for role, info in sorted(down.items()):
+            lines.append(f"- {role}: preferred `{info['key']}` status `{info['status']}`")
+    else:
+        lines.append("- none recorded")
+    lines.append("")
+    atomic.write_text(path, "\n".join(lines))
+    return path
+
+
+def append_corrective_task(brain: Path, down: dict[str, dict[str, str]], report_rel: str) -> tuple[bool, str]:
     item = corrective.Corrective(
         title=corrective_title(down),
         source=SOURCE,
         role="pm",
         priority="P1",
         slug="provider-down-fix",
+        ref=report_rel,
         acceptance=(
             "the down provider/CLI is restored or the role repointed; brain-provider status "
-            "shows no preferred.status == error."
+            "shows no preferred.status == error. Diagnosis must rest on the recorded down "
+            f"providers in `{report_rel}`, not on memory."
         ),
     )
     added = corrective.append(brain, [item])
@@ -137,10 +180,14 @@ def run_cycle(brain: Path, *, dry_run: bool) -> dict[str, Any]:
         if dry_run:
             result["action"] = "report"
         else:
-            created, message = append_corrective_task(brain, down)
+            ts = clock.now()
+            report = write_failure_report(brain, ts, down)
+            report_rel = str(report.relative_to(brain))
+            result["report"] = report_rel
+            created, message = append_corrective_task(brain, down, report_rel)
             result["task_created"] = created
             result["task_message"] = message
-            append_log(brain, f"provider-probe: FAILED - {message} ({len(down)} down)")
+            append_log(brain, f"provider-probe: FAILED - {message} ({len(down)} down) report={report_rel}")
     else:
         result["status"] = "success"
         result["message"] = "All providers healthy."
@@ -169,6 +216,7 @@ def run(args: argparse.Namespace) -> int:
                 print(f"  - {role}: {info['key']} ({info['status']})")
         for label, key in (
             ("Task", "task_message"),
+            ("Report", "report"),
             ("Probe Error", "probe_error"),
             ("Status Error", "status_error"),
         ):

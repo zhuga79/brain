@@ -130,6 +130,28 @@ if ! grep -q '"task_created": false' "$BRAIN_FACTORY_TMP/failure2.json"; then
 fi
 echo "    Deduplication OK"
 
+# --- Test Case 3b: failure report persists the validator's output at failure time ---
+echo ">>> [3b] Failure report preserves stdout/stderr for the diagnosing closer"
+# The first failure wrote a report under wiki/; it must carry the validator output
+# and the corrective must reference it (ref:) so "diagnosed" rests on recorded state.
+report_file=$(ls "$BRAIN_PATH"/wiki/validate-cycle-*.md 2>/dev/null | head -n1 || true)
+if [ -z "$report_file" ]; then
+  echo "FAILED: No validate-cycle failure report written under wiki/."
+  ls -la "$BRAIN_PATH/wiki" || true
+  exit 1
+fi
+if ! grep -q "ERROR: Invalid task reference 't-invalid-task-ref'" "$report_file"; then
+  echo "FAILED: Failure report does not contain the validator stdout."
+  cat "$report_file"
+  exit 1
+fi
+if ! grep -q "^      ref: wiki/validate-cycle-" "$BRAIN_PATH/tasks/active.md"; then
+  echo "FAILED: Corrective task does not reference the failure report (ref: wiki/validate-cycle-...)."
+  cat "$BRAIN_PATH/tasks/active.md"
+  exit 1
+fi
+echo "    Failure report persistence OK"
+
 # --- Test Case 4: systemd install ---
 echo ">>> [4] Testing systemd installation"
 unit_dir="$BRAIN_FACTORY_TMP/systemd-user"
