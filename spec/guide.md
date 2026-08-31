@@ -656,25 +656,31 @@ Task blocks use the same continuation-line format as the root queue:
 
 - `depends_on: [task-id-1, task-id-2, ...]` — a bracketed, comma-separated list
   of task ids that must be done before this task becomes available.
+- An empty list `[]` is valid (no dependencies).
 - Empty components are rejected: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`.
 - Duplicate ids inside the list are rejected (`[task-x, task-x]`).
 - The `depends_on` field may appear at most once per task — a repeated field on
   the same continuation line or across lines is rejected. Field order on the
   line does not matter (shared `grammar.parse_fields` parser).
+- A field-name mention inside paired backticks (inline code) is not a field,
+  even when the span contains two spaces before `depends_on:`.
 
 Parsing is fail-closed: `parse_local_tasks` rejects malformed or duplicate
 `depends_on`, duplicate task ids, self- and cyclic dependencies, and missing
 dependencies `before` building the graph, selecting or mutating anything. The
 operations behave as follows:
 
-- `next_local_task` — skips tasks with unmet dependencies (returns `None` when
-  nothing is available). Never mutates files.
+- `next_local_task` — skips tasks not in `[ ]` (including already `[x]`) and
+  tasks with unmet dependencies (returns `None` when nothing is available).
+  Only `[x]` satisfies a dependency; open, in-progress and blocked do not.
+  Never mutates files.
 - `take_local_task` — if a task has unmet dependencies, rejects with `ValueError`
   before mutating `TASKS.md` or `LOG.md`; the task stays `[ ]` and no log entry
-  is written.
+  is written. An already `[x]` task is rejected without mutation.
 - `complete_local_task` — if a task has unmet dependencies, rejects with
-  `ValueError` before mutating `TASKS.md` or `LOG.md`; the task stays `[~]` and
-  no log entry is written.
+  `ValueError` before mutating `TASKS.md` or `LOG.md`, even if the task is
+  already `[x]`; state is unchanged and no log entry is written. An already
+  `[x]` task with the same `by`+`model` is an idempotent no-op.
 
 Contending `take`/`complete` calls serialize on the workspace queue lock
 (`.workspace-queue.lock`); a take that wins the lock is the only one that

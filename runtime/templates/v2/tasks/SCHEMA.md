@@ -26,10 +26,12 @@
   команд `[team:legal]` либо смесь
 - `depends_on:` — id задач, которые должны быть `[x]`, прежде чем эта станет available.
   **Синтаксис:** `depends_on: [task-id-1, task-id-2, ...]` — bracketed list, comma-separated.
+  Пустой список `[]` допустим (зависимостей нет).
   Пустые компоненты запрещены: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]` → ошибка парсинга.
   Дубликаты внутри списка запрещены: `[task-x, task-x]` → ошибка парсинга.
   Поле `depends_on` может встречаться **только один раз** на задачу; повторное поле → ошибка парсинга.
   Поле распознаётся в любой позиции среди полей строки продолжения (используется общий парсер `grammar.parse_fields`).
+  Упоминание имени поля внутри парных обратных кавычек (inline code) полем не является — даже если внутри span есть два пробела перед `depends_on:`.
 - `due:` — опционально
 - `tags:` — опционально
 - `acceptance:` — обязательно
@@ -55,13 +57,14 @@
 - **Дубликаты поля `depends_on`** — два `depends_on:` в одном блоке → `ValueError: Task <id> has duplicate depends_on field`.
 - **Самозависимость** — `depends_on: [task-a]` в задаче `task-a` → `ValueError: Task task-a has self-dependency in depends_on`.
 - **Отсутствующие зависимости** — `depends_on: [missing-id]` → `ValueError: Task <id> has missing dependency: missing-id`.
-- **Циклы** — `A → B → A` → `ValueError: Dependency cycle detected involving: <node>`.
+- **Циклы** — `A → B → A` и `A → B → C → A` → `ValueError: Dependency cycle detected involving: <node>`.
+- **Уже закрытые задачи (`[x]`)** — `next` пропускает; `take` отклоняет (ожидается open); `complete` с тем же `by`+`model` — идемпотентный no-op без записи в лог.
 
 **Поведение операций `next_local_task` / `take_local_task` / `complete_local_task`:**
 
-- `next_local_task`: пропускает задачи с невыполненными deps (возвращает `None`, если доступных нет). Не мутирует файлы.
-- `take_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`. Состояние задачи остаётся `[ ]`, лог не пишется.
-- `complete_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`. Состояние задачи остаётся `[~]`, лог не пишется.
+- `next_local_task`: пропускает задачи не в `[ ]` (включая уже `[x]`) и задачи с невыполненными deps (возвращает `None`, если доступных нет). Невыполненная зависимость — любая не `[x]` (open, in-progress, blocked). Не мутирует файлы.
+- `take_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`. Состояние задачи остаётся `[ ]`, лог не пишется. Уже `[x]` отклоняется без мутации.
+- `complete_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`, даже если задача уже `[x]`. Состояние не меняется, лог не пишется. Уже `[x]` с тем же `by`+`model` — идемпотентный no-op.
 
 ## Машинное состояние во время работы
 Когда задача в работе, к ней дописывается:

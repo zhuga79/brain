@@ -1,3 +1,4 @@
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import os
 import subprocess
@@ -1164,6 +1165,61 @@ def test_parse_local_tasks_depends_on_cycle_raises(tmp_path):
         raise AssertionError("parse should have failed for dependency cycle")
 
 
+def test_parse_local_tasks_depends_on_three_node_cycle_raises(tmp_path):
+    """A→B→C→A is rejected the same way as a two-node cycle."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - A
+      role: developer
+      depends_on: [task-b]
+      acceptance: A.
+- [ ] [P1] task-b - B
+      role: developer
+      depends_on: [task-c]
+      acceptance: B.
+- [ ] [P1] task-c - C
+      role: developer
+      depends_on: [task-a]
+      acceptance: C.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "cycle" in str(exc).lower()
+    else:
+        raise AssertionError("parse should have failed for three-node cycle")
+
+
+def test_parse_local_tasks_diamond_depends_on_is_not_a_cycle(tmp_path):
+    """A diamond (C→A, C→B, A and B independent) is a DAG, not a cycle."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [x] [P1] task-a - A
+      role: developer
+      acceptance: A.
+- [x] [P1] task-b - B
+      role: developer
+      acceptance: B.
+- [ ] [P1] task-c - C
+      role: developer
+      depends_on: [task-a, task-b]
+      acceptance: C.
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_local_tasks(tasks)
+    task_c = next(t for t in parsed if t.task_id == "task-c")
+    assert task_c.depends_on == ("task-a", "task-b")
+
+
 def test_next_local_task_skips_open_task_with_unmet_dependency(tmp_path):
     """next_local_task skips open tasks whose deps are not all done."""
     tasks = tmp_path / "TASKS.md"
@@ -1187,6 +1243,31 @@ def test_next_local_task_skips_open_task_with_unmet_dependency(tmp_path):
     task = next_local_task(tasks, role="developer")
     assert task is not None
     assert task.task_id == "task-a"
+
+
+@pytest.mark.parametrize("dep_mark,dep_state", [
+    ("~", "in-progress"),
+    ("!", "blocked"),
+])
+def test_next_local_task_skips_when_dependency_is_not_done(tmp_path, dep_mark, dep_state):
+    """Only [x] satisfies a dependency; in-progress and blocked do not."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        f"""# Local Tasks
+
+- [{dep_mark}] [P1] task-a - First task
+      role: developer
+      acceptance: First task {dep_state}.
+
+- [ ] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Depends on task-a.
+""",
+        encoding="utf-8",
+    )
+
+    assert next_local_task(tasks, role="developer") is None
 
 
 def test_next_local_task_returns_task_when_deps_are_done(tmp_path):
@@ -1386,6 +1467,170 @@ def test_complete_local_task_succeeds_when_deps_met(tmp_path):
     assert "- [x] [P1] task-b" in content
     assert "model: openai-gpt-5.4" in content
     assert "completed:" in content
+
+
+def test_next_local_task_skips_already_done_task(tmp_path):
+    """next never returns an already-done task, even when its deps are met."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+
+- [x] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Already done.
+""",
+        encoding="utf-8",
+    )
+
+    assert next_local_task(tasks, role="developer") is None
+
+
+def test_take_local_task_rejects_already_done_no_mutation(tmp_path):
+    """take of an already-done task is rejected before any mutation."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    tasks_text = """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T10:00:00Z
+      by: agent-x
+
+- [x] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Already done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T11:00:00Z
+      by: agent-a
+"""
+    (workspace / "TASKS.md").write_text(tasks_text, encoding="utf-8")
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    try:
+        take_local_task(workspace, "task-b", "agent-b")
+    except ValueError as exc:
+        assert "expected state open" in str(exc)
+    else:
+        raise AssertionError("take of already-done task unexpectedly succeeded")
+
+    assert (workspace / "TASKS.md").read_text(encoding="utf-8") == tasks_text
+    assert "took task-b" not in (workspace / "LOG.md").read_text(encoding="utf-8")
+
+
+def test_complete_local_task_already_done_is_idempotent_when_deps_met(tmp_path):
+    """complete of an already-done task with matching owner+model is a no-op."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    tasks_text = """# Local Tasks
+
+- [x] [P1] task-a - First task
+      role: developer
+      acceptance: First task done.
+      model: openai-gpt-5.4
+      completed: 2026-08-14T10:00:00Z
+      by: agent-x
+
+- [x] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Already done.
+      started: 2026-08-14T11:00:00Z
+      by: agent-a
+      model: openai-gpt-5.4
+      completed: 2026-08-14T12:00:00Z
+"""
+    log_text = "# Local Log\n"
+    (workspace / "TASKS.md").write_text(tasks_text, encoding="utf-8")
+    (workspace / "LOG.md").write_text(log_text, encoding="utf-8")
+
+    task = complete_local_task(workspace, "task-b", "agent-a", "openai-gpt-5.4", "done again")
+
+    assert task.state == "done"
+    assert task.task_id == "task-b"
+    assert (workspace / "TASKS.md").read_text(encoding="utf-8") == tasks_text
+    assert (workspace / "LOG.md").read_text(encoding="utf-8") == log_text
+    assert not (workspace / ".workspace-queue-journal.json").exists()
+
+
+def test_complete_local_task_rejects_already_done_with_unmet_deps(tmp_path):
+    """complete stays fail-closed on unmet deps even if the task is already [x]."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    tasks_text = """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      acceptance: First task still open.
+
+- [x] [P1] task-b - Second task
+      role: developer
+      depends_on: [task-a]
+      acceptance: Inconsistent already-done.
+      started: 2026-08-14T11:00:00Z
+      by: agent-a
+      model: openai-gpt-5.4
+      completed: 2026-08-14T12:00:00Z
+"""
+    (workspace / "TASKS.md").write_text(tasks_text, encoding="utf-8")
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    try:
+        complete_local_task(workspace, "task-b", "agent-a", "openai-gpt-5.4", "done")
+    except ValueError as exc:
+        assert "dependenc" in str(exc).lower() or "unmet" in str(exc).lower()
+        assert "task-a" in str(exc)
+    else:
+        raise AssertionError("complete of already-done task with unmet deps succeeded")
+
+    assert (workspace / "TASKS.md").read_text(encoding="utf-8") == tasks_text
+    assert "done" not in (workspace / "LOG.md").read_text(encoding="utf-8")
+
+
+def test_take_and_complete_reject_when_one_of_several_deps_unmet(tmp_path):
+    """A task with two deps is unavailable until every listed dependency is [x]."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
+    tasks_text = """# Local Tasks
+
+- [x] [P1] task-a - First
+      role: developer
+      acceptance: Done.
+
+- [ ] [P1] task-b - Second
+      role: developer
+      acceptance: Still open.
+
+- [ ] [P1] task-c - Third
+      role: developer
+      depends_on: [task-a, task-b]
+      acceptance: Needs both.
+"""
+    (workspace / "TASKS.md").write_text(tasks_text, encoding="utf-8")
+    (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
+
+    assert next_local_task(workspace / "TASKS.md", role="developer").task_id == "task-b"
+
+    try:
+        take_local_task(workspace, "task-c", "agent-a")
+    except ValueError as exc:
+        assert "dependenc" in str(exc).lower()
+        assert "task-b" in str(exc)
+    else:
+        raise AssertionError("take should have failed while task-b is open")
+
+    assert (workspace / "TASKS.md").read_text(encoding="utf-8") == tasks_text
 
 
 def test_recover_workspace_transaction_preserves_depends_on(tmp_path):
@@ -1622,8 +1867,11 @@ def test_duplicate_depends_on_detector_ignores_prose_and_backticked_mentions(tmp
         "      role: developer   depends_on: [task-a]   acceptance: use depends_on: [task-a] in prose",
         # prose mention at the very start of a value
         "      acceptance: depends_on: [task-a] is the syntax   role: developer   depends_on: [task-a]",
-        # backticked mention
+        # backticked mention without a two-space field boundary inside the span
         "      role: developer   depends_on: [task-a]   acceptance: write `depends_on: [task-a]` verbatim",
+        # two-space field-like text inside inline code must not split or duplicate
+        "      role: developer   depends_on: [task-a]   acceptance: write `role: developer   depends_on: [task-a]` verbatim",
+        "      acceptance: see `role: x   depends_on: [a]   mode: solo`   depends_on: [task-a]   role: developer",
     ]
     for fields_line in cases:
         tasks = tmp_path / "TASKS.md"
@@ -1708,6 +1956,25 @@ def test_parse_local_tasks_rejects_empty_depends_on_components(tmp_path, bad_lis
         raise AssertionError(f"parse should have failed for empty component in {bad_list}")
 
 
+def test_parse_local_tasks_empty_depends_on_list_is_valid(tmp_path):
+    """depends_on: [] means no dependencies; the task is available."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: []
+      acceptance: No dependencies.
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_local_tasks(tasks)
+    assert parsed[0].depends_on == ()
+    assert next_local_task(tasks, role="developer").task_id == "task-a"
+
+
 # --- Issue 2: Reject duplicate task IDs deterministically ---
 
 def test_parse_local_tasks_rejects_duplicate_task_ids(tmp_path):
@@ -1767,25 +2034,27 @@ def test_parse_local_tasks_duplicate_ids_rejected_before_depends_on_validation(t
 # --- Issue 3: Deterministic concurrency via ordered_lock ---
 #
 # ordered_lock installs a *wrapper* around the workspace queue lock so a test
-# can force a known entry order between two threads.  The real lock serializes
-# the second thread behind the first; a nullcontext lets the second thread run
-# concurrently (overtake).  Each of the four scenarios below runs the same two
-# operations twice — once with the real lock, once with a nullcontext — and
-# asserts the two orderings differ.  No sleeps, barriers or scheduling luck are
+# can force a known entry order between two threads. The only thing a scenario
+# varies between its two runs is ``inner_factory``: the real ``_queue_lock``
+# (a mutex) on one side, a bare nullcontext on the other. The orchestration is
+# otherwise identical — the driver observes whether the second thread actually
+# *entered* its inner context (which is decided by the lock itself: a real mutex
+# keeps the second out until the first exits; a nullcontext admits it at once)
+# and adapts one bounded release accordingly. Each scenario runs twice and
+# asserts the two orderings differ. No sleeps, barriers or scheduling luck are
 # involved: the wrapper gates on Events with bounded timeouts only.
-
-from contextlib import contextmanager, nullcontext
 
 
 @contextmanager
 def _ordered_lock(workspace, inner_factory, first_name,
-                  first_entered, release_first, second_attempted):
+                  first_entered, release_first, second_attempted, second_entered):
     """Force a deterministic entry order for the workspace lock.
 
     * a thread whose name == *first_name*: signal ``first_entered``, block on
       ``release_first`` (bounded timeout), then yield inside the inner context;
-    * any other thread: signal ``second_attempted`` *before* entering
-      ``inner_factory(workspace)``, then yield inside the inner context.
+    * any other thread: signal ``second_attempted`` *before* it tries to acquire
+      (it will block there on a real mutex), then signal ``second_entered`` from
+      *inside* the inner context (i.e. only once it has actually entered).
     """
     if threading.current_thread().name == first_name:
         with inner_factory(workspace):
@@ -1796,7 +2065,24 @@ def _ordered_lock(workspace, inner_factory, first_name,
     else:
         second_attempted.set()
         with inner_factory(workspace):
+            second_entered.set()
             yield
+
+
+_TASKS_TEMPLATE = (
+    "# Local Tasks\n"
+    "\n"
+    "- [~] [P1] task-a - First task\n"
+    "      role: developer\n"
+    "      acceptance: First task done.\n"
+    "      started: 2026-08-14T10:00:00Z\n"
+    "      by: agent-a\n"
+    "\n"
+    "- [ ] [P1] task-b - Second task\n"
+    "      role: developer\n"
+    "      depends_on: [task-a]\n"
+    "      acceptance: Depends on task-a.\n"
+)
 
 
 def _dep_workspace(tmp_path, label="workspace"):
@@ -1804,32 +2090,25 @@ def _dep_workspace(tmp_path, label="workspace"):
     workspace = tmp_path / label
     workspace.mkdir()
     (workspace / "BRAIN.md").write_text("# Workspace\n", encoding="utf-8")
-    (workspace / "TASKS.md").write_text(
-        """# Local Tasks
-
-- [~] [P1] task-a - First task
-      role: developer
-      acceptance: First task done.
-      started: 2026-08-14T10:00:00Z
-      by: agent-a
-
-- [ ] [P1] task-b - Second task
-      role: developer
-      depends_on: [task-a]
-      acceptance: Depends on task-a.
-""",
-        encoding="utf-8",
-    )
+    (workspace / "TASKS.md").write_text(_TASKS_TEMPLATE, encoding="utf-8")
     (workspace / "LOG.md").write_text("# Local Log\n", encoding="utf-8")
     return workspace
 
 
 def _run_ordered_pair(monkeypatch, workspace, *, null, first_op, second_op):
-    """Start two threads in forced order and return {thread-name: result}.
+    """Start two threads in forced order; return ``(results, overtook)``.
 
-    *null*: when True, the inner factory is a nullcontext (so the second thread
-    overtakes); when False, it is the real ``_queue_lock`` captured before the
-    wrapper is installed via monkeypatch (restored automatically by pytest).
+    `overtook` is True exactly when the second thread entered its inner context
+    *before* the first was released. A real ``_queue_lock`` mutex cannot let a
+    second thread in until the first exits, so `overtook` is False; a bare
+    nullcontext admits the second at once, so `overtook` is True. The scenario
+    only varies ``inner_factory`` (real mutex vs nullcontext) and otherwise
+    follows one adaptive path: it watches how far the second thread got in a
+    bounded 0.1s window instead of branching on the ``*null*`` flag. ``second_
+    attempted`` (set before acquisition) gates the wait; ``second_entered``
+    (set inside the inner context) tells us the second truly got in and
+    overtook. Release and bounded joins always run under ``finally``, so a
+    failed assertion never leaks a thread or a held lock.
     """
     real_inner = _W._queue_lock
     inner_factory = (lambda ws: nullcontext()) if null else real_inner
@@ -1837,6 +2116,7 @@ def _run_ordered_pair(monkeypatch, workspace, *, null, first_op, second_op):
     first_entered = threading.Event()
     release_first = threading.Event()
     second_attempted = threading.Event()
+    second_entered = threading.Event()
     first_done = threading.Event()
     second_done = threading.Event()
     results = {}
@@ -1852,7 +2132,7 @@ def _run_ordered_pair(monkeypatch, workspace, *, null, first_op, second_op):
     def replacement(ws):
         return _ordered_lock(
             ws, inner_factory, "first",
-            first_entered, release_first, second_attempted,
+            first_entered, release_first, second_attempted, second_entered,
         )
 
     monkeypatch.setattr(_W, "_queue_lock", replacement)
@@ -1863,106 +2143,154 @@ def _run_ordered_pair(monkeypatch, workspace, *, null, first_op, second_op):
         target=worker, args=("second", second_op, second_done), name="second")
 
     first.start()
-    assert first_entered.wait(timeout=10.0), "first thread never entered the lock"
-    second.start()
-    assert second_attempted.wait(timeout=10.0), "second thread never attempted the lock"
+    try:
+        if not first_entered.wait(timeout=10.0):
+            raise AssertionError("first thread never entered the lock")
+        second.start()
+        if not second_attempted.wait(timeout=10.0):
+            raise AssertionError("second thread never attempted the lock")
+        # One adaptive path: a real mutex cannot admit the second inside the
+        # 0.1s window (it is excluded until the first exits); a nullcontext can.
+        overtook = second_entered.wait(timeout=0.1)
+        if overtook and not second_done.wait(timeout=10.0):
+            raise AssertionError("second inner op did not finish before the first was released")
+    finally:
+        release_first.set()
+        first.join(timeout=10.0)
+        second.join(timeout=10.0)
 
-    if null:
-        # nullcontext lets the second op overtake; wait for it before releasing first.
-        assert second_done.wait(timeout=10.0), "nullcontext second op did not finish"
-    else:
-        # real lock blocks the second thread until the first releases.
-        assert not second_done.is_set(), "second op ran under real lock before release"
-    release_first.set()
-
-    first.join(timeout=10.0)
-    second.join(timeout=10.0)
-    assert not first.is_alive(), "first thread still alive"
-    assert not second.is_alive(), "second thread still alive"
-    assert first_done.is_set() and second_done.is_set()
-    return results
+    if first.is_alive() or second.is_alive():
+        raise AssertionError("ordered threads did not finish cleanly")
+    if not (first_done.is_set() and second_done.is_set()):
+        raise AssertionError("ordered threads did not signal completion")
+    return results, overtook
 
 
 def _log_summaries(workspace):
     return [e.summary for e in _W.parse_local_log_entries(workspace / "LOG.md", limit=16)]
 
 
+def _assert_no_journal(workspace):
+    assert not (workspace / ".workspace-queue-journal.json").exists()
+
+
+def _task(workspace, task_id):
+    return next(t for t in _W.parse_local_tasks(workspace / "TASKS.md") if t.task_id == task_id)
+
+
+def _raw_field(workspace, task_id, name):
+    """Raw ``name:`` field recorded on the given task's block in TASKS.md."""
+    lines = (workspace / "TASKS.md").read_text(encoding="utf-8").splitlines()
+    in_block = False
+    for line in lines:
+        match = _W.TASK_RE.match(line.rstrip())
+        if match:
+            in_block = match.group("task_id") == task_id
+            continue
+        stripped = line.lstrip()
+        if in_block and stripped.startswith(f"{name}:"):
+            return stripped.split(":", 1)[1].strip()
+    return ""
+
+
+def _assert_owner_started(workspace, *, task_b_taken):
+    """Exact raw owner ('by:') and 'started' fields where applicable."""
+    assert _raw_field(workspace, "task-a", "by") == "agent-a"
+    assert _raw_field(workspace, "task-a", "completed") != ""
+    if task_b_taken:
+        assert _raw_field(workspace, "task-b", "by") == "agent-b"
+        assert _raw_field(workspace, "task-b", "started").endswith("Z")
+    else:
+        assert _raw_field(workspace, "task-b", "by") == ""
+        assert _raw_field(workspace, "task-b", "started") == ""
+
+
 def test_ordered_lock_completion_first_real_lock(tmp_path, monkeypatch):
     """Completion-first under the real lock: first completes task-a, so the
-    second take-b runs after the dependency is done and succeeds."""
+    second take-b runs after the dependency is done and succeeds. The mutex
+    excludes the second, so it never overtakes."""
     ws = _dep_workspace(tmp_path)
-    results = _run_ordered_pair(
+    results, overtook = _run_ordered_pair(
         monkeypatch, ws, null=False,
         first_op=lambda: _W.complete_local_task(ws, "task-a", "agent-a", "openai-gpt-5.4", "done a"),
         second_op=lambda: _W.take_local_task(ws, "task-b", "agent-b"),
     )
+    assert overtook is False
     assert not isinstance(results["first"], Exception)
     assert not isinstance(results["second"], Exception), results["second"]
-    tasks = _W.parse_local_tasks(ws / "TASKS.md")
-    assert next(t for t in tasks if t.task_id == "task-a").state == "done"
-    assert next(t for t in tasks if t.task_id == "task-b").state == "in-progress"
-    assert _log_summaries(ws).count("took task-b") == 1
-    assert _log_summaries(ws).count("done a") == 1
-    assert len(_log_summaries(ws)) == 2
+    assert _task(ws, "task-a").state == "done"
+    assert _task(ws, "task-b").state == "in-progress"
+    assert _task(ws, "task-b").depends_on == ("task-a",)
+    assert _log_summaries(ws) == ["done a", "took task-b"]
+    _assert_owner_started(ws, task_b_taken=True)
+    _assert_no_journal(ws)
 
 
 def test_ordered_lock_completion_first_nullcontext(tmp_path, monkeypatch):
     """Completion-first under nullcontext: the second take-b overtakes while
     task-a is still in-progress, so it rejects with unmet dependencies."""
     ws = _dep_workspace(tmp_path)
-    results = _run_ordered_pair(
+    results, overtook = _run_ordered_pair(
         monkeypatch, ws, null=True,
         first_op=lambda: _W.complete_local_task(ws, "task-a", "agent-a", "openai-gpt-5.4", "done a"),
         second_op=lambda: _W.take_local_task(ws, "task-b", "agent-b"),
     )
+    assert overtook is True
     assert isinstance(results["second"], ValueError), results["second"]
     assert "dependenc" in str(results["second"]).lower()
     assert not isinstance(results["first"], Exception)
-    tasks = _W.parse_local_tasks(ws / "TASKS.md")
-    assert next(t for t in tasks if t.task_id == "task-a").state == "done"
-    assert next(t for t in tasks if t.task_id == "task-b").state == "open"
-    assert _log_summaries(ws).count("took task-b") == 0
-    assert _log_summaries(ws).count("done a") == 1
-    assert len(_log_summaries(ws)) == 1
+    assert _task(ws, "task-a").state == "done"
+    assert _task(ws, "task-b").state == "open"
+    assert _log_summaries(ws) == ["done a"]
+    _assert_owner_started(ws, task_b_taken=False)
+    _assert_no_journal(ws)
 
 
 def test_ordered_lock_take_first_real_lock(tmp_path, monkeypatch):
     """Take-first under the real lock: the first take-b runs while task-a is
-    still in-progress, so it rejects; the second complete-a then succeeds."""
+    still in-progress, so it rejects; the second complete-a then succeeds. The
+    mutex excludes the second, so it never overtakes."""
     ws = _dep_workspace(tmp_path)
-    results = _run_ordered_pair(
+    results, overtook = _run_ordered_pair(
         monkeypatch, ws, null=False,
         first_op=lambda: _W.take_local_task(ws, "task-b", "agent-b"),
         second_op=lambda: _W.complete_local_task(ws, "task-a", "agent-a", "openai-gpt-5.4", "done a"),
     )
+    assert overtook is False
     assert isinstance(results["first"], ValueError), results["first"]
     assert "dependenc" in str(results["first"]).lower()
     assert not isinstance(results["second"], Exception)
-    tasks = _W.parse_local_tasks(ws / "TASKS.md")
-    assert next(t for t in tasks if t.task_id == "task-a").state == "done"
-    assert next(t for t in tasks if t.task_id == "task-b").state == "open"
-    assert _log_summaries(ws).count("took task-b") == 0
-    assert _log_summaries(ws).count("done a") == 1
-    assert len(_log_summaries(ws)) == 1
+    assert _task(ws, "task-a").state == "done"
+    assert _task(ws, "task-b").state == "open"
+    assert _log_summaries(ws) == ["done a"]
+    _assert_owner_started(ws, task_b_taken=False)
+    _assert_no_journal(ws)
 
 
 def test_ordered_lock_take_first_nullcontext(tmp_path, monkeypatch):
     """Take-first under nullcontext: the second complete-a overtakes (task-a
     becomes done), then the first take-b runs and succeeds."""
     ws = _dep_workspace(tmp_path)
-    results = _run_ordered_pair(
+    results, overtook = _run_ordered_pair(
         monkeypatch, ws, null=True,
         first_op=lambda: _W.take_local_task(ws, "task-b", "agent-b"),
         second_op=lambda: _W.complete_local_task(ws, "task-a", "agent-a", "openai-gpt-5.4", "done a"),
     )
+    assert overtook is True
     assert not isinstance(results["first"], Exception), results["first"]
     assert not isinstance(results["second"], Exception)
-    tasks = _W.parse_local_tasks(ws / "TASKS.md")
-    assert next(t for t in tasks if t.task_id == "task-a").state == "done"
-    assert next(t for t in tasks if t.task_id == "task-b").state == "in-progress"
-    assert _log_summaries(ws).count("took task-b") == 1
-    assert _log_summaries(ws).count("done a") == 1
-    assert len(_log_summaries(ws)) == 2
+    assert _task(ws, "task-a").state == "done"
+    assert _task(ws, "task-b").state == "in-progress"
+    assert _task(ws, "task-b").depends_on == ("task-a",)
+    assert _log_summaries(ws) == ["done a", "took task-b"]
+    _assert_owner_started(ws, task_b_taken=True)
+    _assert_no_journal(ws)
+
+
+# Shared field-start scanner coverage (inline-code masking, two-space
+# boundary, unmatched backtick) lives in tests/python/test_task_grammar.py.
+# Workspace-level acceptance of those lines is
+# test_duplicate_depends_on_detector_ignores_prose_and_backticked_mentions.
 
 
 # --- Issue 4/5: Documentation, template parity and installer packaging ---
@@ -1979,6 +2307,10 @@ def test_tasks_schema_documents_depends_on_syntax_and_fail_closed():
     assert "take_local_task" in schema
     assert "complete_local_task" in schema
     assert "не мутирует файлы" in schema.lower()
+    assert "Пустой список `[]` допустим" in schema
+    assert "уже `[x]`" in schema
+    assert "идемпотентный no-op" in schema
+    assert "inline code" in schema
 
 
 def test_v2_tasks_schema_parity_with_tasks_schema():
@@ -2001,11 +2333,14 @@ def test_workspace_template_tasks_contract_documents_depends_on():
     assert "depends_on: [task-id-1, task-id-2" in template
     # Empty components are rejected.
     assert "empty components are rejected" in template
+    # Empty list is valid.
+    assert "empty list [] is valid" in template
     # The field may appear only once; duplicates rejected.
     assert "may appear only once" in template
     # Fail-closed semantics: next skips; take/complete reject with no mutation.
-    assert "next skips tasks with unmet deps" in template
-    assert "take/complete reject with no mutation" in template
+    assert "next skips tasks not in [ ]" in template
+    assert "take/complete reject unmet deps with no mutation" in template
+    assert "already [x] is fail-closed" in template
 
 
 def test_guide_documents_fail_closed_dependency_semantics():
@@ -2016,3 +2351,7 @@ def test_guide_documents_fail_closed_dependency_semantics():
     assert "next_local_task" in guide
     assert "take_local_task" in guide
     assert "complete_local_task" in guide
+    assert "empty list `[]` is valid" in guide
+    assert "already `[x]`" in guide
+    assert "idempotent no-op" in guide
+    assert "inline code" in guide

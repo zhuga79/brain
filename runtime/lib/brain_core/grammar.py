@@ -101,15 +101,46 @@ def field_re(name: str) -> re.Pattern:
 _FIELD_START = re.compile(rf"(?:^|(?<=\s\s))({_FIELD_ALT}):")
 
 
+def _mask_inline_code(line: str) -> str:
+    """Blank the bodies of Markdown inline code spans, preserving offsets.
+
+    Returns a copy with every character strictly between a pair of backticks
+    replaced by a space, so the lengths and positions of *line* are unchanged.
+    Consecutive backticks pair up greedily; an unpaired trailing backtick (odd
+    count) is treated as literal text and masks nothing. Characters outside
+    code spans are left as-is, so real field boundaries keep their offsets.
+    """
+    out = list(line)
+    ticks = [i for i, ch in enumerate(line) if ch == "`"]
+    for k in range(0, len(ticks) - 1, 2):
+        for i in range(ticks[k] + 1, ticks[k + 1]):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
+
+
+def _field_starts(line: str) -> list[tuple[int, int, str]]:
+    """True field starts on *line*, with Markdown inline code spans ignored.
+
+    ``_FIELD_START`` would otherwise treat a two-space field-like pattern
+    inside inline code as a real field. Code spans are masked on a copy
+    first; returned offsets still refer to *line* so ``parse_fields`` can
+    slice the original values. An unmatched trailing backtick masks nothing.
+    """
+    masked = _mask_inline_code(line)
+    return [(m.start(1), m.end(), m.group(1)) for m in _FIELD_START.finditer(masked)]
+
+
 def parse_fields(line: str) -> dict[str, str]:
     """Поля одной строки блока: имя → значение.
 
-    Проза, упоминающая имя поля, полем не становится: в `` `client:` в корне``
-    ключу предшествует обратная кавычка, а не пробелы. Цена правила — строка,
-    где имя поля стоит после двух пробелов, всё ещё читается как поле; такой
-    признак от настоящего поля неотличим.
+    Проза, упоминающая имя поля, полем не становится. Имя в обратных кавычках
+    (``client:``) не поле, потому что перед ним не два пробела. Текст внутри
+    парных обратных кавычек маскируется целиком: даже два пробела перед
+    ``depends_on:`` внутри span полем не становятся. Цена правила — имя после
+    двух пробелов *вне* inline code всё ещё читается как поле.
     """
-    starts = [(m.start(1), m.end(), m.group(1)) for m in _FIELD_START.finditer(line)]
+    starts = _field_starts(line)
     out: dict[str, str] = {}
     for i, (_, value_at, name) in enumerate(starts):
         end = starts[i + 1][0] if i + 1 < len(starts) else len(line)
@@ -120,11 +151,13 @@ def parse_fields(line: str) -> dict[str, str]:
 def count_field_starts(line: str, name: str) -> int:
     """Count how many times *name* appears as a parsed field start on *line*.
 
-    Uses ``_FIELD_START`` so prose or backticked mentions (e.g.
-    ``acceptance: use depends_on: [a] for context``) are **not** counted.
-    Only true field starts — at line start or after two+ spaces — count.
+    Uses the shared ``_field_starts`` scanner so prose or backticked mentions
+    are not counted, including field-like text inside inline code that would
+    otherwise look like a real start (two spaces before the name). Only true
+    field starts — at line start or after two+ spaces, outside inline code —
+    count.
     """
-    return sum(1 for m in _FIELD_START.finditer(line) if m.group(1) == name)
+    return sum(1 for _, _, field_name in _field_starts(line) if field_name == name)
 
 
 class Head(NamedTuple):
