@@ -393,13 +393,23 @@ def add(active: Path, entry: str) -> None:
         atomic_write(active, txt + entry)
 
 
-def take(active: Path, tid: str, agent: str, *, ttl: int = LOCK_TTL_DEFAULT) -> None:
-    """Перевести задачу в работу: [ ] → [~], дописать started/by.
+def take(
+    active: Path,
+    tid: str,
+    agent: str,
+    *,
+    ttl: int = LOCK_TTL_DEFAULT,
+    node: str | None = None,
+) -> None:
+    """Перевести задачу в работу: [ ] → [~], дописать started/by/node.
 
     Лок захватывается здесь же, тем же agent-id, что уходит в `by:`. Раньше
     захват был отдельным шагом вызывающего (brain-task делал его, MCP делал,
     а прямой вызов brain_app.queue.take — нет), поэтому существовал путь, на
     котором задача уходила в работу вообще без лока.
+
+    `node:` — identity of the vault that holds the task. `.locks/` is not
+    synced; after a git pull the node field is how a peer sees the holder.
     """
     _validate_task_id(tid)
     if not str(agent).strip():
@@ -417,14 +427,19 @@ def take(active: Path, tid: str, agent: str, *, ttl: int = LOCK_TTL_DEFAULT) -> 
                 claim_lock(active, tid, agent, ttl)
                 return
             raise TaskError(f"task not found or not open: {tid}")
+        if node is None:
+            from brain_federation.core import node_id as resolve_node
+
+            node = resolve_node(active.parent.parent)
         created = claim_lock(active, tid, agent, ttl)
         ts = utc_now()
 
         def repl(m: re.Match) -> str:
-            return (
-                m.group(1) + "~]" + m.group(2) + m.group(3)
-                + f"      started: {ts}\n      by: {agent}\n"
-            )
+            extra = f"      started: {ts}\n      by: {agent}\n"
+            if node:
+                extra += f"      node: {node}\n"
+            extra += f"      ttl: {int(ttl)}\n"
+            return m.group(1) + "~]" + m.group(2) + m.group(3) + extra
 
         try:
             atomic_write(active, pat.sub(repl, txt, count=1))
@@ -436,11 +451,11 @@ def take(active: Path, tid: str, agent: str, *, ttl: int = LOCK_TTL_DEFAULT) -> 
 
 
 def _released_text(txt: str, tid: str) -> str:
-    """Текст очереди с задачей, возвращённой в open: [~] → [ ] без started/by."""
+    """Текст очереди с задачей, возвращённой в open: [~] → [ ] без started/by/node/ttl."""
     def repl(m: re.Match) -> str:
         body = "".join(
             line for line in m.group(3).splitlines(keepends=True)
-            if not line.lstrip().startswith(("started:", "by:"))
+            if not line.lstrip().startswith(("started:", "by:", "node:", "ttl:"))
         )
         return m.group(1) + " ]" + m.group(2) + body
 

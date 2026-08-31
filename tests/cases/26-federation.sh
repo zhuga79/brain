@@ -65,6 +65,7 @@ cat >"$in_progress_active" <<'TASKS'
 - [~] [P1] t-imported — Imported in progress
       role: developer  mode: solo
       acceptance: should be open on import
+      node: node-remote
 TASKS
 set +e
 brain-federation tasks-check --active "$in_progress_active" --json >/tmp/brain_federation_in_progress.json
@@ -76,6 +77,8 @@ import json
 data = json.load(open("/tmp/brain_federation_in_progress.json"))
 codes = {finding["code"] for finding in data["findings"]}
 assert "task-imported-in-progress" in codes, data
+messages = " ".join(finding["message"] for finding in data["findings"])
+assert "node-remote" in messages, data
 PYEOF
 
 active_open=$(mktemp)

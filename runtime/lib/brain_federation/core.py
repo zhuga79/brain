@@ -267,6 +267,10 @@ def parse_task_file(
             "role": parsed.get("role", ""),
             "mode": parsed.get("mode", ""),
             "acceptance": parsed.get("acceptance", ""),
+            "by": parsed.get("by", ""),
+            "started": parsed.get("started", ""),
+            "node": parsed.get("node", ""),
+            "ttl": parsed.get("ttl", ""),
             "path": str(path),
             "source": source,
             "line": line_no,
@@ -275,12 +279,14 @@ def parse_task_file(
     if flag_in_progress:
         for task in tasks:
             if task["state"] == "~":
+                node = str(task.get("node") or "").strip()
+                node_bit = f" on node {node}" if node else ""
                 findings.append(
                     Finding(
                         "task-imported-in-progress",
                         "block",
                         f"{path}:{task['line']}",
-                        f"task {task['id']} is imported as in-progress",
+                        f"task {task['id']} is imported as in-progress{node_bit}",
                         "import proposed tasks as open; local agents must acquire locks themselves",
                     )
                 )

@@ -30,7 +30,7 @@ def parse_block(block: str) -> dict[str, Any]:
     """Parse a single task block string into a dict.
 
     Returns keys: state, prio, id, title, role, mode, deps,
-                  council, by, started, parent, client, project,
+                  council, by, started, node, ttl, parent, client, project,
                   acceptance, due, tags, raw.
 
     Returns empty dict if the block cannot be parsed.
@@ -64,6 +64,8 @@ def parse_block(block: str) -> dict[str, Any]:
         "acceptance": "",
         "by": "",
         "started": "",
+        "node": "",
+        "ttl": "",
         "due": "",
         "tags": "",
         "raw": block,
@@ -73,7 +75,10 @@ def parse_block(block: str) -> dict[str, Any]:
     # упомянутого в тексте задачи. Раньше здесь был `re.search` по всей строке
     # без привязки к началу, и проза молча подменяла значение — последнее
     # вхождение выигрывало, а поля стоят выше прозы.
-    single_token = ("role", "mode", "surface", "gate", "parent", "by", "started", "due")
+    single_token = (
+        "role", "mode", "surface", "gate", "parent", "by", "started", "due",
+        "node", "ttl",
+    )
     # tags может нести несколько токенов через пробел (`#leftover #other`),
     # поэтому границу держит та же грамматика, что и у client/project —
     # до следующего поля или конца строки, а не до первого пробела.
@@ -148,6 +153,10 @@ def format_block(info: dict[str, Any]) -> str:
         lines.append(f"      started: {info['started']}")
     if info.get("by"):
         lines.append(f"      by: {info['by']}")
+    if info.get("node"):
+        lines.append(f"      node: {info['node']}")
+    if info.get("ttl"):
+        lines.append(f"      ttl: {info['ttl']}")
     if info.get("acceptance"):
         lines.append(f"      acceptance: {info['acceptance']}")
     return "\n".join(lines)
