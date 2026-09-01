@@ -634,6 +634,13 @@ Meanings:
 - `blocked` roles must not receive local tasks in this workspace.
 - Unknown roles are blocked by default unless the workspace explicitly allows
   them in `core`, `available` or `gated`.
+- When initializing or upgrading a folder (`brain-workspace init-template`
+  or the first real `BRAIN.md`), walk the live system catalog `roles/*.md`
+  and classify every role into this workspace's `core` / `available` /
+  `gated` lists, or leave it unlisted (blocked). Record the pass in
+  `## Role Catalog Review`. The template lists are a starter, not a finished
+  policy. Do not copy `roles/` into the folder: Role Policy only scopes
+  existing system roles.
 - Legacy workspaces that have no `Role Policy` and no `Allowed Roles` keep
   permissive behavior until they are upgraded.
 

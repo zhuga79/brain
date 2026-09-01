@@ -17,6 +17,8 @@ test -f "$PROJECT_ROOT/runtime/templates/workspace/LOG.md"
 grep -q "Agent Rules" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
 grep -q "Workspace Profile" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
 grep -q "Role Policy" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
+grep -q "Role Catalog Review" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
+grep -q "walk the live Brain role catalog" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
 grep -q "Action Gates" "$PROJECT_ROOT/runtime/templates/workspace/BRAIN.md"
 grep -q "Local Tasks" "$PROJECT_ROOT/runtime/templates/workspace/TASKS.md"
 grep -q "Local Log" "$PROJECT_ROOT/runtime/templates/workspace/LOG.md"
@@ -159,5 +161,9 @@ brain-workspace init-template --out "$TMP_ROOT/project-c" >/dev/null
 test -f "$TMP_ROOT/project-c/BRAIN.md"
 test -f "$TMP_ROOT/project-c/TASKS.md"
 test -f "$TMP_ROOT/project-c/LOG.md"
+grep -q "Role Catalog Review" "$TMP_ROOT/project-c/BRAIN.md" || {
+  echo "FAILED: init-template BRAIN.md missing Role Catalog Review"
+  exit 1
+}
 
 echo "workspace discovery OK"
