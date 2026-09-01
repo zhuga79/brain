@@ -6,6 +6,7 @@ from common import mcp, BRAIN, ACTIVE, DONE, LOCKS, append_log, git_commit, ts, 
 import brain_task_parser
 from brain_app import queue
 from brain_core.taskfile import LOCK_TTL_DEFAULT
+from brain_core import autosave as _autosave
 from result import ok, error
 
 _LOCK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -83,6 +84,9 @@ def acquire_lock(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> di
         o_ts, o_ttl = int(parts[1]), int(parts[2])
         age = int(time.time()) - o_ts
         if age > o_ttl:
+            # Save the dead holder's uncommitted work before its lock goes
+            # (t-2026-08-16-autosave-uncommitted-agent-wor).
+            _autosave.evict(LOCKS, ACTIVE, task, o_agent)
             # Atomic stale takeover: rename stale dir away, then create fresh one.
             # If rename fails, another agent beat us to it — report race.
             stale_dir = d.with_name(f"{d.name}.stale.{os.getpid()}")
@@ -208,6 +212,8 @@ def cleanup_locks() -> dict:
     n = 0
     now = int(time.time())
     for d in LOCKS.iterdir():
+        if d.name.startswith("."):
+            continue  # .reclaim.lock, .<tid>.autosaved breadcrumbs
         if not d.is_dir():
             continue
         # Security: skip symlinks — is_dir() follows symlinks so we must check
@@ -221,6 +227,9 @@ def cleanup_locks() -> dict:
         if len(parts) < 3:
             shutil.rmtree(d); n += 1; continue
         if now - int(parts[1]) > int(parts[2]):
+            # Save the dead holder's uncommitted work before the lock goes
+            # (t-2026-08-16-autosave-uncommitted-agent-wor).
+            _autosave.evict(LOCKS, ACTIVE, d.name, parts[0])
             shutil.rmtree(d); n += 1
     return {"cleaned": n}
 

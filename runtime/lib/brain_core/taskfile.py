@@ -92,29 +92,77 @@ def claim_lock(active: Path, tid: str, agent: str, ttl: int = LOCK_TTL_DEFAULT) 
         pass
     else:
         _write_lock_owner(directory / "owner", agent, ttl)
+        _record_worktree(active, tid)
         return True
 
     owner_file = directory / "owner"
     if not owner_file.is_file():
         # Каталог без owner-файла — обрывок предыдущего запуска, не лок.
         _write_lock_owner(owner_file, agent, ttl)
+        _record_worktree(active, tid)
         return True
     try:
         lock_owner, started, current_ttl = _parse_lock_owner(_read(owner_file))
     except TaskError:
         _write_lock_owner(owner_file, agent, ttl)
+        _record_worktree(active, tid)
         return True
     if lock_owner == agent:
         _write_lock_owner(owner_file, agent, ttl)  # продление своего лока
+        _record_worktree(active, tid)
         return False
     if int(time.time()) - started > current_ttl:
-        _write_lock_owner(owner_file, agent, ttl)  # перехват протухшего
+        # Перехват протухшего: сначала спасти незакоммиченную работу прежнего
+        # владельца (t-2026-08-16-autosave-uncommitted-agent-wor), потом занять.
+        _autosave_stale(active, tid, lock_owner)
+        _write_lock_owner(owner_file, agent, ttl)
+        _record_worktree(active, tid)
         return False
     raise TaskError(f"task locked by {lock_owner}, not {agent}: {tid}")
 
 
+def _record_worktree(active: Path, tid: str) -> None:
+    """Best-effort: note the executor's git worktree next to the lock."""
+    try:
+        from . import autosave
+
+        autosave.record_worktree(_locks_root(active), tid)
+    except Exception:
+        pass
+
+
+def _autosave_stale(active: Path, tid: str, prev_owner: str = "") -> str | None:
+    """Best-effort: snapshot the previous holder's uncommitted work before the
+    lock is taken/dropped. Git-only + a breadcrumb — safe to call while holding
+    queue_lock; the `resume:` write is flushed later by `_flush_autosaved`.
+    Never raises."""
+    try:
+        from . import autosave
+
+        return autosave.autosave(_locks_root(active), tid, agent=prev_owner or "")
+    except Exception:
+        return None
+
+
+def _flush_autosaved(active: Path, tid: str) -> str | None:
+    """Write a pending autosave tag into the task's `resume:` field. Call
+    OUTSIDE queue_lock (it takes the lock via annotate_resume)."""
+    try:
+        from . import autosave
+
+        return autosave.flush_breadcrumb(_locks_root(active), active, tid)
+    except Exception:
+        return None
+
+
 def _drop_lock(active: Path, tid: str) -> None:
     shutil.rmtree(_lock_dir(active, tid), ignore_errors=True)
+    # The worktree sidecar was consumed by autosave (if any). The `.autosaved`
+    # breadcrumb is left for the caller's out-of-lock flush into `resume:`.
+    try:
+        (_locks_root(active) / f"{tid}.worktree").unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _validate_task_id(tid: str) -> str:
@@ -456,6 +504,9 @@ def take(
             if created:
                 _drop_lock(active, tid)
             raise
+    # Outside queue_lock: if claim_lock evicted a stale holder, its autosave
+    # breadcrumb becomes the new resume: field.
+    _flush_autosaved(active, tid)
 
 
 def _released_text(txt: str, tid: str) -> str:
@@ -486,6 +537,35 @@ def release(active: Path, tid: str, agent: str | None = None) -> None:
             raise TaskError(f"task not in progress: {tid}")
         _ensure_in_progress_owner(active, tid, match.group(3), agent)
         atomic_write(active, _released_text(txt, tid))
+
+
+def annotate_resume(active: Path, tid: str, text: str) -> bool:
+    """Add or replace a `resume:` continuation line on task *tid* in any state.
+
+    Used by autosave (t-2026-08-16-autosave-uncommitted-agent-wor) so the path
+    to the saved work lands in the ticket by machine, not by hand. `text` is
+    one line — newlines are folded to spaces. Returns True if the file changed.
+    """
+    text = " ".join(str(text).split())
+    if not text:
+        return False
+    with queue_lock(active.parent):
+        txt = _read(active)
+        for state in ("~", " ", "!", "x"):
+            m = _pattern(tid, state).search(txt)
+            if not m:
+                continue
+            kept = "".join(
+                ln for ln in m.group(3).splitlines(keepends=True)
+                if not ln.lstrip().startswith("resume:")
+            )
+            rebuilt = m.group(1) + state + "]" + m.group(2) + f"      resume: {text}\n" + kept
+            new_txt = txt[: m.start()] + rebuilt + txt[m.end():]
+            if new_txt != txt:
+                atomic_write(active, new_txt)
+                return True
+            return False
+        return False
 
 
 def block(active: Path, tid: str, agent: str | None = None) -> None:
@@ -642,11 +722,16 @@ def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object
                     claim_lock(active, tid, str(task_owner))
                     finding["action"] = f"lock restored for {task_owner}"
                 else:
+                    saved = _autosave_stale(active, tid, lock_owner or "")
                     _drop_lock(active, tid)
+                    if saved:
+                        finding["autosaved"] = saved
                     if task_owner is not None:
                         txt = _released_text(txt, tid)
                         queue_changed = True
                         finding["action"] = "lock dropped, task returned to open"
+                        if saved:
+                            finding["action"] += f"; wip saved as {saved}"
                     else:
                         finding["action"] = "orphan lock dropped"
                 finding["fixed"] = True
@@ -654,6 +739,10 @@ def reconcile_locks(active: Path, *, fix: bool = False) -> list[dict[str, object
 
         if queue_changed:
             atomic_write(active, txt)
+    # Outside queue_lock: fold any autosave breadcrumbs into resume: fields.
+    for finding in findings:
+        if finding.get("fixed") and finding.get("autosaved"):
+            _flush_autosaved(active, str(finding["id"]))
     return findings
 
 
