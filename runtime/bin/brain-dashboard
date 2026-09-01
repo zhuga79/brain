@@ -40,6 +40,7 @@ from brain_dashboard.render import build_html  # noqa: E402
 import brain_provider  # noqa: E402
 from brain_sandbox_guard import SandboxLaunchError, assert_not_sandbox_agent_launch  # noqa: E402
 import brain_launch_queue  # noqa: E402
+from brain_core.model_signature import queue_action_argv  # noqa: E402
 
 
 # Max seconds to wait for a launch subprocess. brain-orchestrator console
@@ -826,16 +827,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
                                               "error": f"unknown action: {action}"}).encode())
                     return
                 bt = shutil.which("brain-task") or str(Path.home() / ".local" / "bin" / "brain-task")
-                if action == "block":
-                    reason = qs.get("reason", ["blocked via dashboard"])[0].strip()
-                    if not reason:
-                        reason = "blocked via dashboard"
-                    cmd = [bt, "block", task_id, reason]
-                else:
-                    cmd = [bt, action, task_id, "--as", agent_id]
-                    model = qs.get("model", [""])[0].strip()
-                    if action == "complete" and model:
-                        cmd += ["--model", model]
+                reason = qs.get("reason", [""])[0].strip()
+                model = qs.get("model", [""])[0].strip()
+                allow_unsigned = qs.get("allow_unsigned", [""])[0].strip().lower() in (
+                    "1", "true", "yes", "on",
+                )
+                cmd = [bt, *queue_action_argv(
+                    action, task_id, agent_id,
+                    model=model, allow_unsigned=allow_unsigned, reason=reason,
+                )]
                 try:
                     result = subprocess.run(
                         cmd,
@@ -902,7 +902,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print("  /api/providers          — JSON role/provider matrix and cached health")
     print("  /api/tokens             — JSON token economy metrics from brain-compact")
     print("  /api/metrics            — JSON flat counters (orchestration/learning/webhook/policy)")
-    print("  POST /api/tasks/<id>?as=<agent>&action=take|release|complete|block")
+    print("  POST /api/tasks/<id>?as=<agent>&action=take|release|complete|block[&model=...]")
     print("  POST /api/launch?workspace=<path>&task=<id>&role=<role>&client=<cli>[&dry_run=1]")
     print("  POST /api/queue-proposals/<id>/launch[?dry_run=1]")
     print("Press Ctrl+C to stop.")

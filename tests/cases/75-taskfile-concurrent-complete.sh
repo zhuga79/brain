@@ -34,7 +34,7 @@ printf '# Log\n' > "$BRAIN_PATH/wiki/log.md"
 pids=()
 for i in $(seq 1 "$N"); do
   tid=$(printf 't-concurrent-%02d' "$i")
-  brain-task complete "$tid" --as "agent-$i" --model "test-model" >/dev/null 2>&1 &
+  brain-task complete "$tid" --as "agent-$i" --model "test-model-1" >/dev/null 2>&1 &
   pids+=($!)
 done
 

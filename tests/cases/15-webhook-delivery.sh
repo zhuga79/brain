@@ -54,7 +54,8 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as srv:
         subprocess.run(["brain-task", "take", "t-wh-test", "--as", "smoke-webhook"],
                        env=env, capture_output=True)
         # Complete: should trigger webhook
-        result = subprocess.run(["brain-task", "complete", "t-wh-test", "--as", "smoke-webhook"],
+        result = subprocess.run(["brain-task", "complete", "t-wh-test", "--as", "smoke-webhook",
+                                 "--model", "openai-gpt-5.4"],
                                 env=env, capture_output=True, text=True)
         assert result.returncode == 0, f"brain-task complete failed: {result.stderr}"
         assert "completed" in result.stdout, f"No 'completed' in output: {result.stdout}"
@@ -92,7 +93,8 @@ with tempfile.TemporaryDirectory() as td:
            "PATH": os.environ["PATH"]}
     subprocess.run(["brain-task", "take", "t-wh-fail", "--as", "smoke-agent"],
                    env=env, capture_output=True)
-    result2 = subprocess.run(["brain-task", "complete", "t-wh-fail", "--as", "smoke-agent"],
+    result2 = subprocess.run(["brain-task", "complete", "t-wh-fail", "--as", "smoke-agent",
+                              "--model", "openai-gpt-5.4"],
                              env=env, capture_output=True, text=True)
     assert result2.returncode == 0, f"complete failed when webhook unreachable: {result2.stderr}"
     assert "completed" in result2.stdout, f"No 'completed' when webhook fails: {result2.stdout}"

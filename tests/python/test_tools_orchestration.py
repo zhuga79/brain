@@ -260,6 +260,32 @@ def test_complete_task_accepts_external_versioned_models(tb):
     assert "model: grok-4.6" in done
 
 
+def test_complete_task_uses_brain_agent_model_when_argument_missing(tb, monkeypatch):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    monkeypatch.setenv("BRAIN_AGENT_MODEL", "openai-gpt-5.4")
+
+    res = t.complete_task("t-test", "agent-1", model="", summary="done")
+
+    assert res["status"] == "ok"
+    assert "model: openai-gpt-5.4" in (tmp / "tasks" / "done.md").read_text(encoding="utf-8")
+
+
+def test_complete_task_allow_unsigned_is_opt_in_and_audited(tb, monkeypatch):
+    t, _, tmp, _ = tb
+    t.take_task("t-test", "agent-1")
+    monkeypatch.delenv("BRAIN_AGENT_MODEL", raising=False)
+
+    res = t.complete_task(
+        "t-test", "agent-1", model="", summary="done", allow_unsigned=True,
+    )
+
+    assert res["status"] == "ok"
+    assert "model: unsigned" in (tmp / "tasks" / "done.md").read_text(encoding="utf-8")
+    log = (tmp / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert "model-unsigned" in log
+
+
 def test_mcp_block_task_requires_agent_and_preserves_state_on_error(tb):
     t, tools_tasks, tmp, _ = tb
     t.take_task("t-test", "agent-1")

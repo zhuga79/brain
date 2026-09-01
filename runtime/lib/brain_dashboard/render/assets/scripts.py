@@ -106,6 +106,7 @@ SSE_SCRIPT = (
     'if(!task){showActionResult("task id is required");alert("task id is required");btn.disabled=false;return;}'
     'var url="/api/tasks/"+encodeURIComponent(task)+"?as="+encodeURIComponent(agent)+"&action="+encodeURIComponent(action);'
     'if(action==="block"){var reason=prompt("Block reason","blocked via dashboard");if(reason===null){btn.disabled=false;return;}url+="&reason="+encodeURIComponent(reason);}'
+    'if(action==="complete"){var model=prompt("Model signature (provider-model-version)","");if(model===null){btn.disabled=false;return;}if(String(model).trim()){url+="&model="+encodeURIComponent(String(model).trim());}}'
     'showActionResult(action+" "+task+"...");'
     'fetch(url,{method:"POST",headers:headers}).then(function(r){return r.json();}).then(function(d){'
     'if(!d.ok){showActionResult(d.error||"Action failed");alert(d.error||"Action failed");btn.disabled=false;return;}'

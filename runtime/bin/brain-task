@@ -25,7 +25,9 @@ brain-task — управление очередью задач
                           [--acceptance A] [--council R,R] [--depends-on ID,ID]
   brain-task take <id> --as <agent-id>     лок + пометить [~]
   brain-task release <id> --as <agent-id>  снять лок + вернуть [ ]
-  brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
+  brain-task complete <id> --as <agent-id> [--model M] [--allow-unsigned]
+                                  пометить [x] + подпись модели + перенос в done.md
+                                  без --model нужен BRAIN_AGENT_MODEL; unsigned только через --allow-unsigned
   brain-task block <id> "reason" [--as <agent-id>]  пометить [!] с причиной
   brain-task reconcile [--fix] [--json]    свести владельца задачи и владельца лока
   brain-task log [N]                  последние N (default 30) записей лога
@@ -221,11 +223,12 @@ case "$cmd" in
 
   complete)
     id="${1:-}"; shift || true
-    agent=""; model=""
+    agent=""; model=""; allow_unsigned=false
     while [ $# -gt 0 ]; do
       case "$1" in
         --as) agent="$2"; shift 2;;
         --model) model="$2"; shift 2;;
+        --allow-unsigned) allow_unsigned=true; shift;;
         *) shift;;
       esac
     done
@@ -239,17 +242,12 @@ case "$cmd" in
       echo "  без него нельзя отличить закрытие своей задачи от чужой" >&2
       exit 2
     fi
-    # Mandatory model signature: every closed task records the real model+version.
-    model="${model:-${BRAIN_AGENT_MODEL:-}}"
-    if [ -z "$model" ]; then
-      if [ "${BRAIN_REQUIRE_MODEL:-0}" = "1" ]; then
-        echo "model signature required: pass --model <provider-model-version> or set BRAIN_AGENT_MODEL" >&2
-        exit 1
-      fi
-      echo "WARN: closing $id without a model signature (pass --model or set BRAIN_AGENT_MODEL)" >&2
-      model="unsigned"
-    fi
-    _py brain_core.taskfile complete "$A" "$D" "$id" "${agent:-unknown}" "$model" || exit 1
+    # Подпись модели — core policy (brain_core.model_signature): versioned
+    # идентификатор обязателен; unsigned только через явный hatch.
+    args=(--brain "$BRAIN" complete "$id" --as "$agent")
+    [ -n "$model" ] && args+=(--model "$model")
+    if $allow_unsigned; then args+=(--allow-unsigned); fi
+    model="$(_py brain_app.queue "${args[@]}")" || exit 1
     brain-lock release "$id" ${agent:+--as "$agent"} >/dev/null 2>&1 || true
     log_op "task-done" "$id" "${agent:-}" "model=$model"
     git_commit "task-done: $id by ${agent:-unknown} [${model}]"

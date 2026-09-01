@@ -2,13 +2,13 @@
 title: Decision — Runtime Core: границы модулей и владельцы записи
 type: decision
 created: 2026-08-10
-updated: 2026-08-17
+updated: 2026-08-31
 curation: agent
 protected: false
 source_policy: advisory
 tags: [decision, architecture, runtime, tasks, concurrency, workspace]
 sources: []
-related: [about-brain, architecture-overview, decision-llm-stack, decision-post-inversion-cycle, decision-public-source-of-truth, decision-role-model-routing, decisions-log, workflow-solo-council]
+related: [about-brain, architecture-overview, decision-llm-stack, decision-model-signature, decision-post-inversion-cycle, decision-public-source-of-truth, decision-role-model-routing, decisions-log, workflow-solo-council]
 visibility: public
 ---
 
@@ -52,9 +52,10 @@ visibility: public
 
 ### 2. `brain-task` стал фасадом, а не отдельной реализацией
 
-`runtime/bin/brain-task` вызывает `brain_core.taskfile` и требует подпись
-модели при completion (`--model` или `BRAIN_AGENT_MODEL`; `BRAIN_REQUIRE_MODEL=1`
-делает это обязательным).
+`runtime/bin/brain-task` вызывает `brain_app.queue.complete`, а тот —
+`brain_core.model_signature` и `brain_core.taskfile`. Подпись модели при
+completion обязательна (`--model` или `BRAIN_AGENT_MODEL`); `unsigned` только
+через явный hatch, см. [[decision-model-signature]].
 
 Ownership тоже проверяется в домене: чужой агент не должен release/complete
 задачу, если lock принадлежит другому.

@@ -28,7 +28,7 @@ Use Brain tasks as the source of truth.
 6. Verify with the checks named in the task. For code changes, normally run:
    `brain-validate`, `brain-lint`, `brain-index rebuild`, and `bash tests/smoke.sh`.
 7. Complete through Brain:
-   `brain-task complete <task-id> --as <agent-id>`
+   `brain-task complete <task-id> --as <agent-id> --model <provider-model-version>`
 8. Release stale or abandoned locks only through `brain-lock`, never by editing
    `.locks` manually.
 

@@ -301,7 +301,7 @@ brain-task deps <id>                    граф зависимостей зад
 brain-task add "<text>" [--role R] [--mode M] [--prio P0|P1|P2]
 brain-task take <id> --as <agent-id>           лок + пометить [~]
 brain-task release <id> --as <agent-id>        снять лок + вернуть [ ]
-brain-task complete <id> --as <agent-id>       пометить [x] + перенос в done.md
+brain-task complete <id> --as <agent-id> [--model M]  пометить [x] + подпись модели + перенос в done.md
 brain-task block <id> "reason"          пометить [!] с причиной
 brain-task log [N]                      последние N записей log.md (default 30)
 brain-task webhook-replay               переотправить записи из .webhooks/dead-letter.jsonl
@@ -2130,7 +2130,7 @@ brain-council start <task-id>       # совет
 
 # РАБОТАТЬ
 brain-task take <id> --as <agent>           # взять (auto-lock)
-brain-task complete <id> --as <agent>       # завершить (auto-release + git)
+brain-task complete <id> --as <agent> --model <provider-model-version>  # завершить (auto-release + git)
 brain-task release <id> --as <agent>        # отказаться
 brain-task block <id> "<reason>"
 

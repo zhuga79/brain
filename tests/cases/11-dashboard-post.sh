@@ -38,9 +38,20 @@ print('POST /api/tasks take OK')
 " || { kill $srv_pid 2>/dev/null; echo "FAILED: POST take failed"; exit 1; }
 [ -f "$BRAIN_PATH/.locks/$post_task_id/owner" ] || { kill $srv_pid 2>/dev/null; echo "FAILED: lock not created by POST take"; exit 1; }
 
+# POST complete without a model must follow the core policy and refuse.
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$post_port/api/tasks/$post_task_id?as=smoke-agent&action=complete" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('ok') is False, f'POST complete without model should fail: {d}'
+assert 'model' in (d.get('error') or '').lower(), f'Missing model error: {d}'
+print('POST /api/tasks complete without model rejected OK')
+" || { kill $srv_pid 2>/dev/null; echo "FAILED: POST complete without model not rejected"; exit 1; }
+grep -q "$post_task_id" "$BRAIN_PATH/tasks/active.md" \
+  || { kill $srv_pid 2>/dev/null; echo "FAILED: unsigned dashboard complete closed the task"; exit 1; }
+
 # POST complete (task must be taken first)
 log_lines_before=$(wc -l < "$BRAIN_PATH/wiki/log.md")
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$post_port/api/tasks/$post_task_id?as=smoke-agent&action=complete" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$post_port/api/tasks/$post_task_id?as=smoke-agent&action=complete&model=openai-gpt-5.4" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is True, f'POST complete failed: {d}'

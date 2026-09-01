@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from brain_core import atomic, grammar
+from brain_core.model_signature import AUDIT_OP, resolve_completion_model
 
 UTC = timezone.utc
 
@@ -759,9 +760,17 @@ def take_local_task(workspace: Path, task_id: str, agent: str) -> LocalTask:
     return _run_workspace_transaction(workspace, operation="take", task_id=task_id, mutate=mutate)
 
 
-def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, summary: str = "") -> LocalTask:
-    if not model.strip():
-        raise ValueError(f"Local task model signature required: {task_id}")
+def complete_local_task(
+    workspace: Path,
+    task_id: str,
+    agent: str,
+    model: str,
+    summary: str = "",
+    *,
+    allow_unsigned: bool = False,
+) -> LocalTask:
+    resolved = resolve_completion_model(model, allow_unsigned=allow_unsigned)
+    model = resolved.value
     timestamp = utc_timestamp()
     summary = summary or f"completed {task_id}"
 
@@ -808,12 +817,15 @@ def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, s
             from_states=("in-progress",),
             mutate_body=update_body,
         )
+        detail = f"Moved {task_id} to done."
+        if resolved.unsigned:
+            detail = f"{detail} {AUDIT_OP} {resolved.audit_extra}"
         log_after = _append_local_log_text(
             log_before,
             timestamp=timestamp,
             agent=agent,
             summary=summary,
-            detail=f"Moved {task_id} to done.",
+            detail=detail,
         )
         return tasks_after, log_after, task
 

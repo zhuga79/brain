@@ -34,7 +34,7 @@ brain-vector status
 # Webhook при завершении задачи
 export BRAIN_WEBHOOK_URL=https://hooks.example.com/brain
 export BRAIN_WEBHOOK_TIMEOUT_SEC=3     # default: 3
-brain-task complete <id> --as <agent>  # → POST event к webhook
+brain-task complete <id> --as <agent> --model <provider-model-version>  # → POST event к webhook
 
 # Auto-next: watch + автопереход
 brain-launch <task-id> --watch --auto-next         # live mode

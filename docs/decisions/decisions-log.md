@@ -27,5 +27,6 @@ visibility: public
 - [[decision-corrective-recurrence]] — рецидив корректирующей задачи после закрытия заводит новую; воскрешение в окне 72ч невозможно (2026-08-13)
 - [[decision-post-inversion-cycle]] — следующий цикл: живая инверсия двух корней, без новых продуктовых функций (2026-08-14)
 - [[decision-setup-runtime-pth-and-pytest-pythonpath]] — порт data-root: `.pth` всегда после pip; `pythonpath` в pyproject отклонён (2026-08-31)
+- [[decision-model-signature]] — единая политика подписи модели при complete: versioned обязательно, unsigned только явный hatch (2026-08-31)
 
 Связанные страницы: [[about-brain]], [[roles-overview]].
