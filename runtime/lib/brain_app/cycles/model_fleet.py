@@ -11,8 +11,10 @@
 2. перечисляет живые модели по клиентам (`list_client_models` — живая
    команда CLI, затем API, затем конфиг);
 3. снимает статус ролей (`brain-provider status`);
-4. атомарно переписывает канонический реестр `config/model-fleet.json`
-   (machine-readable, его читают агенты и lint);
+4. атомарно переписывает канонический реестр `.model-fleet.json` в корне
+   $BRAIN (machine-readable, его читают агенты и lint; корневой dotfile —
+   как `.provider-health.json`, а не `config/`: тот эксклюзивно системный
+   и под split-root запрещён в дереве данных);
 5. переписывает человекочитаемый `wiki/model-fleet-report.md` — но только
    если страница не защищена курацией человека.
 
@@ -36,7 +38,7 @@ from . import corrective, runner, systemd
 NAME = "brain-model-fleet"
 DEFAULT_AGENT = "model-fleet:cycle"
 SOURCE = "model-fleet:refresh-failure"
-REGISTRY_REL = Path("config") / "model-fleet.json"
+REGISTRY_REL = Path(".model-fleet.json")
 REPORT_REL = Path("wiki") / "model-fleet-report.md"
 STALE_AFTER_HOURS = 24.0
 
@@ -152,7 +154,7 @@ def registry_path(brain: Path) -> Path:
 def write_registry(brain: Path, registry: dict[str, Any]) -> Path:
     path = registry_path(brain)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.parent / (path.name + ".tmp")
     tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
@@ -238,7 +240,7 @@ _CORRECTIVE = corrective.Corrective(
     priority="P1",
     slug="model-fleet-refresh-fix",
     acceptance=(
-        "`brain-model-fleet --apply` exits 0 and writes `config/model-fleet.json` with a "
+        "`brain-model-fleet --apply` exits 0 and writes `.model-fleet.json` with a "
         "fresh `updated_utc`; the refresh failure output is preserved in wiki/log.md so the "
         "'diagnosed' claim rests on recorded state, not on memory."
     ),
