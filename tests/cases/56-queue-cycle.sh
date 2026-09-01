@@ -104,12 +104,13 @@ cleanup_srv() {
 }
 trap cleanup_srv EXIT
 
-BRAIN_SANDBOX_AGENT_LAUNCH_GUARD=1 brain-dashboard serve --port 19989 &
+port=$(pick_free_port)
+BRAIN_SANDBOX_AGENT_LAUNCH_GUARD=1 brain-dashboard serve --port "$port" &
 srv_pid=$!
-sleep 1
+wait_dashboard_port "$port"
 
 queue_api_json="$BRAIN_FACTORY_TMP/queue-proposals-api.json"
-curl -s --noproxy '*' "http://127.0.0.1:19989/api/queue-proposals" > "$queue_api_json"
+curl -s --noproxy '*' "http://127.0.0.1:$port/api/queue-proposals" > "$queue_api_json"
 python3 - "$proposal_id" "$queue_api_json" <<'PY'
 import json, sys
 expected = sys.argv[1]
@@ -121,7 +122,7 @@ print("GET /api/queue-proposals OK")
 PY
 
 post_guard_json="$BRAIN_FACTORY_TMP/queue-proposal-post-guard.json"
-curl -s --noproxy '*' -X POST "http://127.0.0.1:19989/api/queue-proposals/$proposal_id/launch?dry_run=1" > "$post_guard_json"
+curl -s --noproxy '*' -X POST "http://127.0.0.1:$port/api/queue-proposals/$proposal_id/launch?dry_run=1" > "$post_guard_json"
 python3 - "$post_guard_json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -131,7 +132,7 @@ print("POST proposal launch CSRF guard OK")
 PY
 
 post_dry_run_json="$BRAIN_FACTORY_TMP/queue-proposal-post-dry-run.json"
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19989/api/queue-proposals/$proposal_id/launch?dry_run=1" > "$post_dry_run_json"
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/queue-proposals/$proposal_id/launch?dry_run=1" > "$post_dry_run_json"
 python3 - "$post_dry_run_json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -143,7 +144,7 @@ print("POST proposal dry-run OK")
 PY
 
 post_live_json="$BRAIN_FACTORY_TMP/queue-proposal-post-live.json"
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19989/api/queue-proposals/$proposal_id/launch" > "$post_live_json"
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/queue-proposals/$proposal_id/launch" > "$post_live_json"
 python3 - "$post_live_json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))

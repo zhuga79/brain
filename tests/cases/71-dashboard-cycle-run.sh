@@ -43,13 +43,14 @@ SH
 chmod +x "$shim/systemctl"
 export PATH="$shim:$PATH"
 
-brain-dashboard serve --port 19994 &
+port=$(pick_free_port)
+brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true' EXIT
-sleep 1
+wait_dashboard_port "$port"
 
 # valid brain unit + run -> ok
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19994/api/cycle/brain-provider-probe.timer?action=run" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/cycle/brain-provider-probe.timer?action=run" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 assert d.get('ok') is True, f'valid run should succeed: {d}'
 assert d.get('action')=='run', d
@@ -57,21 +58,21 @@ print('OK: valid cycle run accepted')
 " || { echo "FAILED: valid cycle run"; exit 1; }
 
 # missing confirm header -> 403/false
-curl -s --noproxy '*' -X POST "http://127.0.0.1:19994/api/cycle/brain-provider-probe.timer?action=run" | python3 -c "
+curl -s --noproxy '*' -X POST "http://127.0.0.1:$port/api/cycle/brain-provider-probe.timer?action=run" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 assert d.get('ok') is False and 'Confirm' in d.get('error',''), f'missing confirm should fail: {d}'
 print('OK: confirm guard')
 " || { echo "FAILED: confirm guard"; exit 1; }
 
 # non-brain unit -> rejected (no arbitrary systemctl)
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19994/api/cycle/evil.timer?action=run" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/cycle/evil.timer?action=run" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 assert d.get('ok') is False and 'unit' in d.get('error','').lower(), f'non-brain unit should be rejected: {d}'
 print('OK: unit whitelist enforced')
 " || { echo "FAILED: unit whitelist"; exit 1; }
 
 # unknown action -> 400
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19994/api/cycle/brain-provider-probe.timer?action=destroy" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/cycle/brain-provider-probe.timer?action=destroy" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 assert d.get('ok') is False and 'action' in d.get('error','').lower(), f'unknown action should fail: {d}'
 print('OK: action validated')

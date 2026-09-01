@@ -41,17 +41,18 @@ s3="$(sig)"
 echo "OK: signature stable when nothing changes"
 
 # JS wiring lives in the live (serve) page, not static export.
-brain-dashboard serve --port 19993 &
+port=$(pick_free_port)
+brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true' EXIT
-sleep 1
-page="$(curl -s --noproxy '*' "http://127.0.0.1:19993/")"
+wait_dashboard_port "$port"
+page="$(curl -s --noproxy '*' "http://127.0.0.1:$port/")"
 grep -q "nextSig" <<< "$page" || { echo "FAILED: auto-refresh JS missing on live page"; exit 1; }
 grep -q "_busy" <<< "$page" || { echo "FAILED: busy guard missing"; exit 1; }
 grep -q 'name="state-sig"' <<< "$page" || { echo "FAILED: state-sig meta missing on live page"; exit 1; }
 echo "OK: auto-refresh JS wired (signature + busy guard)"
 
 # /api/status exposes the signature for the poll to compare
-curl -s --noproxy '*' "http://127.0.0.1:19993/api/status" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('signature'), 'no signature in /api/status'; print('OK: /api/status exposes signature', d['signature'])" || { echo "FAILED: /api/status signature missing"; exit 1; }
+curl -s --noproxy '*' "http://127.0.0.1:$port/api/status" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('signature'), 'no signature in /api/status'; print('OK: /api/status exposes signature', d['signature'])" || { echo "FAILED: /api/status signature missing"; exit 1; }
 
 echo "dashboard auto-refresh test PASSED"

@@ -43,13 +43,14 @@ cat > "$BRAIN_PATH/.brain/launch-queue/proposals.json" <<'JSON'
 }
 JSON
 
-brain-dashboard serve --port 19991 &
+port=$(pick_free_port)
+brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true' EXIT
-sleep 1
+wait_dashboard_port "$port"
 
 curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19991/api/queue-proposals/qp-badws/launch?dry_run=0" | python3 -c "
+  "http://127.0.0.1:$port/api/queue-proposals/qp-badws/launch?dry_run=0" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is False, f'launch with bad workspace should fail: {d}'

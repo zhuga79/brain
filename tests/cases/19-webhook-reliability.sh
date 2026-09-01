@@ -18,9 +18,15 @@ brain_dir = pathlib.Path(tempfile.mkdtemp(prefix="smoke-webhook-"))
 (brain_dir / "wiki" / "index.md").write_text("# Index\n")
 (brain_dir / "MEMORY.md").write_text("# Memory\n")
 
+# Неслушиваемый порт вместо константы 19999: при двух прогонах константа
+# могла совпасть с живым сервером соседа (t-2026-08-16-smoke-suite-cannot-run-concurr).
+import socket as _sock
+_dead = _sock.socket(); _dead.bind(("127.0.0.1", 0)); dead_port = _dead.getsockname()[1]; _dead.close()
+dead_url = f"http://127.0.0.1:{dead_port}/no-server"
+
 # ── Test 1: dead-letter on unreachable URL ─────────────────────────────────────
 env = {**os.environ, "BRAIN_PATH": str(brain_dir),
-       "BRAIN_WEBHOOK_URL": "http://127.0.0.1:19999/no-server",
+       "BRAIN_WEBHOOK_URL": dead_url,
        "BRAIN_WEBHOOK_ALLOW_LOOPBACK": "1",
        "BRAIN_WEBHOOK_RETRIES": "2", "BRAIN_WEBHOOK_TIMEOUT_SEC": "1"}
 
@@ -40,7 +46,7 @@ import time as _time
 last_err = None
 for attempt in range(1, 3):
     req = urllib.request.Request(
-        "http://127.0.0.1:19999/no-server", data=payload,
+        dead_url, data=payload,
         headers={"Content-Type": "application/json", "User-Agent": "brain-task/2.0",
                  "X-Brain-Idempotency-Key": idem_key, "X-Brain-Attempt": str(attempt)})
     try:
@@ -55,7 +61,7 @@ assert last_err, "Expected delivery failure to unreachable server"
 dl_dir = brain_dir / ".webhooks"
 dl_dir.mkdir(parents=True, exist_ok=True)
 entry = json.dumps({
-    "url": "http://127.0.0.1:19999/no-server",
+    "url": dead_url,
     "payload": json.loads(payload.decode()),
     "idempotency_key": idem_key, "failed_at": ts, "error": last_err,
 })
@@ -78,11 +84,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers()
     def log_message(self, *a): pass
 
-server = http.server.HTTPServer(("127.0.0.1", 19998), Handler)
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+hook_port = server.server_address[1]
 t = threading.Thread(target=server.serve_forever); t.daemon = True; t.start()
 
 env2 = {**os.environ, "BRAIN_PATH": str(brain_dir),
-        "BRAIN_WEBHOOK_URL": "http://127.0.0.1:19998/hook",
+        "BRAIN_WEBHOOK_URL": f"http://127.0.0.1:{hook_port}/hook",
         "BRAIN_WEBHOOK_ALLOW_LOOPBACK": "1",
         "BRAIN_WEBHOOK_TIMEOUT_SEC": "3"}
 r = subprocess.run(["brain-task", "webhook-replay"], env=env2,

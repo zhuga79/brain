@@ -26,18 +26,19 @@ The operator dashboard shows tasks, launches and provider health.
 PG
 brain-index rebuild >/dev/null 2>&1 || true
 
-brain-dashboard serve --port 19995 &
+port=$(pick_free_port)
+brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true' EXIT
-sleep 1
+wait_dashboard_port "$port"
 
 # (a) progress indicator element rendered
-page="$(curl -s --noproxy '*' "http://127.0.0.1:19995/")"
+page="$(curl -s --noproxy '*' "http://127.0.0.1:$port/")"
 grep -q 'id="search-progress"' <<< "$page" || { echo "FAILED: search-progress element missing"; exit 1; }
 echo "OK: progress indicator rendered"
 
 # (b) /api/search returns results JSON
-curl -s --noproxy '*' "http://127.0.0.1:19995/api/search?q=dashboard&mode=bm25" | python3 -c "
+curl -s --noproxy '*' "http://127.0.0.1:$port/api/search?q=dashboard&mode=bm25" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert isinstance(d.get('results'), list), f'results should be a list: {str(d)[:200]}'

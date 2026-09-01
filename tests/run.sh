@@ -31,6 +31,48 @@ FAILED=0
 SKIPPED=0
 TOTAL=0
 
+# Взаимоисключение прогонов раннера — общесистемное, не по дереву.
+#
+# Порты изолированы через pick_free_port (см. tests/_lib.sh), но кейсы также
+# используют больше сотни фиксированных путей вида /tmp/brain_*.json,
+# /tmp/brain_*.log и т.п. — не под $TMP_HOME, а прямо под /tmp по имени.
+# Их пишут и тут же читают синхронно внутри одного кейса, поэтому для
+# одиночного прогона это безобидно, но при двух ОДНОВРЕМЕННЫХ прогонах
+# tests/run.sh (в том числе из разных деревьев — путь общий для любого
+# чекаута) один и тот же файл перезаписывается конкурентно, и второй кейс
+# читает чужие данные молча, без ошибки открытия файла. Изолировать
+# каждый такой путь по дереву — бесконечная и растущая цель (новые кейсы
+# продолжают заводить такие пути тем же способом); вместо этого раннер
+# допускает только один активный прогон в системе и явно отказывает
+# второму, а не тонет в скрытых гонках по /tmp.
+#
+# flock — ядерный advisory-лок: если процесс-держатель упадёт (даже kill -9),
+# лок освобождается сам, без TTL и протухания в отличие от brain-lock.
+# Путь фиксирован под /tmp, а не под TMPDIR: кейсы пишут /tmp/brain_*
+# литералами, и два прогона с разным TMPDIR всё равно делят эти файлы
+# (t-2026-08-16-smoke-suite-cannot-run-concurr). BRAIN_SMOKE_RUN_LOCK —
+# только для точечной проверки самого лока, не для обхода сериализации.
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ОТКАЗ: нет flock(1) — параллельный прогон tests/run.sh нельзя исключить." >&2
+    echo "Смоук-кейсы делят фиксированные пути /tmp/brain_*.{json,log,out,err,txt,html}." >&2
+    exit 3
+fi
+RUN_LOCK_FILE="${BRAIN_SMOKE_RUN_LOCK:-/tmp/brain-smoke-run.lock}"
+# >> не режет файл: `exec 9>` до flock уничтожил бы pid держателя, и отказ
+# не смог бы его напечатать.
+exec 9>>"$RUN_LOCK_FILE"
+if ! flock -n 9; then
+    holder="$(tr -d '\0' < "$RUN_LOCK_FILE" 2>/dev/null || true)"
+    echo "ОТКАЗ: другой прогон tests/run.sh уже активен (лок: $RUN_LOCK_FILE)." >&2
+    [ -n "$holder" ] && echo "Держит: $holder" >&2
+    echo "Смоук-кейсы делят фиксированные пути /tmp/brain_*.{json,log,out,err,txt,html}" >&2
+    echo "между любыми деревьями — параллельный прогон портит данные соседа." >&2
+    echo "Дождитесь завершения другого прогона (или его аварийного конца — лок" >&2
+    echo "снимается автоматически) и повторите." >&2
+    exit 3
+fi
+printf 'pid=%s started=%s\n' "$$" "$(date -Iseconds)" > "$RUN_LOCK_FILE"
+
 echo ">>> Running Brain smoke test runner (pattern: ${PATTERN:-all})"
 echo ">>> Project root: $PROJECT_ROOT"
 
@@ -126,7 +168,10 @@ for case_file in "$CASES_DIR"/*.sh; do
     echo ""
     echo ">>> [case: $case_name] Starting"
 
-    if (export PROJECT_ROOT HOME BRAIN_PATH PATH; bash "$case_file" 2>&1); then
+    # exec 9>&- : кейс и его фоновые серверы не наследуют fd лока.
+    # Иначе переживший suite `brain-dashboard serve` держал бы flock после
+    # выхода раннера — второй прогон отказывал бы в пустоту.
+    if (export PROJECT_ROOT HOME BRAIN_PATH PATH; exec 9>&-; bash "$case_file" 2>&1); then
         case_end=$(date +%s%N)
         elapsed_ms=$(( (case_end - case_start) / 1000000 ))
         echo ">>> [case: $case_name] PASSED (${elapsed_ms}ms)"

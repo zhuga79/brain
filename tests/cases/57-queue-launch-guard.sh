@@ -53,13 +53,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BRAIN_SANDBOX_AGENT_LAUNCH_GUARD=1 brain-dashboard serve --port 19988 &
+port=$(pick_free_port)
+BRAIN_SANDBOX_AGENT_LAUNCH_GUARD=1 brain-dashboard serve --port "$port" &
 srv_pid=$!
-sleep 1
+wait_dashboard_port "$port"
 
 # Live (non-dry-run) relaunch of a non-pending proposal must be rejected.
 curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19988/api/queue-proposals/qp-test-launched/launch?dry_run=0" | python3 -c "
+  "http://127.0.0.1:$port/api/queue-proposals/qp-test-launched/launch?dry_run=0" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is False, f'relaunch of launched proposal should fail: {d}'
@@ -70,7 +71,7 @@ print('relaunch guard rejects non-pending live launch OK')
 
 # Dry-run of the same proposal is still allowed (read-only preview).
 curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19988/api/queue-proposals/qp-test-launched/launch?dry_run=1" | python3 -c "
+  "http://127.0.0.1:$port/api/queue-proposals/qp-test-launched/launch?dry_run=1" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 # dry-run passes the guard; it may still fail later (sandbox/missing orchestrator),
@@ -112,16 +113,17 @@ cat > "$BRAIN_PATH/.brain/launch-queue/proposals.json" <<'JSON'
 }
 JSON
 
+port2=$(pick_free_port)
 env -u CODEX_SANDBOX_NETWORK_DISABLED -u CODEX_SANDBOX -u SANDBOX_MODE -u BRAIN_SANDBOX_AGENT_LAUNCH_GUARD \
-  brain-dashboard serve --port 19996 &
+  brain-dashboard serve --port "$port2" &
 srv2_pid=$!
-sleep 1
+wait_dashboard_port "$port2"
 
 curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19996/api/queue-proposals/qp-race/launch?dry_run=0" > "$BRAIN_FACTORY_TMP/race-1.json" &
+  "http://127.0.0.1:$port2/api/queue-proposals/qp-race/launch?dry_run=0" > "$BRAIN_FACTORY_TMP/race-1.json" &
 pid1=$!
 curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19996/api/queue-proposals/qp-race/launch?dry_run=0" > "$BRAIN_FACTORY_TMP/race-2.json" &
+  "http://127.0.0.1:$port2/api/queue-proposals/qp-race/launch?dry_run=0" > "$BRAIN_FACTORY_TMP/race-2.json" &
 pid2=$!
 wait "$pid1"
 wait "$pid2"
