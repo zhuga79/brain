@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import brain_task_parser
 
-from brain_core import atomic, taskfile
+from brain_core import atomic, journal, taskfile
 
 SUBTASKS_RE = re.compile(r"^## Subtasks\s*$(.+?)(?=^## |\Z)", re.S | re.M)
 STATUS_RE = re.compile(r"^status:\s*\S+\s*$", re.M)
@@ -31,6 +32,50 @@ class CommitResult:
     appended_ids: list[str]
     recovered: bool
     changed: bool
+    audited: bool = False
+    """A fresh audit line was written to wiki/log.md this call. False when no
+    log_path was given, or when the line for this (op, parent, subtask-set)
+    was already present (idempotent re-commit / crash-retry that already
+    logged)."""
+
+
+def _commit_signature(expected_ids: list[str]) -> str:
+    """Deterministic key for this commit's subtask set — the audit dedup id.
+
+    Same PRD content → same signature, so a crash-retry finds (or misses) the
+    exact line the first attempt would have written, and a genuine re-commit
+    with new subtasks gets its own line.
+    """
+    payload = " ".join(sorted(expected_ids)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _audit_commit(
+    log_path: Path, op: str, parent_id: str, agent: str, extra: str, signature: str
+) -> bool:
+    """Append the PRD-commit audit line as part of the commit transaction.
+
+    Called from inside the caller's ``queue_lock``; it also takes the journal
+    lock, so the queue mutation and its audit record land as one serialized
+    unit — a concurrent commit cannot interleave between them, and a crash
+    that lost the line lets the next run write it (the marker match is keyed
+    on the deterministic signature, not on a timestamp). Returns True iff a
+    line was written.
+    """
+    marker = re.compile(
+        rf"(?m)^## \[[^\]]*\] {re.escape(op)} \| {re.escape(parent_id)} \|.*\bsig={signature}\b"
+    )
+    with atomic.file_lock(log_path.parent / journal.LOCK_NAME):
+        existing = atomic.read_text(log_path) if log_path.exists() else ""
+        if marker.search(existing):
+            return False
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        line = journal.format_entry(op, parent_id, agent, f"{extra} sig={signature}".strip())
+        with log_path.open("a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(line)
+    return True
 
 
 def _read(path: Path) -> str:
@@ -164,6 +209,11 @@ def _commit_locked(
     parent_id: str,
     prd_text: str,
     subtasks: list[NormalizedSubtask],
+    *,
+    log_path: Path | None = None,
+    audit_op: str = "prd-commit",
+    audit_agent: str = "",
+    audit_extra_tail: str = "",
 ) -> CommitResult:
     expected_ids = [item.task_id for item in subtasks]
 
@@ -191,23 +241,53 @@ def _commit_locked(
         _write_prd(prd_path, committed_text)
         changed = True
 
+    audited = False
+    if log_path is not None:
+        extra = (
+            f"subtasks={len(subtasks)} appended={len(missing_ids)} "
+            f"recovered={int(recovered)}{audit_extra_tail}"
+        )
+        audited = _audit_commit(
+            log_path, audit_op, parent_id, audit_agent, extra, _commit_signature(expected_ids)
+        )
+
     return CommitResult(
         parent_id=parent_id,
         subtasks=subtasks,
         appended_ids=missing_ids,
         recovered=recovered,
         changed=changed,
+        audited=audited,
     )
 
 
-def commit(prd_path: Path, active_path: Path, done_path: Path, parent_id: str) -> CommitResult:
+def commit(
+    prd_path: Path,
+    active_path: Path,
+    done_path: Path,
+    parent_id: str,
+    *,
+    log_path: Path | None = None,
+    audit_agent: str = "",
+    audit_extra_tail: str = "",
+) -> CommitResult:
+    """Commit a PRD's ``## Subtasks`` section into the queue.
+
+    When ``log_path`` is given, the ``prd-commit`` audit line is written to it
+    inside the same queue transaction (see ``_audit_commit``); callers no
+    longer append to wiki/log.md themselves.
+    """
     tasks_dir = active_path.parent
     with taskfile.queue_lock(tasks_dir):
         prd_text = _read(prd_path)
         if not prd_text:
             raise PRDError(f"no PRD at {prd_path}")
         subtasks = normalize_subtasks(parent_id, _extract_subtasks(prd_text))
-        return _commit_locked(prd_path, active_path, done_path, parent_id, prd_text, subtasks)
+        return _commit_locked(
+            prd_path, active_path, done_path, parent_id, prd_text, subtasks,
+            log_path=log_path, audit_op="prd-commit", audit_agent=audit_agent,
+            audit_extra_tail=audit_extra_tail,
+        )
 
 
 def commit_prepared(
@@ -216,6 +296,11 @@ def commit_prepared(
     done_path: Path,
     parent_id: str,
     prepared_blocks: list[str],
+    *,
+    log_path: Path | None = None,
+    audit_op: str = "prd-decompose",
+    audit_agent: str = "",
+    audit_extra_tail: str = "",
 ) -> CommitResult:
     tasks_dir = active_path.parent
     with taskfile.queue_lock(tasks_dir):
@@ -223,4 +308,8 @@ def commit_prepared(
         if not prd_text:
             raise PRDError(f"no PRD at {prd_path}")
         subtasks = normalize_prepared_blocks(parent_id, prepared_blocks)
-        return _commit_locked(prd_path, active_path, done_path, parent_id, prd_text, subtasks)
+        return _commit_locked(
+            prd_path, active_path, done_path, parent_id, prd_text, subtasks,
+            log_path=log_path, audit_op=audit_op, audit_agent=audit_agent,
+            audit_extra_tail=audit_extra_tail,
+        )
