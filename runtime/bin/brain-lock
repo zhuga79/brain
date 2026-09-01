@@ -57,6 +57,9 @@ case "$cmd" in
     dir="$LOCKS/$id"
     if mkdir "$dir" 2>/dev/null; then
       printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+      # Записать рабочее дерево исполнителя рядом с локом — чтобы автосохранению
+      # было где искать (t-2026-08-16-autosave-uncommitted-agent-wor).
+      _py brain_core.autosave record --locks "$LOCKS" --tid "$id" >/dev/null 2>&1 || true
       if $json_out; then
         printf '{"ok":true,"task_id":"%s","owner":"%s","stale":false,"age_s":0,"ttl_s":%s}\n' "$id" "$agent" "$ttl"
       else
@@ -113,6 +116,9 @@ case "$cmd" in
           fi
           exit 1
         fi
+        # Спасти незакоммиченную работу прежнего владельца до сноса лока
+        # (t-2026-08-16-autosave-uncommitted-agent-wor).
+        _py brain_core.autosave evict --locks "$LOCKS" --active "$A" --tid "$id" --agent "$o_agent" >/dev/null 2>&1 || true
         rm -rf "$dir"
         if ! mkdir "$dir" 2>/dev/null; then
           flock -u 9
@@ -124,6 +130,7 @@ case "$cmd" in
           exit 1
         fi
         printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"
+        _py brain_core.autosave record --locks "$LOCKS" --tid "$id" >/dev/null 2>&1 || true
         flock -u 9
         if $json_out; then
           printf '{"ok":true,"task_id":"%s","owner":"%s","stale":true,"stale_from":"%s","age_s":%s,"ttl_s":%s}\n' \
@@ -265,12 +272,20 @@ case "$cmd" in
     n=0
     for d in "$LOCKS"/*/; do
       [ ! -d "$d" ] && continue
+      bn=$(basename "$d")
+      case "$bn" in .*) continue;; esac
       owner=$(parse_owner "$d/owner" || echo "")
       [ -z "$owner" ] && { rm -rf "$d"; n=$((n+1)); continue; }
+      o_agent=$(echo "$owner" | cut -d'|' -f1)
       o_ts=$(echo "$owner" | cut -d'|' -f2)
       o_ttl=$(echo "$owner" | cut -d'|' -f3)
       age=$(( $(now_epoch) - o_ts ))
-      if [ "$age" -gt "$o_ttl" ]; then rm -rf "$d"; n=$((n+1)); fi
+      if [ "$age" -gt "$o_ttl" ]; then
+        # Спасти незакоммиченную работу до сноса протухшего лока
+        # (t-2026-08-16-autosave-uncommitted-agent-wor).
+        _py brain_core.autosave evict --locks "$LOCKS" --active "$A" --tid "$bn" --agent "$o_agent" >/dev/null 2>&1 || true
+        rm -rf "$d"; n=$((n+1))
+      fi
     done
     if $json_out; then printf '{"cleaned":%s}\n' "$n";
     else echo "cleaned $n stale locks"; fi
