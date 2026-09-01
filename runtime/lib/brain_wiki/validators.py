@@ -1143,4 +1143,7 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     issues.extend(validate_role_uiux_routing(brain))
     issues.extend(validate_uiux_skill_pack(brain))
     issues.extend(validate_uiux_stale_references(brain))
+    from .writers import model_fleet_issues
+
+    issues.extend(model_fleet_issues(brain))
     return issues

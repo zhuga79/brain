@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Периодическая актуализация канонического списка живых моделей.
+
+Логика живёт в `brain_app.cycles.model_fleet`, здесь — только точка входа.
+"""
+
+from __future__ import annotations
+
+from brain_app.cycles import model_fleet, runner
+
+
+def main(argv: list[str] | None = None) -> int:
+    return runner.dispatch(model_fleet.SPEC, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -93,9 +93,8 @@
 ### Solo (`mode: solo`)
 1. Найди верхнюю `- [ ]` задачу с `role:` равной твоей роли (или без `role:` если ты `developer`).
 2. `brain-lock acquire <id> --as <agent-id>` → если занято, ищи следующую.
-   Если у задачи есть поле `resume:` — предыдущий исполнитель оборвался, и его
-   работа автосохранена. Начни с указанной там команды `git cherry-pick -n
-   wip-recovery/<id>` (тег в системном git), а не с чистого листа.
+   Есть поле `resume:` — работа автосохранена, начни с `git cherry-pick -n
+   wip-recovery/<id>` (тег в git), а не с нуля.
 3. Поменяй на `- [~]`, добавь `started: <ISO>` и `by: <agent-id>`.
 4. Запиши в `wiki/log.md`: `## [ts] task-start | <id> | <agent-id> | <role>`.
 5. Работай. По завершении: `- [x]`, перенос в `done.md`, обновление wiki, release lock.
@@ -155,3 +154,4 @@ Risks / Open questions, Recommendation.
 - **Уважай роль.** Reviewer не пишет код. Linter не принимает архитектурных решений.
 - **Уважай курацию.** Не затирай то, что помечено как `protected` или `curation: human`.
 - **Подписывай модель.** Каждая закрытая задача ОБЯЗАНА нести `model: <provider-model-version>` — реальную модель и её версию исполнителя (напр. `claude-opus-4-8`, `gemini-2.5-pro`), а не только `agent-id`. Закрытие — через `brain-task complete <id> --as <agent> --model <model>` или с выставленным `BRAIN_AGENT_MODEL`. Без подписи запись помечается `model: unsigned`; `BRAIN_REQUIRE_MODEL=1` делает подпись строго обязательной.
+- **Предлагай живые модели.** Сверься с `config/model-fleet.json`, не бери ID по памяти. Реестра нет или протух — `brain-model-fleet --apply`.
