@@ -248,6 +248,11 @@ grep -q "mode: solo" /tmp/brain_prd_dry_run.log || { echo "FAILED: brain-prd dry
 brain-prd commit "$pid" > /dev/null
 grep -q "$pid-s1" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: Subtask 1 not found"; exit 1; }
 grep -q "$pid-s2" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: Subtask 2 not found"; exit 1; }
+# The prd-commit audit line is written by prdfile inside the queue transaction,
+# not appended by the CLI afterwards (t-2026-08-14-prd-decompose-log-transaction).
+audit_count=$(grep -cE "^## \[[^]]*\] prd-commit \| $pid \|" "$BRAIN_PATH/wiki/log.md" || true)
+[ "$audit_count" = "1" ] || { echo "FAILED: prd-commit not audited exactly once (got $audit_count)"; cat "$BRAIN_PATH/wiki/log.md"; exit 1; }
+grep -qE "^## \[[^]]*\] prd-commit \| $pid \|.* sig=[0-9a-f]+$" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: prd-commit audit line missing sig"; exit 1; }
 
 echo ">>> Verifying brain-run for tax-advisor includes doctrine"
 brain_run_out=$(brain-run --role tax-advisor --task "$pid-s1")

@@ -1,6 +1,6 @@
 import re
 from brain_core import prdfile
-from common import mcp, BRAIN, ACTIVE, DONE, PRD_DIR, append_log, git_commit, ts, find_task_block, parse_block, find_blocks
+from common import mcp, BRAIN, ACTIVE, DONE, LOG, PRD_DIR, append_log, git_commit, ts, find_task_block, parse_block, find_blocks
 from result import ok, error
 
 @mcp.tool()
@@ -43,16 +43,13 @@ def commit_prd(task_id: str) -> dict:
         return error(f"no PRD at {f}")
 
     try:
-        result = prdfile.commit(f, ACTIVE, DONE, task_id)
+        # The prd-commit audit line is written inside the queue transaction by
+        # prdfile.commit — queue state and its record can no longer diverge on
+        # a crash or a concurrent commit.
+        result = prdfile.commit(f, ACTIVE, DONE, task_id, log_path=LOG)
     except prdfile.PRDError as exc:
         return error(str(exc))
 
-    append_log(
-        "prd-commit",
-        task_id,
-        "",
-        f"subtasks={len(result.subtasks)} appended={len(result.appended_ids)} recovered={int(result.recovered)}",
-    )
     git_commit(f"prd-commit: {task_id}")
 
     return ok(

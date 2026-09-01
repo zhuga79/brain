@@ -88,7 +88,7 @@ print(tmpl.replace('{prd_text}', prd))
     # --- parse LLM output into task blocks ---
     _agent="claude-brain-prd-decompose"
     _result=$(python3 - "$_llm_output" "$id" "$_do_commit" "$A" "$D" "$LOG" "$_agent" "$_bin_dir" "$f" <<'PY'
-import sys, re, datetime, pathlib
+import sys, re, pathlib
 
 llm_output, parent_id, do_commit, active_path, done_path, log_path, agent_id, bin_dir, prd_path = sys.argv[1:10]
 do_commit = (do_commit == "1")
@@ -166,15 +166,14 @@ if do_commit:
     p_path = pathlib.Path(prd_path)
     active = pathlib.Path(active_path)
     done = pathlib.Path(done_path)
-    result = prdfile.commit_prepared(p_path, active, done, parent_id, out_blocks)
-    # log — intentionally brief: no prompt content, no secrets
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(log_path, "a") as fh:
-        fh.write(
-            f"## [{ts}] prd-decompose | {parent_id} | {agent_id} | "
-            f"tasks={len(result.subtasks)} appended={len(result.appended_ids)} "
-            f"recovered={int(result.recovered)} stub={used_stub}\n"
-        )
+    # The audit line (brief by design: no prompt content, no secrets) is written
+    # by commit_prepared inside the queue transaction, so a crash or a concurrent
+    # commit can no longer separate queue state from its record.
+    result = prdfile.commit_prepared(
+        p_path, active, done, parent_id, out_blocks,
+        log_path=pathlib.Path(log_path), audit_agent=agent_id,
+        audit_extra_tail=f" stub={used_stub}",
+    )
     print(
         f"committed {len(result.subtasks)} subtasks to active.md and updated {prd_path} "
         f"(appended={len(result.appended_ids)} recovered={result.recovered} stub={used_stub}):"
@@ -269,24 +268,21 @@ PY
     f="$PRD_DIR/$id.md"
     [ ! -f "$f" ] && { echo "no PRD at $f"; exit 1; }
     python3 - "$f" "$A" "$D" "$id" "$LOG" <<'PY'
-import sys, datetime, pathlib
+import sys, pathlib
 
 from brain_core import prdfile
 
 prd_path, active_path, done_path, parent_id, log_path = sys.argv[1:6]
 try:
-    result = prdfile.commit(pathlib.Path(prd_path), pathlib.Path(active_path), pathlib.Path(done_path), parent_id)
+    # The prd-commit audit line is written inside the queue transaction by
+    # prdfile.commit — one recoverable unit, no separate append here.
+    result = prdfile.commit(
+        pathlib.Path(prd_path), pathlib.Path(active_path), pathlib.Path(done_path),
+        parent_id, log_path=pathlib.Path(log_path),
+    )
 except prdfile.PRDError as exc:
     print(str(exc))
     sys.exit(1)
-
-ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-with open(log_path, "a") as f:
-    f.write(
-        f"## [{ts}] prd-commit | {parent_id} |  | "
-        f"subtasks={len(result.subtasks)} appended={len(result.appended_ids)} "
-        f"recovered={int(result.recovered)}\n"
-    )
 
 print(
     f"committed {len(result.subtasks)} subtasks to active.md "
