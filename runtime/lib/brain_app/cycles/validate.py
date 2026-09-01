@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from brain_core import clock, journal
+from brain_core import atomic, clock, journal
 
 from . import corrective, runner, systemd
 
@@ -39,9 +40,69 @@ def append_log(brain: Path, entry: str) -> None:
     journal.append_line(f"- {clock.utc_now()}: {entry}", brain)
 
 
-def append_corrective_task(brain: Path) -> tuple[bool, str]:
+def failure_report_path(brain: Path, ts: dt.datetime) -> Path:
+    """Куда ложится отчёт об упавшей проверке — wiki под временной меткой."""
+    return brain / "wiki" / f"validate-cycle-{clock.stamp_for_filename(ts)}.md"
+
+
+def write_failure_report(brain: Path, ts: dt.datetime, result: dict[str, Any]) -> Path:
+    """Записать вывод упавшей проверки в момент отказа.
+
+    Сам corrective-цикл ничего не чинит — он заводит задачу под linter, чья
+    приёмка требует «diagnosed». Вывод, сохранённый здесь, и есть тот
+    записанный след, на который опирается диагноз без реконструкции.
+    """
+    path = failure_report_path(brain, ts)
+    lines = [
+        "---",
+        "title: Validate Cycle Failure",
+        "type: concept",
+        f"created: {ts.strftime('%Y-%m-%d')}",
+        f"updated: {ts.strftime('%Y-%m-%d')}",
+        "curation: agent",
+        "source_policy: ignored",
+        "tags: [validate-cycle]",
+        "---",
+        "",
+        f"# Validate Cycle Failure {clock.utc_now(ts)}",
+        "",
+        f"- command: `{result.get('command')}`",
+        f"- exit_code: {result.get('exit_code')}",
+        f"- source: {SOURCE}",
+        "",
+        "## stdout",
+        "",
+        "```",
+        result.get("stdout") or "",
+        "```",
+        "",
+        "## stderr",
+        "",
+        "```",
+        result.get("stderr") or "",
+        "```",
+        "",
+    ]
+    atomic.write_text(path, "\n".join(lines))
+    return path
+
+
+def append_corrective_task(brain: Path, report_rel: str) -> tuple[bool, str]:
     """Завести задачу на провал валидации, если такой ещё нет."""
-    added = corrective.append(brain, [CORRECTIVE])
+    item = corrective.Corrective(
+        title=CORRECTIVE.title,
+        source=SOURCE,
+        role=CORRECTIVE.role,
+        priority=CORRECTIVE.priority,
+        slug=CORRECTIVE.slug,
+        ref=report_rel,
+        acceptance=(
+            "brain-validate exits 0; the structural/data integrity issue it reported "
+            "is diagnosed and fixed. Diagnosis must rest on the recorded stdout/stderr "
+            f"in `{report_rel}`, not on memory."
+        ),
+    )
+    added = corrective.append(brain, [item])
     if not added:
         return False, f"Corrective task with source '{SOURCE}' already exists. Skipping."
     return True, f"Appended corrective task {added[0]} (source '{SOURCE}')."
@@ -67,10 +128,14 @@ def run_cycle(brain: Path, *, dry_run: bool) -> dict[str, Any]:
             result["status"] = "failure"
             result["message"] = "Brain validation failed."
             if not dry_run:
-                created, message = append_corrective_task(brain)
+                ts = clock.now()
+                report = write_failure_report(brain, ts, result)
+                report_rel = str(report.relative_to(brain))
+                result["report"] = report_rel
+                created, message = append_corrective_task(brain, report_rel)
                 result["task_created"] = created
                 result["task_message"] = message
-                append_log(brain, f"validate-cycle: FAILED - {message}")
+                append_log(brain, f"validate-cycle: FAILED - {message} report={report_rel}")
     except FileNotFoundError:
         result["status"] = "error"
         result["message"] = "Error: 'brain-validate' command not found. Is the brain installed?"
@@ -103,6 +168,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Message: {result.get('message', 'N/A')}")
         if result.get("task_message"):
             print(f"Task: {result.get('task_message')}")
+        if result.get("report"):
+            print(f"Report: {result.get('report')}")
         if result.get("stderr"):
             print("\n--- Stderr ---")
             print(result["stderr"])
