@@ -7,6 +7,7 @@ import brain_task_parser
 from brain_app import queue
 from brain_core.taskfile import LOCK_TTL_DEFAULT
 from brain_core import autosave as _autosave
+from brain_core.model_signature import ModelSignatureError, resolve_completion_model
 from result import ok, error
 
 _LOCK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -49,12 +50,6 @@ def _read_lock_owner(owner_file) -> tuple[str | None, str | None]:
         return None, "corrupt owner"
     return owner, None
 
-
-def _require_model(model: str) -> str | None:
-    try:
-        return queue.validate_model_signature(model)
-    except ValueError:
-        return None
 
 @mcp.tool()
 def acquire_lock(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> dict:
@@ -270,16 +265,25 @@ def release_task(task_id: str, agent_id: str = "") -> dict:
     return ok()
 
 @mcp.tool()
-def complete_task(task_id: str, agent_id: str = "", model: str = "", summary: str = "") -> dict:
+def complete_task(
+    task_id: str,
+    agent_id: str = "",
+    model: str = "",
+    summary: str = "",
+    allow_unsigned: bool = False,
+) -> dict:
     """Mark task done, move to done.md, release lock."""
     agent = _require_agent_id(agent_id)
     if not agent:
         return error("agent_id required")
-    real_model = _require_model(model)
-    if not real_model:
-        return error("real model required")
     try:
-        queue.complete(task_id, agent, real_model, BRAIN)
+        resolved = resolve_completion_model(model, allow_unsigned=allow_unsigned)
+    except ModelSignatureError as exc:
+        return error(str(exc))
+    try:
+        queue.complete(
+            task_id, agent, resolved.value, BRAIN, allow_unsigned=resolved.unsigned,
+        )
     except Exception as exc:
         return error(str(exc) or "task not found")
     lock_result = release_lock(task_id, agent)

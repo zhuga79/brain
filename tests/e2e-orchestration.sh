@@ -166,7 +166,7 @@ pass "Council status OK"
 
 # ── Step 8: brain-task complete ──────────────────────────────────────────────
 echo "--- Step 8: brain-task complete ---"
-brain-task complete "$E2E_TASK_ID" --as "$AGENT_ID"
+brain-task complete "$E2E_TASK_ID" --as "$AGENT_ID" --model openai-gpt-5.4
 grep -q "$E2E_TASK_ID" "$BRAIN_PATH/tasks/done.md" || fail "Task not in done.md after complete"
 [ ! -f "$BRAIN_PATH/.locks/$E2E_TASK_ID/owner" ] || fail "Lock not released after complete"
 log_after=$(wc -l < "$BRAIN_PATH/wiki/log.md")

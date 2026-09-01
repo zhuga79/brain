@@ -95,7 +95,7 @@ BRAIN_PATH="$BRAIN_D2" \
 BRAIN_WEBHOOK_URL="http://127.0.0.1:29999/no-server" \
 BRAIN_WEBHOOK_RETRIES=2 \
 BRAIN_WEBHOOK_TIMEOUT_SEC=1 \
-  brain-task complete "$TASK_D2" --as "drill2-agent" >/dev/null 2>&1 || true
+  brain-task complete "$TASK_D2" --as "drill2-agent" --model openai-gpt-5.4 >/dev/null 2>&1 || true
 
 DL_FILE="$BRAIN_D2/.webhooks/dead-letter.jsonl"
 [ -f "$DL_FILE" ] || fail "Drill 2: dead-letter.jsonl not created after failed webhook"

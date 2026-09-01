@@ -232,12 +232,49 @@ def cmd_release(brain: Path, task_id: str, agent_id: str, yes: bool = False) -> 
         sys.exit(code)
 
 
-def cmd_complete(brain: Path, task_id: str, agent_id: str, yes: bool = False) -> None:
+def _parse_complete_args(parts: list[str]) -> tuple[str, str, str, bool]:
+    """Parse `complete <id> --as <agent> [--model M] [--allow-unsigned]`."""
+    task_id = parts[1] if len(parts) > 1 and not parts[1].startswith("-") else ""
+    agent = ""
+    model = ""
+    allow_unsigned = False
+    index = 2 if task_id else 1
+    while index < len(parts):
+        token = parts[index]
+        if token == "--as" and index + 1 < len(parts):
+            agent = parts[index + 1]
+            index += 2
+            continue
+        if token == "--model" and index + 1 < len(parts):
+            model = parts[index + 1]
+            index += 2
+            continue
+        if token == "--allow-unsigned":
+            allow_unsigned = True
+            index += 1
+            continue
+        index += 1
+    return task_id, agent, model, allow_unsigned
+
+
+def cmd_complete(
+    brain: Path,
+    task_id: str,
+    agent_id: str,
+    yes: bool = False,
+    model: str = "",
+    allow_unsigned: bool = False,
+) -> None:
     """Complete a task (mark done, move to done.md)."""
     if not _confirm(f"Complete task {task_id} as {agent_id}?", yes):
         print("Aborted.")
         return
-    code, out, err = _run_cli([_local_bin("brain-task"), "complete", task_id, "--as", agent_id])
+    cmd = [_local_bin("brain-task"), "complete", task_id, "--as", agent_id]
+    if model:
+        cmd += ["--model", model]
+    if allow_unsigned:
+        cmd.append("--allow-unsigned")
+    code, out, err = _run_cli(cmd)
     if code == 0:
         print(out.strip() or f"Completed {task_id}")
     else:
@@ -318,7 +355,7 @@ brain-shell commands:
   dashboard export    — generate static HTML dashboard
   take <id> --as <agent>     — take a task (write action)
   release <id> --as <agent>  — release a task lock (write action)
-  complete <id> --as <agent> — mark task complete (write action)
+  complete <id> --as <agent> [--model M] [--allow-unsigned] — mark task complete (write action)
   launch <id> --dry-run      — preview council launch
   help                — show this help
   quit / exit         — exit shell"""
@@ -371,10 +408,11 @@ def run_command(line: str, brain: Path, yes: bool = False) -> bool:
         else:
             print("Usage: release <task-id> --as <agent-id>")
     elif cmd == "complete":
-        if len(parts) >= 4 and parts[2] == "--as":
-            cmd_complete(brain, parts[1], parts[3], yes)
+        task_id, agent_id, model, allow_unsigned = _parse_complete_args(parts)
+        if task_id and agent_id:
+            cmd_complete(brain, task_id, agent_id, yes, model, allow_unsigned)
         else:
-            print("Usage: complete <task-id> --as <agent-id>")
+            print("Usage: complete <task-id> --as <agent-id> [--model <provider-model-version>] [--allow-unsigned]")
     elif cmd == "launch":
         if len(parts) >= 3 and parts[2] == "--dry-run":
             cmd_launch_dryrun(brain, parts[1])

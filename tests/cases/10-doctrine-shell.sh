@@ -56,7 +56,7 @@ grep -q "Aborted" <<< "$_sh_complete_noyes" || { echo "FAILED: shell complete wi
 grep -q "\[~\].*$_shell_wid" "$BRAIN_PATH/tasks/active.md" || { echo "FAILED: task should still be in-progress after aborted complete"; exit 1; }
 
 # With --yes: complete
-brain-shell --yes --once "complete $_shell_wid --as smoke-agent" 2>/dev/null || { echo "FAILED: shell complete --yes failed"; exit 1; }
+brain-shell --yes --once "complete $_shell_wid --as smoke-agent --model openai-gpt-5.4" 2>/dev/null || { echo "FAILED: shell complete --yes failed"; exit 1; }
 grep -q "$_shell_wid" "$BRAIN_PATH/tasks/done.md" || { echo "FAILED: task not in done.md after shell complete --yes"; exit 1; }
 
 # --yes flag shows up in argparse help

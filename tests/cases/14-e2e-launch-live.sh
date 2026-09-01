@@ -44,7 +44,7 @@ BRAIN_WATCH_POLL_SEC=1 brain-launch "$_an_task1" --watch --auto-next > /tmp/brai
 _an_pid=$!
 sleep 0.5
 # Complete task1 (watcher should notice)
-brain-task complete "$_an_task1" --as "$_an_agent" >/dev/null 2>&1 || true
+brain-task complete "$_an_task1" --as "$_an_agent" --model openai-gpt-5.4 >/dev/null 2>&1 || true
 # Give watcher time to detect and take next
 sleep 3
 # If still running, check if task2 was taken
@@ -55,5 +55,5 @@ grep -q "watch-auto-next\|took.*$_an_task2\|took: $_an_task2" /tmp/brain_autonex
   grep -qi "task2\|next task\|took" /tmp/brain_autonext_live.log || { echo "FAILED: auto-next did not reference task2: $(cat /tmp/brain_autonext_live.log)"; exit 1; }
 # Clean up: release any lock on task2
 brain-lock release "$_an_task2" --as "brain-launch-autonext-$_an_pid" 2>/dev/null || true
-brain-task complete "$_an_task2" --as "$_an_agent" 2>/dev/null || true
+brain-task complete "$_an_task2" --as "$_an_agent" --model openai-gpt-5.4 2>/dev/null || true
 echo "brain-launch --watch --auto-next live OK"

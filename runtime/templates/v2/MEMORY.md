@@ -153,5 +153,5 @@ Risks / Open questions, Recommendation.
 - **Уважай локи.** Не игнорируй блокировку, даже если задача кажется простой.
 - **Уважай роль.** Reviewer не пишет код. Linter не принимает архитектурных решений.
 - **Уважай курацию.** Не затирай то, что помечено как `protected` или `curation: human`.
-- **Подписывай модель.** Каждая закрытая задача ОБЯЗАНА нести `model: <provider-model-version>` — реальную модель и её версию исполнителя (напр. `claude-opus-4-8`, `gemini-2.5-pro`), а не только `agent-id`. Закрытие — через `brain-task complete <id> --as <agent> --model <model>` или с выставленным `BRAIN_AGENT_MODEL`. Без подписи запись помечается `model: unsigned`; `BRAIN_REQUIRE_MODEL=1` делает подпись строго обязательной.
+- **Подписывай модель.** Каждая закрытая задача ОБЯЗАНА нести `model: <provider-model-version>` — реальную модель и её версию исполнителя (напр. `claude-opus-4-8`, `gemini-2.5-pro`, `grok-4.6`), а не только `agent-id`. Политика одна на CLI, MCP, dashboard и app: `brain_core.model_signature`. Закрытие — `brain-task complete <id> --as <agent> --model <model>` или с `BRAIN_AGENT_MODEL`. Литерал `unsigned` — только явный opt-in (`--allow-unsigned` / `BRAIN_ALLOW_UNSIGNED_MODEL=1`) с audit `model-unsigned`.
 - **Предлагай живые модели.** Сверься с `.model-fleet.json`, не бери ID по памяти. Реестра нет или протух — `brain-model-fleet --apply`.

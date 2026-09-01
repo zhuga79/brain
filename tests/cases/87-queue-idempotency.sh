@@ -84,7 +84,7 @@ cmp -s "$snapshot_dir/log.before" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: i
 cmp -s "$snapshot_dir/owner.before" "$BRAIN_PATH/.locks/$tid/owner" || { echo "FAILED: intruder block changed lock owner"; exit 1; }
 
 set +e
-out="$(brain-task complete "$tid" --as intruder --model evil-model 2>&1)"
+out="$(brain-task complete "$tid" --as intruder --model evil-model-1 2>&1)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || { echo "FAILED: чужой complete прошёл"; exit 1; }
@@ -130,7 +130,7 @@ path = Path(sys.argv[1])
 owner, _ts, ttl = path.read_text(encoding="utf-8").strip().split("|")
 path.write_text(f"{owner}|{int(time.time())-1000}|{ttl}\n", encoding="utf-8")
 PY
-BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid" --as me >/dev/null || {
+BRAIN_AGENT_MODEL=probe-model-1 brain-task complete "$tid" --as me >/dev/null || {
   echo "FAILED: owner complete after TTL expiry"
   exit 1
 }
@@ -152,7 +152,7 @@ cp "$BRAIN_PATH/tasks/done.md" "$snapshot_dir/done.open.before"
 cp "$BRAIN_PATH/wiki/log.md" "$snapshot_dir/log.open.before"
 cp "$BRAIN_PATH/.locks/$tid2/owner" "$snapshot_dir/owner.open.before"
 set +e
-out="$(brain-task complete "$tid2" --as intruder --model evil-model 2>&1)"
+out="$(brain-task complete "$tid2" --as intruder --model evil-model-1 2>&1)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || { echo "FAILED: чужой complete закрыл открытую задачу под локом"; exit 1; }
@@ -166,7 +166,7 @@ cmp -s "$snapshot_dir/owner.open.before" "$BRAIN_PATH/.locks/$tid2/owner" || { e
 [ ! -e "$BRAIN_PATH/tasks/.taskfile-complete/$tid2.json" ] || { echo "FAILED: intruder complete wrote a journal"; exit 1; }
 echo "OK: открытую задачу под локом чужой не закрывает"
 
-BRAIN_AGENT_MODEL=probe-model brain-task complete "$tid2" --as me >/dev/null || {
+BRAIN_AGENT_MODEL=probe-model-1 brain-task complete "$tid2" --as me >/dev/null || {
   echo "FAILED: владелец лока не смог закрыть открытую задачу"
   exit 1
 }
@@ -205,7 +205,7 @@ echo "OK: открытую задачу под локом чужой не бло
 
 # Отказ не зависит от глагола: block и complete на одной расстановке говорят одно.
 set +e
-complete_out="$(brain-task complete "$tid3" --as intruder --model evil-model 2>&1)"
+complete_out="$(brain-task complete "$tid3" --as intruder --model evil-model-1 2>&1)"
 set -e
 grep -q "lock owned by me, not intruder" <<< "$complete_out" || {
   echo "FAILED: complete на той же расстановке отказал иначе: $complete_out"; exit 1;

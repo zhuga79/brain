@@ -25,16 +25,17 @@ from typing import Any, Iterable
 
 import brain_task_parser
 import brain_tasks
-from brain_core import atomic, clock, paths, taskfile
+from brain_core import atomic, clock, journal, paths, taskfile
+from brain_core.model_signature import (
+    AUDIT_OP,
+    ModelSignatureError,
+    ResolvedModel,
+    resolve_completion_model,
+    validate_model_signature,
+)
 
 STATE_BY_STATUS = {"open": " ", "in_progress": "~", "blocked": "!", "done": "x"}
 DEPS_MARKERS = {" ": "○", "~": "◐", "x": "●", "!": "✗", "?": "?"}
-MODEL_SIGNATURE_RE = re.compile(r"^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+$")
-MODEL_VERSION_RE = re.compile(r"(?:^|[.-])\d+(?:[.-]\d+)*(?:$|[.-])")
-MODEL_PLACEHOLDER_TOKENS = {
-    "unsigned", "placeholder", "summary", "cleanup", "todo", "unknown",
-    "example", "sample", "dummy", "none", "null", "unset",
-}
 
 
 # ── чтение ───────────────────────────────────────────────────────────────────
@@ -174,28 +175,6 @@ def slugify(text: str, limit: int = 30) -> str:
     return re.sub(r"[^a-z0-9]+", "-", mapped)[:limit].strip("-")
 
 
-def validate_model_signature(model: str) -> str:
-    """Return a cleaned model signature or raise ValueError.
-
-    Accept provider/model/version identifiers such as `openai-gpt-5.4`,
-    `claude-opus-4-8`, `gemini-2.5-pro`, `grok-4.6`.
-    Reject placeholders, summaries, cleanup markers, and values with no numeric
-    version segment.
-    """
-    cleaned = str(model or "").strip()
-    if not cleaned:
-        raise ValueError("real model required")
-    lowered = cleaned.lower()
-    tokens = {token for token in re.split(r"[.-]+", lowered) if token}
-    if tokens & MODEL_PLACEHOLDER_TOKENS:
-        raise ValueError("real model required")
-    if " " in cleaned or not MODEL_SIGNATURE_RE.match(cleaned):
-        raise ValueError("model signature format invalid")
-    if not MODEL_VERSION_RE.search(cleaned):
-        raise ValueError("model signature must include numeric version")
-    return cleaned
-
-
 def new_task_id(title: str, brain: Path | None = None) -> str:
     """Свободный идентификатор вида t-ГГГГ-ММ-ДД-slug.
 
@@ -270,11 +249,23 @@ def reconcile(brain: Path | None = None, *, fix: bool = False) -> list[dict[str,
     return taskfile.reconcile_locks(paths.active_file(brain), fix=fix)
 
 
-def complete(task_id: str, agent: str, model: str, brain: Path | None = None) -> None:
+def complete(
+    task_id: str,
+    agent: str,
+    model: str,
+    brain: Path | None = None,
+    *,
+    allow_unsigned: bool = False,
+) -> ResolvedModel:
     if not str(agent).strip():
         raise ValueError("agent_id required")
-    clean_model = validate_model_signature(model)
-    taskfile.complete(paths.active_file(brain), paths.done_file(brain), task_id, agent, clean_model)
+    resolved = resolve_completion_model(model, allow_unsigned=allow_unsigned)
+    taskfile.complete(
+        paths.active_file(brain), paths.done_file(brain), task_id, agent, resolved.value,
+    )
+    if resolved.unsigned:
+        journal.append(AUDIT_OP, task_id, agent, resolved.audit_extra, brain)
+    return resolved
 
 
 # ── CLI: именованный интерфейс для bash-фасада ───────────────────────────────
@@ -370,6 +361,19 @@ def print_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_complete(args: argparse.Namespace) -> int:
+    try:
+        resolved = complete(
+            args.task_id, args.agent, args.model, args.brain,
+            allow_unsigned=args.allow_unsigned,
+        )
+    except (ModelSignatureError, ValueError, taskfile.TaskError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(resolved.value)
+    return 0
+
+
 def print_add(args: argparse.Namespace) -> int:
     task_id = add(
         args.title, args.brain, role=args.role, mode=args.mode, priority=args.prio,
@@ -438,6 +442,16 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("--council", default="", type=_csv, help="роли через запятую")
     new.add_argument("--depends-on", dest="depends_on", default="", type=_csv, help="id через запятую")
     new.set_defaults(func=print_add)
+
+    done = sub.add_parser("complete", help="закрыть задачу с подписью модели")
+    done.add_argument("task_id")
+    done.add_argument("--as", dest="agent", required=True)
+    done.add_argument("--model", default="", help="versioned provider-model-version")
+    done.add_argument(
+        "--allow-unsigned", action="store_true",
+        help="legacy hatch: record model: unsigned and audit it",
+    )
+    done.set_defaults(func=print_complete)
 
     fixup = sub.add_parser("reconcile", help="расхождения между `by:` задачи и владельцем лока")
     fixup.add_argument("--fix", action="store_true", help="устранить расхождения")
