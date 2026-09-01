@@ -156,14 +156,23 @@ def _field_value(line: str, name: str) -> str:
 
 
 def _parse_depends_on(value: str) -> tuple[str, ...]:
-    """Parse depends_on field value like '[task-a, task-b]' into a tuple of IDs.
+    """Parse a depends_on field value into a tuple of task ids.
 
-    Rejects empty components: [,], [dep,], [,dep], [dep,,other].
+    Canonical form is the bracketed list ``[task-a, task-b]``, but hand-written
+    local queues also use the bare forms — a single id ``task-a`` and a bare
+    comma list ``task-a, task-b`` — so both are accepted. Empty (``[]`` or an
+    empty string) yields no dependencies. Unbalanced brackets and empty
+    components (``[task-a,]``, ``task-a,,task-b``) are rejected fail-closed.
     """
     value = value.strip()
-    if not (value.startswith("[") and value.endswith("]")):
-        raise ValueError(f"Malformed depends_on list (expected bracketed list): {value}")
-    inner = value[1:-1].strip()
+    if not value:
+        return ()
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+    elif value.startswith("[") or value.endswith("]"):
+        raise ValueError(f"Malformed depends_on list (unbalanced brackets): {value}")
+    else:
+        inner = value
     if not inner:
         return ()
     # Split by comma, strip whitespace
@@ -814,7 +823,15 @@ def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, s
 def _workspace_info(folder: Path, brain_file: Path) -> WorkspaceInfo:
     tasks_path = folder / "TASKS.md"
     log_path = folder / "LOG.md"
-    local_tasks = parse_local_tasks(tasks_path)
+    # Discovery/listing is a read path: a single malformed TASKS.md must not
+    # hide the workspace or abort the whole scan. Fall back to an empty task
+    # list — the workspace still shows with its title, log and mtime. The
+    # enforcement ops (next/take/complete_local_task) call parse_local_tasks
+    # directly and stay fail-closed on the same file.
+    try:
+        local_tasks = parse_local_tasks(tasks_path)
+    except ValueError:
+        local_tasks = []
     mtimes = [f.stat().st_mtime for f in (brain_file, tasks_path, log_path) if f.exists()]
     return WorkspaceInfo(
         path=folder,

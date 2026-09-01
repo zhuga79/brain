@@ -105,11 +105,18 @@ def collect_workspaces() -> dict[str, Any]:
         infos = []
         errors.append(str(exc))
     for info in infos:
-        next_task = brain_workspace.next_local_task(
-            info.path / "TASKS.md",
-            brain_path=info.path / "BRAIN.md",
-        )
-        local_tasks = brain_workspace.parse_local_tasks(info.path / "TASKS.md")
+        # A malformed TASKS.md in one workspace must not blank the whole panel:
+        # record it and move on with an empty task/next view for that entry.
+        try:
+            next_task = brain_workspace.next_local_task(
+                info.path / "TASKS.md",
+                brain_path=info.path / "BRAIN.md",
+            )
+            local_tasks = brain_workspace.parse_local_tasks(info.path / "TASKS.md")
+        except ValueError as exc:
+            next_task = None
+            local_tasks = []
+            errors.append(f"{info.path}: {exc}")
         log_entries = brain_workspace.parse_local_log_entries(info.path / "LOG.md", 8)
         items.append({
             "path": str(info.path),

@@ -652,12 +652,16 @@ Task blocks use the same continuation-line format as the root queue:
       acceptance: Runs after local-001 is done.
 ```
 
-`depends_on` syntax is exact:
+`depends_on` syntax:
 
-- `depends_on: [task-id-1, task-id-2, ...]` — a bracketed, comma-separated list
-  of task ids that must be done before this task becomes available.
-- An empty list `[]` is valid (no dependencies).
-- Empty components are rejected: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`.
+- Canonical: `depends_on: [task-id-1, task-id-2, ...]` — a bracketed,
+  comma-separated list of task ids that must be done before this task becomes
+  available.
+- Bare forms written by hand are also accepted: `depends_on: task-a` and
+  `depends_on: task-a, task-b`.
+- An empty list `[]` is valid (no dependencies); an empty value is the same.
+- An unbalanced bracket (`[task-a`) is rejected.
+- Empty components are rejected: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`, `task-a,,task-b`.
 - Duplicate ids inside the list are rejected (`[task-x, task-x]`).
 - The `depends_on` field may appear at most once per task — a repeated field on
   the same continuation line or across lines is rejected. Field order on the
@@ -667,8 +671,12 @@ Task blocks use the same continuation-line format as the root queue:
 
 Parsing is fail-closed: `parse_local_tasks` rejects malformed or duplicate
 `depends_on`, duplicate task ids, self- and cyclic dependencies, and missing
-dependencies `before` building the graph, selecting or mutating anything. The
-operations behave as follows:
+dependencies `before` building the graph, selecting or mutating anything. This
+guards the execution path (`next`/`take`/`complete`); the read-only discovery
+path (`discover_workspaces` for the dashboard/listing) tolerates one broken
+`TASKS.md` — that workspace lists with no parsed tasks and the error is
+surfaced, rather than the whole scan aborting. The operations behave as
+follows:
 
 - `next_local_task` — skips tasks not in `[ ]` (including already `[x]`) and
   tasks with unmet dependencies (returns `None` when nothing is available).

@@ -924,6 +924,25 @@ def test_discover_excludes_host(tmp_path):
     assert _W.discover_workspaces([tmp_path], exclude=[tmp_path]) == []
 
 
+def test_discover_tolerates_one_malformed_tasks_file(tmp_path):
+    """A single TASKS.md that fails fail-closed parsing must not abort the scan
+    or hide its own workspace — discovery is a read path."""
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "BRAIN.md").write_text("# Good WS\n")
+    (good / "TASKS.md").write_text("- [ ] [P1] g-1 - Fine\n      role: developer\n      acceptance: ok.\n")
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "BRAIN.md").write_text("# Bad WS\n")
+    (bad / "TASKS.md").write_text(
+        "- [ ] [P1] b-1 - Broken\n      role: developer\n      depends_on: [missing-dep]\n      acceptance: no.\n"
+    )
+    titles = {w.title for w in _W.discover_workspaces([tmp_path])}
+    assert titles == {"Good WS", "Bad WS"}
+    bad_info = next(w for w in _W.discover_workspaces([tmp_path]) if w.title == "Bad WS")
+    assert bad_info.open_tasks == 0  # unparsable file degrades to no tasks
+
+
 def test_read_title_informative(tmp_path):
     f = tmp_path / "BRAIN.md"
     f.write_text("# Acme Billing API\n")
@@ -1068,16 +1087,49 @@ def test_parse_local_tasks_depends_on_missing_dependency_raises(tmp_path):
         raise AssertionError("parse should have failed for missing dependency")
 
 
-def test_parse_local_tasks_depends_on_malformed_list_raises(tmp_path):
-    """Malformed depends_on list (not bracketed) raises precise error."""
+def test_parse_local_tasks_depends_on_bare_forms_parse(tmp_path):
+    """Hand-written bare forms — a single id and a bare comma list — parse the
+    same as the bracketed canonical form."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-x - X
+      role: developer
+      acceptance: done.
+
+- [ ] [P1] task-y - Y
+      role: developer
+      acceptance: done.
+
+- [ ] [P1] task-a - Bare single id
+      role: developer
+      depends_on: task-x
+      acceptance: after x.
+
+- [ ] [P1] task-b - Bare comma list
+      role: developer
+      depends_on: task-x, task-y
+      acceptance: after x and y.
+""",
+        encoding="utf-8",
+    )
+
+    parsed = {t.task_id: t for t in parse_local_tasks(tasks)}
+    assert parsed["task-a"].depends_on == ("task-x",)
+    assert parsed["task-b"].depends_on == ("task-x", "task-y")
+
+
+def test_parse_local_tasks_depends_on_unbalanced_bracket_raises(tmp_path):
+    """An unbalanced bracket is a genuine malformed value and is rejected."""
     tasks = tmp_path / "TASKS.md"
     tasks.write_text(
         """# Local Tasks
 
 - [ ] [P1] task-a - First task
       role: developer
-      depends_on: task-x, task-y
-      acceptance: Malformed list.
+      depends_on: [task-x
+      acceptance: Unbalanced bracket.
 """,
         encoding="utf-8",
     )
@@ -1085,9 +1137,31 @@ def test_parse_local_tasks_depends_on_malformed_list_raises(tmp_path):
     try:
         parse_local_tasks(tasks)
     except ValueError as exc:
-        assert "malformed" in str(exc).lower() or "bracket" in str(exc).lower()
+        assert "unbalanced" in str(exc).lower() or "bracket" in str(exc).lower()
     else:
-        raise AssertionError("parse should have failed for malformed depends_on")
+        raise AssertionError("parse should have failed for unbalanced bracket")
+
+
+def test_parse_local_tasks_depends_on_bare_list_empty_component_raises(tmp_path):
+    """Empty components are rejected in a bare list too, not only bracketed."""
+    tasks = tmp_path / "TASKS.md"
+    tasks.write_text(
+        """# Local Tasks
+
+- [ ] [P1] task-a - First task
+      role: developer
+      depends_on: task-x,,task-y
+      acceptance: Empty component.
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        parse_local_tasks(tasks)
+    except ValueError as exc:
+        assert "empty component" in str(exc).lower()
+    else:
+        raise AssertionError("parse should have failed for empty component")
 
 
 def test_parse_local_tasks_depends_on_duplicate_ids_raises(tmp_path):
