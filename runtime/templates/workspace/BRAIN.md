@@ -26,6 +26,7 @@ Describe what this folder is for in one or two sentences.
 - Do not delete, move or rename source materials without explicit approval.
 - Record substantial work in `LOG.md` when it exists.
 - Use `TASKS.md` when local tasks exist.
+- After copying this template, walk the live Brain role catalog (`roles/*.md`) and classify every role into Role Policy (`core` / `available` / `gated`) or leave it unlisted (blocked by default). Record that pass under Role Catalog Review. The lists below are a starter, not a finished policy. Do not copy `roles/` into this folder.
 
 ## Allowed Roles
 
@@ -55,6 +56,13 @@ gated:
 
 blocked:
 - none
+
+## Role Catalog Review
+
+reviewed: <YYYY-MM-DD>
+catalog: <BRAIN_SYSTEM_PATH>/roles
+not used (blocked by default):
+- <role from the catalog that does not apply here>
 
 ## Action Gates
 
