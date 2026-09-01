@@ -78,3 +78,8 @@ def isolate_brain_roots(monkeypatch: pytest.MonkeyPatch, provider_stub_bin: Path
     monkeypatch.setenv(
         "PATH", f"{provider_stub_bin}{os.pathsep}{os.environ.get('PATH', '')}"
     )
+    # brain_core.autosave records Path.cwd() as an executor's worktree at lock
+    # time and tags it on eviction. In pytest cwd is the live checkout, so any
+    # test exercising take/claim_lock/reconcile would leave wip-recovery/<tid>
+    # tags in it. test_autosave.py clears this to exercise the module for real.
+    monkeypatch.setenv("BRAIN_AUTOSAVE_DISABLE", "1")

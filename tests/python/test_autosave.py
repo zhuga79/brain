@@ -35,6 +35,15 @@ def _git(wt: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.fixture(autouse=True)
+def _enable_autosave(monkeypatch):
+    """conftest disables autosave for every test; this module tests it, so
+    turn it back on (and keep BRAIN_TEST_SANDBOX clear except where a test
+    sets it back)."""
+    monkeypatch.delenv("BRAIN_AUTOSAVE_DISABLE", raising=False)
+    monkeypatch.delenv("BRAIN_TEST_SANDBOX", raising=False)
+
+
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
     root = tmp_path / "brain"
@@ -227,3 +236,14 @@ def test_autosave_never_raises_on_broken_worktree(data_root):
     (_locks(data_root) / "t-job.worktree").write_text("/nonexistent/path\n", encoding="utf-8")
     assert autosave.autosave(_locks(data_root), "t-job") is None
     assert autosave.evict(_locks(data_root), _active(data_root), "t-job") is None
+
+
+def test_skipped_under_test_sandbox(data_root, worktree, monkeypatch):
+    """The smoke runner sets BRAIN_TEST_SANDBOX; autosave must not tag the live
+    checkout it happens to be run from."""
+    monkeypatch.setenv("BRAIN_TEST_SANDBOX", "1")
+    autosave.record_worktree(_locks(data_root), "t-job", worktree)
+    _dirty(worktree)
+    assert autosave.autosave(_locks(data_root), "t-job") is None
+    assert not (_locks(data_root) / "t-job.worktree").exists()
+    assert _git(worktree, "tag", "-l", "wip-recovery/*").stdout.strip() == ""

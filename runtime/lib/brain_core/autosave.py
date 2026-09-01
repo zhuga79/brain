@@ -45,6 +45,16 @@ _TAG_PREFIX = "wip-recovery"
 _MAX_TAG_VARIANTS = 50
 
 
+def _disabled() -> bool:
+    """Skip entirely under a test harness. Both suites drive lock ops for
+    testing from a cwd that is the live system checkout, so record_worktree
+    would point at it and eviction would tag it. The smoke runner sets
+    BRAIN_TEST_SANDBOX; the pytest autouse fixture sets BRAIN_AUTOSAVE_DISABLE.
+    test_autosave.py clears the latter in its own fixtures to exercise this
+    module for real."""
+    return bool(os.environ.get("BRAIN_TEST_SANDBOX") or os.environ.get("BRAIN_AUTOSAVE_DISABLE"))
+
+
 def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """git in *cwd*, time-boxed, never raising. Caller's GIT_* is dropped
     (a hook's GIT_INDEX_FILE/GIT_DIR would otherwise point elsewhere)."""
@@ -75,6 +85,8 @@ def _breadcrumb(locks_root: Path | str, tid: str) -> Path:
 def record_worktree(locks_root: Path | str, tid: str, cwd: Path | str | None = None) -> Path | None:
     """Record the executor's git worktree root next to its lock. Called at
     acquire. ``cwd`` defaults to the current directory. Non-git → nothing."""
+    if _disabled():
+        return None
     try:
         base = Path(cwd).resolve() if cwd is not None else Path.cwd()
     except (OSError, RuntimeError):
@@ -168,6 +180,8 @@ def autosave(locks_root: Path | str, tid: str, *, agent: str = "") -> str | None
     ``wip-recovery`` tag; drop a breadcrumb for the queue to flush. Returns
     the tag, or ``None`` when there is nothing to save. Never raises.
     Safe to call while holding ``queue_lock`` — it does not touch the queue."""
+    if _disabled():
+        return None
     try:
         wt = read_worktree(locks_root, tid)
         if wt is None:
