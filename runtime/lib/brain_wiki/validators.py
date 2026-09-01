@@ -54,6 +54,19 @@ EXCLUSIVE_SYSTEM_DIRS = (
     "config",
 )
 
+# Подкоманды brain-doctrine. Должны совпадать с COMMANDS в runtime/bin/brain-doctrine.
+DOCTRINE_COMMANDS = frozenset({"list", "show", "search", "roles"})
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+_DOCTRINE_CMD_RE = re.compile(r"^brain-doctrine\s+([A-Za-z][\w-]*)")
+_LS_ROLES_RE = re.compile(r"^ls\s+roles/?$")
+_DATA_ROLES_MARKERS = (
+    "~/brain/roles",
+    "$HOME/brain/roles",
+    "${HOME}/brain/roles",
+    "$BRAIN_PATH/roles",
+    "${BRAIN_PATH}/roles",
+)
+
 
 def _parse_frontmatter_safe(rel: str, text: str) -> tuple[dict[str, Any], str, list[Issue]]:
     """parse_frontmatter, but a construct outside the supported YAML subset
@@ -574,6 +587,112 @@ def validate_routing(brain: Path) -> list[Issue]:
     return issues
 
 
+def _is_split_root(brain: Path) -> bool:
+    from brain_core.paths import brain_system_path
+
+    system = brain_system_path(brain=brain)
+    try:
+        return system.resolve() != Path(brain).resolve()
+    except OSError:
+        return Path(system) != Path(brain)
+
+
+def _roles_available(brain: Path) -> bool:
+    if resolve_system_asset("roles", brain=brain).is_dir():
+        return True
+    return bool(iter_system_files("roles", "*.md", brain=brain))
+
+
+def validate_memory_role_pointers(brain: Path | None) -> list[Issue]:
+    """MEMORY.md must not send agents to a missing roles path or CLI command.
+
+    После split-root роли живут в системном чекауте. Указатель `~/brain/roles`
+    или подкоманда `brain-doctrine`, которой нет, — ошибка валидатора, а не
+    расхождение, которое замечают глазами.
+    """
+    if brain is None:
+        return []
+    from brain_core.paths import brain_system_path
+
+    root = Path(brain)
+    system = brain_system_path(brain=root)
+    issues: list[Issue] = []
+    seen: set[Path] = set()
+    candidates = (
+        (root / "MEMORY.md", "MEMORY.md"),
+        (system / "MEMORY.md", "MEMORY.md"),
+        (
+            system / "runtime" / "templates" / "v2" / "MEMORY.md",
+            "runtime/templates/v2/MEMORY.md",
+        ),
+    )
+    for path, rel in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        issues.extend(_check_memory_role_text(root, rel, read_text(path)))
+    return issues
+
+
+def _check_memory_role_text(brain: Path, rel: str, text: str) -> list[Issue]:
+    issues: list[Issue] = []
+    split = _is_split_root(brain)
+    data_roles = (Path(brain) / "roles").is_dir()
+    system_roles = _roles_available(brain)
+
+    if any(marker in text for marker in _DATA_ROLES_MARKERS):
+        if split and not data_roles:
+            issues.append(Issue(
+                "ERROR",
+                rel,
+                "инструкция указывает ~/brain/roles (корень данных), "
+                "но роли принадлежат системному корню "
+                "($BRAIN_SYSTEM_PATH/roles); список — brain-doctrine roles",
+            ))
+        elif not system_roles and not data_roles:
+            issues.append(Issue(
+                "ERROR",
+                rel,
+                "инструкция указывает roles/, но каталог ролей не найден",
+            ))
+
+    if "$BRAIN_SYSTEM_PATH/roles" in text or "${BRAIN_SYSTEM_PATH}/roles" in text:
+        if not system_roles:
+            issues.append(Issue(
+                "ERROR",
+                rel,
+                "инструкция указывает $BRAIN_SYSTEM_PATH/roles, "
+                "но в системном корне нет roles/",
+            ))
+
+    for chunk in _BACKTICK_RE.findall(text):
+        chunk = chunk.strip()
+        if _LS_ROLES_RE.match(chunk) and split and not data_roles:
+            issues.append(Issue(
+                "ERROR",
+                rel,
+                "инструкция предлагает `ls roles/`, но roles/ нет в дереве "
+                "данных; роли в системном корне, список — brain-doctrine roles",
+            ))
+            continue
+        match = _DOCTRINE_CMD_RE.match(chunk)
+        if match:
+            name = match.group(1)
+            if name not in DOCTRINE_COMMANDS:
+                issues.append(Issue(
+                    "ERROR",
+                    rel,
+                    f"инструкция ссылается на brain-doctrine {name}, "
+                    f"такой подкоманды нет "
+                    f"(есть: {', '.join(sorted(DOCTRINE_COMMANDS))})",
+                ))
+    return issues
+
+
 def validate_roles(brain: Path) -> list[Issue]:
     """Роли обязаны иметь машиночитаемый frontmatter.
 
@@ -1019,6 +1138,7 @@ def validate_all(brain_value: "str | Path | None" = None) -> list[Issue]:
     issues.extend(validate_leftover_registry(brain, brain / "tasks" / "active.md"))
     issues.extend(validate_routing(brain))
     issues.extend(validate_roles(brain))
+    issues.extend(validate_memory_role_pointers(brain))
     issues.extend(validate_escalation_matrix(brain))
     issues.extend(validate_role_uiux_routing(brain))
     issues.extend(validate_uiux_skill_pack(brain))

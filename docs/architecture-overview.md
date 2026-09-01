@@ -2,7 +2,7 @@
 title: Architecture Overview
 type: concept
 created: 2026-05-16
-updated: 2026-08-14
+updated: 2026-08-31
 curation: agent
 protected: false
 source_policy: advisory
@@ -55,6 +55,8 @@ single-root lookup.
 ### System/data boundary
 
 - System assets must be changed in the system checkout, then reinstalled.
+- `roles/` is owned by the system checkout: `$BRAIN_SYSTEM_PATH/roles/<role>.md`.
+  List them with `brain-doctrine roles`. The data root must not contain `roles/`.
 - Data root must not mirror live system directories such as `runtime/`,
   `roles/`, `doctrine/`, `skills/`, `spec/`, `docs/`, `tests/`, `config/`.
 - `teams/` is special: canonical system team catalog stays system-owned, while

@@ -137,6 +137,11 @@ tmux-launcher для параллельной работы нескольких 
 - **Single user, multiple agents.** Система рассчитана на одного
   пользователя, который оркестрирует несколько LLM-сессий.
 
+После разделения корней `roles/`, `doctrine/`, `skills/` и `runtime/` живут в
+`$BRAIN_SYSTEM_PATH` (этот репозиторий). `~/brain` — только слой данных
+(`wiki/`, `tasks/`, `raw/`, …). Роли: `$BRAIN_SYSTEM_PATH/roles/<role>.md`,
+список — `brain-doctrine roles`.
+
 ---
 
 
@@ -941,7 +946,7 @@ brain-status --json                       вывод в формате JSON
 
 Инструмент только для чтения, не меняет файлы и не делает коммитов.
 
-### `brain-doctrine` — браузер доктрин
+### `brain-doctrine` — браузер доктрин и ролей
 
 ```
 brain-doctrine list                       список слагов доктрин
@@ -950,6 +955,9 @@ brain-doctrine show <slug>                содержимое файла док
 brain-doctrine show <slug> --json         вывод в формате JSON
 brain-doctrine search <query>             поиск по всем файлам доктрин (case-insensitive)
 brain-doctrine search <query> --json      вывод в формате JSON
+brain-doctrine roles                      список ролей (системный ассет)
+brain-doctrine roles --json               вывод в формате JSON
+brain-doctrine roles <slug>               содержимое файла роли
 ```
 
 Форматы JSON:
@@ -957,8 +965,12 @@ brain-doctrine search <query> --json      вывод в формате JSON
 - `list --json` → `{"doctrines": [{"slug": "...", "path": "..."}]}`
 - `show <slug> --json` → `{"slug": "...", "path": "...", "content": "..."}`
 - `search <query> --json` → `{"query": "...", "results": [{"slug": "...", "path": "...", "snippet": "..."}]}`
+- `roles --json` → `{"roles": [{"slug": "...", "path": "..."}]}`
+- `roles <slug> --json` → `{"slug": "...", "path": "...", "content": "..."}`
 
-Инструмент только для чтения, не меняет файлы. Читает `$BRAIN_PATH/doctrine/*.md`.
+Инструмент только для чтения, не меняет файлы. Доктрины и роли — системные
+ассеты (`$BRAIN_SYSTEM_PATH/doctrine/*.md`, `$BRAIN_SYSTEM_PATH/roles/*.md`),
+резолв через `iter_system_files`.
 
 Проверка:
 
@@ -967,6 +979,7 @@ brain-doctrine --help
 brain-doctrine list
 brain-doctrine show tax-boundaries
 brain-doctrine search "accountant"
+brain-doctrine roles
 ```
 
 ### `brain-dashboard` — HTML-дашборд оркестрации

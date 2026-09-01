@@ -80,6 +80,11 @@ printf '# log\n' > "$split_brain/wiki/log.md"
     echo "FAILED: brain-doctrine list does not see system doctrine from data cwd"
     exit 1
   }
+  capture_output _dr 'brain-doctrine roles'
+  grep -q '^developer$' <<< "$_dr" || {
+    echo "FAILED: brain-doctrine roles does not see system roles from data cwd"
+    exit 1
+  }
   capture_output _sl 'brain-skill list'
   grep -q 'frontend-handoff-spec' <<< "$_sl" || {
     echo "FAILED: brain-skill list does not see system skills from data cwd"

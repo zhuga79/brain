@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Read-only doctrine browser for Brain."""
+"""Read-only doctrine and role browser for Brain."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 
 
 from brain_core.paths import brain_path, iter_system_files, resolve_system_asset  # одна реализация на всю систему
+
+COMMANDS = ("list", "show", "search", "roles")
+_ROLE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 def list_doctrines(brain: Path) -> list[dict[str, str]]:
@@ -85,15 +89,59 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def list_roles(brain: Path) -> list[dict[str, str]]:
+    result = []
+    for f in iter_system_files("roles", "*.md", brain=brain):
+        result.append({"slug": f.stem, "path": str(f)})
+    return result
+
+
+def show_role(brain: Path, slug: str) -> dict[str, str] | None:
+    f = resolve_system_asset(f"roles/{slug}.md", brain=brain)
+    if not f.is_file():
+        return None
+    return {"slug": slug, "path": str(f), "content": f.read_text(encoding="utf-8", errors="replace")}
+
+
+def cmd_roles(args: argparse.Namespace) -> int:
+    brain = brain_path(args.brain)
+    slug = getattr(args, "slug", None)
+    if slug:
+        if not _ROLE_SLUG.fullmatch(slug):
+            print(f"ERROR: invalid role slug: {slug}", file=os.sys.stderr)
+            return 1
+        result = show_role(brain, slug)
+        if result is None:
+            print(f"ERROR: role not found: {slug}", file=os.sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(result["content"], end="")
+        return 0
+    roles = list_roles(brain)
+    if args.json:
+        print(json.dumps({"roles": roles}, ensure_ascii=False, indent=2))
+    else:
+        if not roles:
+            print("(no role files found)")
+        else:
+            for entry in roles:
+                print(entry["slug"])
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Read-only doctrine browser for Brain.",
+        description="Read-only doctrine and role browser for Brain.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 commands:
   list                    list doctrine slugs
   show <slug>             print content of a doctrine file
   search <query>          search across all doctrine files
+  roles                   list role slugs (system asset)
+  roles <slug>            print content of a role file
 
 examples:
   brain-doctrine list
@@ -102,6 +150,9 @@ examples:
   brain-doctrine show tax-boundaries --json
   brain-doctrine search "accountant"
   brain-doctrine search "accountant" --json
+  brain-doctrine roles
+  brain-doctrine roles --json
+  brain-doctrine roles developer
 """,
     )
     parser.add_argument("--brain", default=None, help="Brain path. Defaults to BRAIN_PATH or ~/brain.")
@@ -120,6 +171,10 @@ examples:
     search_p.add_argument("query", help="Case-insensitive search query.")
     search_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
+    roles_p = subparsers.add_parser("roles", help="List role slugs, or print one role file.")
+    roles_p.add_argument("slug", nargs="?", help="Role slug (filename without .md).")
+    roles_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -128,6 +183,8 @@ examples:
         return cmd_show(args)
     elif args.command == "search":
         return cmd_search(args)
+    elif args.command == "roles":
+        return cmd_roles(args)
     else:
         parser.print_help()
         return 0
