@@ -230,13 +230,19 @@ TEMPLATE
     done
     ;;
   teams)
-    team_root="$(brain_resolve_system "teams")"
-    [ -z "$(ls "$team_root" 2>/dev/null)" ] && { echo "(no teams)"; exit 0; }
-    for f in "$team_root"/*.md; do
-      name=$(basename "$f" .md)
-      roles=$(grep -E '^roles:' "$f" | sed -E 's/roles: *//')
-      echo "$name  $roles"
-    done
+    any=0
+    while IFS=$'\t' read -r name path origin; do
+      [ -n "$name" ] && [ -f "$path" ] || continue
+      any=1
+      roles=$(grep -E '^roles:' "$path" | head -1 | sed -E 's/roles: *//')
+      case "$origin" in
+        data-override) label="origin:data  override:system" ;;
+        data) label="origin:data" ;;
+        *) label="origin:system" ;;
+      esac
+      echo "$name  $roles  $label"
+    done < <(brain_iter_team_files)
+    [ "$any" -eq 1 ] || echo "(no teams)"
     ;;
   check)
     [ -z "$id" ] && { echo "task id required"; exit 1; }
