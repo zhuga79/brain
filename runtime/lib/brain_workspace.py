@@ -62,6 +62,7 @@ class LocalTask:
     title: str
     role: str = ""
     acceptance: str = ""
+    depends_on: tuple[str, ...] = ()
 
 
 
@@ -154,33 +155,147 @@ def _field_value(line: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _parse_depends_on(value: str) -> tuple[str, ...]:
+    """Parse a depends_on field value into a tuple of task ids.
+
+    Canonical form is the bracketed list ``[task-a, task-b]``, but hand-written
+    local queues also use the bare forms — a single id ``task-a`` and a bare
+    comma list ``task-a, task-b`` — so both are accepted. Empty (``[]`` or an
+    empty string) yields no dependencies. Unbalanced brackets and empty
+    components (``[task-a,]``, ``task-a,,task-b``) are rejected fail-closed.
+    """
+    value = value.strip()
+    if not value:
+        return ()
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+    elif value.startswith("[") or value.endswith("]"):
+        raise ValueError(f"Malformed depends_on list (unbalanced brackets): {value}")
+    else:
+        inner = value
+    if not inner:
+        return ()
+    # Split by comma, strip whitespace
+    raw_deps = [dep.strip() for dep in inner.split(",")]
+    # Reject empty components (fail-closed)
+    for dep in raw_deps:
+        if not dep:
+            raise ValueError(f"Malformed depends_on list (empty component): {value}")
+    return tuple(raw_deps)
+
+
+def _validate_depends_on(task_id: str, depends_on: tuple[str, ...], all_task_ids: set[str]) -> None:
+    """Validate depends_on for a single task.
+
+    Raises ValueError with precise message for:
+    - Self-dependency
+    - Duplicate dependencies
+    - Missing dependencies (not in all_task_ids)
+    """
+    if task_id in depends_on:
+        raise ValueError(f"Task {task_id} has self-dependency in depends_on")
+
+    # Check for duplicates
+    seen = set()
+    for dep in depends_on:
+        if dep in seen:
+            raise ValueError(f"Task {task_id} has duplicate dependency: {dep}")
+        seen.add(dep)
+
+    # Check for missing dependencies
+    for dep in depends_on:
+        if dep not in all_task_ids:
+            raise ValueError(f"Task {task_id} has missing dependency: {dep}")
+
+
+def _detect_cycles(tasks: list[LocalTask]) -> None:
+    """Detect cycles in the dependency graph.
+
+    Raises ValueError if a cycle is found.
+    """
+    # Build adjacency list
+    graph: dict[str, list[str]] = {task.task_id: list(task.depends_on) for task in tasks}
+
+    # Kahn's algorithm / DFS cycle detection
+    visited: set[str] = set()
+    rec_stack: set[str] = set()
+
+    def dfs(node: str) -> None:
+        visited.add(node)
+        rec_stack.add(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                dfs(neighbor)
+            elif neighbor in rec_stack:
+                raise ValueError(f"Dependency cycle detected involving: {neighbor}")
+        rec_stack.remove(node)
+
+    for task in tasks:
+        if task.task_id not in visited:
+            dfs(task.task_id)
+
+
 def parse_local_tasks_from_text(text: str) -> list[LocalTask]:
     tasks: list[LocalTask] = []
     current: dict[str, str] | None = None
+    current_depends_on_seen = False
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         match = TASK_RE.match(line)
         if match:
             if current is not None:
                 tasks.append(LocalTask(**current))
+            task_id = match.group("task_id")
             current = {
                 "state": _state_from_mark(match.group("mark")),
                 "priority": match.group("priority"),
-                "task_id": match.group("task_id"),
+                "task_id": task_id,
                 "title": match.group("title").strip(),
                 "role": "",
                 "acceptance": "",
+                "depends_on": (),
             }
+            current_depends_on_seen = False
             continue
         if current is None:
             continue
         stripped = line.strip()
-        if stripped.startswith("role:"):
-            current["role"] = _field_value(stripped, "role")
-        elif stripped.startswith("acceptance:"):
-            current["acceptance"] = _field_value(stripped, "acceptance")
+        # Duplicate depends_on within the same continuation line: the shared
+        # grammar collapses repeated fields into a dict, so detect them here
+        # before the dict loses entries. Works regardless of field order.
+        # Only true field starts count — prose/backticked mentions do not.
+        if grammar.count_field_starts(stripped, "depends_on") > 1:
+            raise ValueError(f"Task {current['task_id']} has duplicate depends_on field")
+        # Use shared grammar to parse all fields on the line
+        fields = grammar.parse_fields(stripped)
+        for name, value in fields.items():
+            if name == "role":
+                current["role"] = value
+            elif name == "acceptance":
+                current["acceptance"] = value
+            elif name == "depends_on":
+                if current_depends_on_seen:
+                    raise ValueError(f"Task {current['task_id']} has duplicate depends_on field")
+                current_depends_on_seen = True
+                current["depends_on"] = _parse_depends_on(value)
     if current is not None:
         tasks.append(LocalTask(**current))
+
+    # Reject duplicate task IDs deterministically before any graph/selection/mutation
+    seen_ids: dict[str, int] = {}
+    for i, task in enumerate(tasks):
+        if task.task_id in seen_ids:
+            raise ValueError(f"Duplicate task ID: {task.task_id} (first at line ~{seen_ids[task.task_id]}, second at line ~{i})")
+        seen_ids[task.task_id] = i
+
+    # Validate all depends_on after parsing all tasks (for forward references)
+    all_task_ids = {task.task_id for task in tasks}
+    for task in tasks:
+        _validate_depends_on(task.task_id, task.depends_on, all_task_ids)
+
+    # Detect cycles
+    _detect_cycles(tasks)
+
     return tasks
 
 
@@ -294,11 +409,24 @@ def is_role_allowed(policy: WorkspaceRolePolicy, role: str) -> bool:
     return role in allowed
 
 
+def _all_deps_met(task: LocalTask, all_tasks: list[LocalTask]) -> bool:
+    """Check if all dependencies of a task are in 'done' state."""
+    if not task.depends_on:
+        return True
+    task_by_id = {t.task_id: t for t in all_tasks}
+    for dep_id in task.depends_on:
+        dep_task = task_by_id.get(dep_id)
+        if dep_task is None or dep_task.state != "done":
+            return False
+    return True
+
+
 def next_local_task(path: Path, role: str = "", brain_path: Path | None = None) -> LocalTask | None:
     policy = parse_workspace_policy(brain_path) if brain_path is not None else None
     if policy is not None and role and not is_role_allowed(policy, role):
         return None
-    for task in parse_local_tasks(path):
+    all_tasks = parse_local_tasks(path)
+    for task in all_tasks:
         if task.state != "open":
             continue
         if policy is not None and task.role and not is_role_allowed(policy, task.role):
@@ -306,9 +434,12 @@ def next_local_task(path: Path, role: str = "", brain_path: Path | None = None) 
         if role and task.role and task.role != role:
             continue
         if role and not task.role:
-            return task
+            if _all_deps_met(task, all_tasks):
+                return task
+            continue
         if not role or task.role == role:
-            return task
+            if _all_deps_met(task, all_tasks):
+                return task
     return None
 
 
@@ -583,8 +714,17 @@ def take_local_task(workspace: Path, task_id: str, agent: str) -> LocalTask:
     timestamp = utc_timestamp()
 
     def mutate(tasks_before: str, log_before: str) -> tuple[str, str, LocalTask]:
-        existing = next((task for task in parse_local_tasks_from_text(tasks_before) if task.task_id == task_id), None)
-        if existing and existing.state == "in-progress":
+        all_tasks = parse_local_tasks_from_text(tasks_before)
+        existing = next((task for task in all_tasks if task.task_id == task_id), None)
+        if existing is None:
+            raise ValueError(f"Local task not found: {task_id}")
+
+        # Check dependencies before any mutation
+        if not _all_deps_met(existing, all_tasks):
+            unmet = [dep for dep in existing.depends_on if dep not in {t.task_id for t in all_tasks if t.state == "done"}]
+            raise ValueError(f"Local task {task_id} has unmet dependencies: {', '.join(unmet)}")
+
+        if existing.state == "in-progress":
             body_lines = []
             lines = tasks_before.splitlines()
             for index, line in enumerate(lines):
@@ -626,7 +766,16 @@ def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, s
     summary = summary or f"completed {task_id}"
 
     def mutate(tasks_before: str, log_before: str) -> tuple[str, str, LocalTask]:
-        existing = next((task for task in parse_local_tasks_from_text(tasks_before) if task.task_id == task_id), None)
+        all_tasks = parse_local_tasks_from_text(tasks_before)
+        existing = next((task for task in all_tasks if task.task_id == task_id), None)
+        if existing is None:
+            raise ValueError(f"Local task not found: {task_id}")
+
+        # Check dependencies before any mutation
+        if not _all_deps_met(existing, all_tasks):
+            unmet = [dep for dep in existing.depends_on if dep not in {t.task_id for t in all_tasks if t.state == "done"}]
+            raise ValueError(f"Local task {task_id} has unmet dependencies: {', '.join(unmet)}")
+
         if existing and existing.state == "done":
             body_lines = []
             lines = tasks_before.splitlines()
@@ -674,7 +823,15 @@ def complete_local_task(workspace: Path, task_id: str, agent: str, model: str, s
 def _workspace_info(folder: Path, brain_file: Path) -> WorkspaceInfo:
     tasks_path = folder / "TASKS.md"
     log_path = folder / "LOG.md"
-    local_tasks = parse_local_tasks(tasks_path)
+    # Discovery/listing is a read path: a single malformed TASKS.md must not
+    # hide the workspace or abort the whole scan. Fall back to an empty task
+    # list — the workspace still shows with its title, log and mtime. The
+    # enforcement ops (next/take/complete_local_task) call parse_local_tasks
+    # directly and stay fail-closed on the same file.
+    try:
+        local_tasks = parse_local_tasks(tasks_path)
+    except ValueError:
+        local_tasks = []
     mtimes = [f.stat().st_mtime for f in (brain_file, tasks_path, log_path) if f.exists()]
     return WorkspaceInfo(
         path=folder,
@@ -780,11 +937,11 @@ def parse_project_descriptor(content: str) -> dict:
             name_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
             if name_match:
                 result["name"] = name_match.group(1).strip()
-            
+
             goal_match = re.search(r"^##\s+Goal\s*\n(.*?)(?=\n##|\Z)", content, re.MULTILINE | re.DOTALL | re.IGNORECASE)
             if goal_match:
                 result["goal"] = goal_match.group(1).strip()
-                
+
             tasks_match = re.search(r"^##\s+Tasks\s*\n(.*?)(?=\n##|\Z)", content, re.MULTILINE | re.DOTALL | re.IGNORECASE)
             if tasks_match:
                 tasks_text = tasks_match.group(1)
@@ -792,7 +949,7 @@ def parse_project_descriptor(content: str) -> dict:
                     line = line.strip()
                     if line.startswith("- ") or line.startswith("* "):
                         result["tasks"].append(line[2:].strip())
-            
+
             roles_match = re.search(r"^##\s+Roles\s*\n(.*?)(?=\n##|\Z)", content, re.MULTILINE | re.DOTALL | re.IGNORECASE)
             if roles_match:
                 roles_text = roles_match.group(1)
@@ -803,7 +960,7 @@ def parse_project_descriptor(content: str) -> dict:
 
         if not result["name"] and not result["goal"]:
             raise ValueError("Descriptor must have at least a name or a goal")
-            
+
         return result
     except Exception as e:
         raise ValueError(f"Failed to parse descriptor: {e}")
@@ -831,7 +988,7 @@ def convert_folder_to_workspace(folder_path: Path, descriptor: dict) -> Workspac
 
     existing_tasks = parse_local_tasks(tasks_file)
     existing_task_titles = {task.title for task in existing_tasks}
-    
+
     new_task_lines = []
     if not tasks_file.exists():
         new_task_lines.append("# Tasks\n\n")
@@ -850,7 +1007,7 @@ def convert_folder_to_workspace(folder_path: Path, descriptor: dict) -> Workspac
             explicit_role = item.get("role", "").strip()
             task_role = explicit_role if explicit_role else _infer_role_from_title(task_title)
             task_acceptance = item.get("acceptance", "").strip()
-        
+
         if not task_title:
             continue
 
@@ -865,7 +1022,7 @@ def convert_folder_to_workspace(folder_path: Path, descriptor: dict) -> Workspac
             task_line += f"      role: {task_role}\n"
         if task_acceptance:
             task_line += f"      acceptance: {task_acceptance}\n"
-        
+
         new_task_lines.append(task_line)
         task_counter += 1
 
@@ -876,5 +1033,5 @@ def convert_folder_to_workspace(folder_path: Path, descriptor: dict) -> Workspac
     workspaces = discover_workspaces([folder_path])
     if not workspaces:
         raise ValueError("Failed to create or find workspace after conversion.")
-    
+
     return workspaces[0]

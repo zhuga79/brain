@@ -24,7 +24,17 @@
 - `mode:` — `solo` (default) / `council` / `prd`
 - `council:` — для mode=council: список ролей `[architect, reviewer]`,
   команд `[team:legal]` либо смесь
-- `depends_on:` — id задач, которые должны быть `[x]`, прежде чем эта станет available
+- `depends_on:` — id задач, которые должны быть `[x]`, прежде чем эта станет available.
+  **Канонический синтаксис:** `depends_on: [task-id-1, task-id-2, ...]` — bracketed list, comma-separated.
+  Приёмник терпим к записи от руки: голый id (`depends_on: task-a`) и голый
+  список (`depends_on: task-a, task-b`) тоже принимаются.
+  Пустой список `[]` допустим (зависимостей нет); пустое значение — то же самое.
+  Незакрытая скобка (`[task-a`) → ошибка парсинга.
+  Пустые компоненты запрещены: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`, `task-a,,task-b` → ошибка парсинга.
+  Дубликаты внутри списка запрещены: `[task-x, task-x]` → ошибка парсинга.
+  Поле `depends_on` может встречаться **только один раз** на задачу; повторное поле → ошибка парсинга.
+  Поле распознаётся в любой позиции среди полей строки продолжения (используется общий парсер `grammar.parse_fields`).
+  Упоминание имени поля внутри парных обратных кавычек (inline code) полем не является — даже если внутри span есть два пробела перед `depends_on:`.
 - `due:` — опционально
 - `tags:` — опционально
 - `acceptance:` — обязательно
@@ -39,6 +49,28 @@
   оркестратор НЕ берёт её в headless auto-next. См. [[decision-interactive-surface]].
 - `gate:` — опц., тип человеческого шлюза для `surface: interactive`:
   `approval|taste|legal|intake|arbiter|data|risk|secret|curation`.
+
+## Fail-closed поведение зависимостей
+
+Парсер (`parse_local_tasks` / `parse_local_tasks_from_text`) **строго отклоняет** невалидные задачи **до** построения графа/селекции/мутации. Проверяемые случаи (перечисление не задаёт порядок выполнения):
+
+- **Дубликаты task_id** — если в файле встречаются два блока с одинаковым id, парсинг прерывается с `ValueError: Duplicate task ID: <id>`. Это гарантирует детерминизм: карта состояний не зависит от порядка блоков.
+- **Незакрытая скобка `depends_on`** — `[task-a` или `task-a]` → `ValueError: Malformed depends_on list (unbalanced brackets): <value>`.
+- **Пустые компоненты `depends_on`** — `[,]`, `[task-a,]`, `[,task-a]`, `[task-a,,task-b]`, `task-a,,task-b` → `ValueError: Malformed depends_on list (empty component): <value>`.
+- **Дубликаты внутри `depends_on`** — `[task-x, task-x]` → `ValueError: Task <id> has duplicate dependency: task-x`.
+- **Дубликаты поля `depends_on`** — два `depends_on:` в одном блоке → `ValueError: Task <id> has duplicate depends_on field`.
+- **Самозависимость** — `depends_on: [task-a]` в задаче `task-a` → `ValueError: Task task-a has self-dependency in depends_on`.
+- **Отсутствующие зависимости** — `depends_on: [missing-id]` → `ValueError: Task <id> has missing dependency: missing-id`.
+- **Циклы** — `A → B → A` и `A → B → C → A` → `ValueError: Dependency cycle detected involving: <node>`.
+- **Уже закрытые задачи (`[x]`)** — `next` пропускает; `take` отклоняет (ожидается open); `complete` с тем же `by`+`model` — идемпотентный no-op без записи в лог.
+
+Fail-closed действует на путях исполнения (`next_local_task` / `take_local_task` / `complete_local_task`). Обзорные пути (`discover_workspaces` для дашборда/списка) один сломанный `TASKS.md` не прячет: воркспейс показывается с пустым списком задач, ошибка попадает в `error` панели.
+
+**Поведение операций `next_local_task` / `take_local_task` / `complete_local_task`:**
+
+- `next_local_task`: пропускает задачи не в `[ ]` (включая уже `[x]`) и задачи с невыполненными deps (возвращает `None`, если доступных нет). Невыполненная зависимость — любая не `[x]` (open, in-progress, blocked). Не мутирует файлы.
+- `take_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`. Состояние задачи остаётся `[ ]`, лог не пишется. Уже `[x]` отклоняется без мутации.
+- `complete_local_task`: если у задачи есть невыполненные deps — **отклоняет с `ValueError` до любой мутации** `TASKS.md` или `LOG.md`, даже если задача уже `[x]`. Состояние не меняется, лог не пишется. Уже `[x]` с тем же `by`+`model` — идемпотентный no-op.
 
 ## Машинное состояние во время работы
 Когда задача в работе, к ней дописывается:

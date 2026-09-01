@@ -636,6 +636,64 @@ Action gates are stricter than role access. If an action appears under
 `requires_user_approval`, an agent must stop and get explicit user approval
 even if its role is otherwise allowed.
 
+#### Folder-local `TASKS.md`: format and fail-closed dependencies
+
+A workspace's `TASKS.md` is a folder-local queue parsed by `brain_workspace.py`.
+Task blocks use the same continuation-line format as the root queue:
+
+```
+- [ ] [P1] local-001 - First task
+      role: developer
+      acceptance: State the concrete completion check.
+
+- [ ] [P2] local-002 - Second task depending on the first
+      role: developer
+      depends_on: [local-001]
+      acceptance: Runs after local-001 is done.
+```
+
+`depends_on` syntax:
+
+- Canonical: `depends_on: [task-id-1, task-id-2, ...]` — a bracketed,
+  comma-separated list of task ids that must be done before this task becomes
+  available.
+- Bare forms written by hand are also accepted: `depends_on: task-a` and
+  `depends_on: task-a, task-b`.
+- An empty list `[]` is valid (no dependencies); an empty value is the same.
+- An unbalanced bracket (`[task-a`) is rejected.
+- Empty components are rejected: `[,]`, `[dep,]`, `[,dep]`, `[dep,,other]`, `task-a,,task-b`.
+- Duplicate ids inside the list are rejected (`[task-x, task-x]`).
+- The `depends_on` field may appear at most once per task — a repeated field on
+  the same continuation line or across lines is rejected. Field order on the
+  line does not matter (shared `grammar.parse_fields` parser).
+- A field-name mention inside paired backticks (inline code) is not a field,
+  even when the span contains two spaces before `depends_on:`.
+
+Parsing is fail-closed: `parse_local_tasks` rejects malformed or duplicate
+`depends_on`, duplicate task ids, self- and cyclic dependencies, and missing
+dependencies `before` building the graph, selecting or mutating anything. This
+guards the execution path (`next`/`take`/`complete`); the read-only discovery
+path (`discover_workspaces` for the dashboard/listing) tolerates one broken
+`TASKS.md` — that workspace lists with no parsed tasks and the error is
+surfaced, rather than the whole scan aborting. The operations behave as
+follows:
+
+- `next_local_task` — skips tasks not in `[ ]` (including already `[x]`) and
+  tasks with unmet dependencies (returns `None` when nothing is available).
+  Only `[x]` satisfies a dependency; open, in-progress and blocked do not.
+  Never mutates files.
+- `take_local_task` — if a task has unmet dependencies, rejects with `ValueError`
+  before mutating `TASKS.md` or `LOG.md`; the task stays `[ ]` and no log entry
+  is written. An already `[x]` task is rejected without mutation.
+- `complete_local_task` — if a task has unmet dependencies, rejects with
+  `ValueError` before mutating `TASKS.md` or `LOG.md`, even if the task is
+  already `[x]`; state is unchanged and no log entry is written. An already
+  `[x]` task with the same `by`+`model` is an idempotent no-op.
+
+Contending `take`/`complete` calls serialize on the workspace queue lock
+(`.workspace-queue.lock`); a take that wins the lock is the only one that
+mutates the queue, so exactly one contender can take a task.
+
 ### `brain-federation` — controlled federation import and sync
 
 ```

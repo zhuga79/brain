@@ -203,3 +203,97 @@ def test_parse_fields_reads_head_line_form_from_memory_md():
     assert got["role"] == "developer"
     assert got["mode"] == "solo"
     assert got["due"] == "2026-05-15"
+
+
+def test_parse_fields_ignores_field_like_metadata_inside_inline_code():
+    from brain_core.grammar import parse_fields
+
+    line = "acceptance: write `role: developer   depends_on: [task-a]` verbatim   role: developer"
+    got = parse_fields(line)
+    assert got == {
+        "acceptance": "write `role: developer   depends_on: [task-a]` verbatim",
+        "role": "developer",
+    }
+
+
+def test_parse_fields_masks_multiple_backticked_metadata_like_fields():
+    from brain_core.grammar import parse_fields
+
+    line = (
+        "role: developer   acceptance: see `role: x   depends_on: [a]   mode: solo` "
+        "and `client: ACME`   depends_on: [task-a]"
+    )
+    got = parse_fields(line)
+    assert got == {
+        "role": "developer",
+        "acceptance": "see `role: x   depends_on: [a]   mode: solo` and `client: ACME`",
+        "depends_on": "[task-a]",
+    }
+
+
+def test_parse_fields_inline_code_at_line_start_does_not_mask_after():
+    from brain_core.grammar import parse_fields
+
+    line = "`depends_on: [task-a]`   role: developer   depends_on: [task-b]"
+    assert parse_fields(line) == {"role": "developer", "depends_on": "[task-b]"}
+
+
+def test_parse_fields_unmatched_backtick_masks_nothing():
+    from brain_core.grammar import parse_fields
+
+    # A lone backtick is not a span; a real field after it must survive
+    # and not be swallowed into prose by a greedy end-of-line mask.
+    line = "      acceptance: note ` alone   role: developer   depends_on: [task-a]"
+    got = parse_fields(line)
+    assert got == {
+        "acceptance": "note ` alone",
+        "role": "developer",
+        "depends_on": "[task-a]",
+    }
+
+
+def test_parse_fields_and_count_field_starts_agree_on_inline_code():
+    from brain_core.grammar import count_field_starts, parse_fields
+
+    line = (
+        "acceptance: write `role: developer   depends_on: [task-a]` verbatim"
+        "   role: developer   depends_on: [task-b]"
+    )
+    assert parse_fields(line) == {
+        "acceptance": "write `role: developer   depends_on: [task-a]` verbatim",
+        "role": "developer",
+        "depends_on": "[task-b]",
+    }
+    assert count_field_starts(line, "acceptance") == 1
+    assert count_field_starts(line, "role") == 1
+    assert count_field_starts(line, "depends_on") == 1
+
+
+def test_count_field_starts_ignores_backticked_mentions():
+    from brain_core.grammar import count_field_starts
+
+    line = (
+        "acceptance: document `role: developer   depends_on: [task-a]`"
+        "   role: developer   depends_on: [task-a]"
+    )
+    assert count_field_starts(line, "depends_on") == 1
+    assert count_field_starts(line, "role") == 1
+
+
+def test_count_field_starts_masks_multiple_backticked_metadata_like_fields():
+    from brain_core.grammar import count_field_starts
+
+    line = (
+        "role: developer   acceptance: see `role: x   depends_on: [a]   mode: solo` "
+        "and `client: ACME`   depends_on: [task-a]"
+    )
+    assert count_field_starts(line, "depends_on") == 1
+    assert count_field_starts(line, "role") == 1
+
+
+def test_count_field_starts_unmatched_backtick_masks_nothing():
+    from brain_core.grammar import count_field_starts
+
+    line = "      acceptance: note ` alone   role: developer   depends_on: [task-a]"
+    assert count_field_starts(line, "depends_on") == 1
+    assert count_field_starts(line, "role") == 1
