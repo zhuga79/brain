@@ -26,6 +26,7 @@ from brain_federation.plan import (  # noqa: E402
     cmd_write_wiki_proposals,
 )
 from brain_federation.sync import cmd_sync, cmd_merge_tasks  # noqa: E402
+from brain_federation.journal_merge import cmd_merge_log  # noqa: E402
 
 
 def cmd_support(args: argparse.Namespace) -> int:
@@ -40,6 +41,7 @@ def cmd_support(args: argparse.Namespace) -> int:
         "brain-federation write-wiki-proposals --plan <plan.json> --as <agent-id> [--yes] [--json]",
         "brain-federation sync [--repo <path>] [--brain <path>] [--json]",
         "brain-federation merge-tasks --base <path> --local <path> --remote <path> [--out <path>]",
+        "brain-federation merge-log --base <path> --local <path> --remote <path> [--out <path>]",
     ]
     data["read_only"] = True
     data["blocking_codes"] = [
@@ -152,6 +154,16 @@ def main() -> int:
     merge.add_argument("--remote", required=True, help="Path to remote task file")
     merge.add_argument("--out", default="", help="Path to write merged output")
     merge.set_defaults(func=cmd_merge_tasks)
+
+    merge_log = sub.add_parser(
+        "merge-log",
+        help="Merge wiki/log.md journals by timestamp with identity dedup",
+    )
+    merge_log.add_argument("--base", default="", help="Path to common ancestor journal (git %O)")
+    merge_log.add_argument("--local", required=True, help="Path to local journal (git %A)")
+    merge_log.add_argument("--remote", required=True, help="Path to remote journal (git %B)")
+    merge_log.add_argument("--out", default="", help="Path to write merged journal (default: stdout)")
+    merge_log.set_defaults(func=cmd_merge_log)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

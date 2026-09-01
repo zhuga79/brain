@@ -14,6 +14,7 @@ from .core import (
     node_audit_extra,
     FEDERATION_CONFIG_FILE,
 )
+from .journal_merge import finish_rebase_resolving_log, install_log_merge_driver
 from .merger import merge_blocks
 from brain_core import journal
 import brain_task_parser
@@ -111,17 +112,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return exit_code(findings)
 
     print(f"Syncing {repo}...")
-    
-    # 1. Pull --rebase
+    install_log_merge_driver(repo)
+
+    # 1. Pull --rebase. wiki/log.md conflicts are resolved by the brain-log
+    # driver when it fires; otherwise the helper finishes the rebase.
     res_pull = git_pull_rebase(repo)
     if res_pull.returncode != 0:
-        print(f"Pull failed:\n{res_pull.stderr}", file=sys.stderr)
-        findings.append(Finding("federation-sync-pull-failed", "block", str(repo), f"git pull --rebase failed: {res_pull.stderr}"))
-        log_sync(brain, repo, "pull-failed")
-        data = result("sync", repo, brain, findings)
-        emit(data, args.json)
-        return exit_code(findings)
-    print("Pull/Rebase OK")
+        if finish_rebase_resolving_log(repo):
+            print("Pull/Rebase OK (wiki/log.md merged)")
+        else:
+            print(f"Pull failed:\n{res_pull.stderr}", file=sys.stderr)
+            findings.append(Finding(
+                "federation-sync-pull-failed", "block", str(repo),
+                f"git pull --rebase failed: {res_pull.stderr}",
+            ))
+            log_sync(brain, repo, "pull-failed")
+            data = result("sync", repo, brain, findings)
+            emit(data, args.json)
+            return exit_code(findings)
+    else:
+        print("Pull/Rebase OK")
 
     # 2. Push
     res_push = git_push(repo)

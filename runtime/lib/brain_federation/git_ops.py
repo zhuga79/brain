@@ -5,12 +5,17 @@ import subprocess
 from pathlib import Path
 
 
-def git_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def git_run(
+    repo: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -61,6 +66,18 @@ def git_head(repo: Path) -> str:
         return ""
     res = git_run(repo, "rev-parse", "HEAD")
     return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def git_path(repo: Path, rel: str) -> Path:
+    """Resolve a path inside ``.git/`` (works for worktrees)."""
+    res = git_run(repo, "rev-parse", "--git-path", rel)
+    raw = (res.stdout or "").strip()
+    if not raw:
+        return repo / ".git" / rel
+    path = Path(raw)
+    if not path.is_absolute():
+        path = repo / path
+    return path
 
 
 def git_pull_rebase(repo: Path) -> subprocess.CompletedProcess[str]:
