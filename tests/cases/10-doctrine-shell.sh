@@ -15,6 +15,11 @@ grep -q "tax-boundaries" <<< "$_bd_search" || { echo "FAILED: brain-doctrine sea
 brain-doctrine list --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['doctrines']) >= 2, f'Expected >=2 doctrines, got {d}'" || { echo "FAILED: brain-doctrine list --json invalid"; exit 1; }
 brain-doctrine show tax-boundaries --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'content' in d, f'Missing content: {d}'" || { echo "FAILED: brain-doctrine show --json missing content"; exit 1; }
 brain-doctrine search "accountant" --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('results'), f'No results: {d}'" || { echo "FAILED: brain-doctrine search --json no results"; exit 1; }
+capture_output _bd_roles 'brain-doctrine roles'
+grep -q "developer" <<< "$_bd_roles" || { echo "FAILED: brain-doctrine roles missing developer"; exit 1; }
+brain-doctrine roles --json | python3 -c "import json,sys; d=json.load(sys.stdin); slugs={x['slug'] for x in d['roles']}; assert 'developer' in slugs, d" || { echo "FAILED: brain-doctrine roles --json missing developer"; exit 1; }
+capture_output _bd_role_show 'brain-doctrine roles developer'
+grep -q "Role: developer\|# Role: developer" <<< "$_bd_role_show" || { echo "FAILED: brain-doctrine roles developer missing content"; exit 1; }
 
 echo ">>> Verifying brain-shell --once mode"
 capture_output _sh_status 'brain-shell --once status'
