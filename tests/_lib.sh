@@ -11,6 +11,39 @@ set -euo pipefail
 # на кейсы, которые появятся позже, — забыть её нельзя.
 . "$(dirname "${BASH_SOURCE[0]}")/lib/sandbox-guard.sh"
 
+_LIB_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/lib" && pwd)"
+
+# Свободный TCP-порт вместо константы из диапазона 19987–19996.
+#
+# Кейсы, поднимающие `brain-dashboard serve` в фоне, раньше использовали
+# фиксированные порты-константы. Для последовательного прогона это было
+# безвредно, но несколько констант повторялись между кейсами (19988:
+# 11-dashboard-post и 57-queue-launch-guard; 19989: 11-dashboard-post и
+# 56-queue-cycle; 19996: 57-queue-launch-guard и 73-dashboard-workspace-import)
+# — при двух одновременных прогонах tests/run.sh из разных деревьев это
+# гарантированная коллизия «Address already in use» либо, хуже, запрос,
+# ушедший в чужой сервер того же кейса из соседнего дерева
+# (t-2026-08-16-smoke-suite-cannot-run-concurr). Образец эфемерного порта —
+# bind(0) в 09-dashboard.sh и 13-audit-log.sh.
+pick_free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+# Опрос готовности TCP-порта вместо фиксированного `sleep 1` после запуска
+# `brain-dashboard serve &` в фоне. Тот же класс дефекта, что чинили в
+# 13-audit-log (t-2026-08-17-audit-log-case-waits-on-host-s): на медленном
+# раннере фиксированная пауза не гарантирует, что сервер успел забиндиться,
+# а параллельный сосед по прогону отбирает CPU/IO ещё сильнее. Отказывает
+# строкой `FAILED: ...` и кодом 1 (см. tests/lib/wait_for_port.py::require_port),
+# вместо трассировки ConnectionRefusedError.
+wait_dashboard_port() {
+    local port="$1"
+    PYTHONPATH="$_LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+from wait_for_port import require_port
+require_port('127.0.0.1', $port).close()
+"
+}
+
 # ── Globals (set by run.sh or smoke.sh entry point) ──
 # PROJECT_ROOT: absolute path to project root
 # CASES: array of case files to run

@@ -22,8 +22,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 with socketserver.TCPServer(("127.0.0.1", 0), Handler) as srv:
     port = srv.server_address[1]
+    # Без паузы: TCPServer.__init__ делает bind()+listen() синхронно, до
+    # возврата из конструктора — то есть до этой строки сокет уже слушает,
+    # и ОС ставит входящие соединения в очередь backlog independent от того,
+    # успел ли serve_forever() запуститься в потоке. Гонки «слушает ли порт»
+    # здесь нет (в отличие от brain-dashboard serve, где bind() происходит
+    # внутри самого запуска, а не в конструкторе) — проверено запуском:
+    # t-2026-08-16-smoke-suite-cannot-run-concurr.
     t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
-    time.sleep(0.1)
 
     # Create a minimal brain for testing
     with tempfile.TemporaryDirectory() as td:

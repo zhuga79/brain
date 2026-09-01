@@ -5,7 +5,10 @@ source "$(dirname "$0")/../_lib.sh"
 
 echo ">>> Verifying brain-dashboard /api/metrics endpoint"
 python3 - <<'PYEOF'
-import subprocess, os, tempfile, pathlib, json, time, urllib.request, shutil, signal
+import subprocess, os, sys, tempfile, pathlib, json, time, urllib.request, shutil, signal
+
+sys.path.insert(0, os.path.join(os.environ["PROJECT_ROOT"], "tests", "lib"))
+from wait_for_port import require_port
 
 brain = pathlib.Path(tempfile.mkdtemp(prefix="smoke-metrics-"))
 for d in ["tasks", "wiki", ".locks", "roles", "learning/incidents",
@@ -47,15 +50,11 @@ proc = subprocess.Popen(
     ["brain-dashboard", "serve", "--port", str(_port)],
     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
 )
-# Wait for server to be ready (retry up to 5s)
+# Wait for server to be ready. require_port отказывает строкой FAILED и
+# кодом 1 при исчерпании дедлайна, вместо того чтобы молча идти делать
+# боевой запрос и падать трассировкой ConnectionRefusedError.
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-for _attempt in range(10):
-    time.sleep(0.5)
-    try:
-        opener.open(f"http://127.0.0.1:{_port}/api/status", timeout=2)
-        break
-    except Exception:
-        pass
+require_port("127.0.0.1", _port).close()
 
 try:
     resp = opener.open(f"http://127.0.0.1:{_port}/api/metrics", timeout=5)
@@ -104,13 +103,7 @@ proc2 = subprocess.Popen([sys.executable, "-m", "brain_dashboard_main"]
                           env={**os.environ, "BRAIN_PATH": str(brain)},
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
-    for _ in range(15):
-        time.sleep(0.5)
-        try:
-            opener.open(f"http://127.0.0.1:{_port2}/api/status", timeout=2)
-            break
-        except Exception:
-            pass
+    require_port("127.0.0.1", _port2).close()
     resp = opener.open(f"http://127.0.0.1:{_port2}/api/metrics", timeout=5)
     body2 = json.loads(resp.read())
     pol2 = body2["policy"]

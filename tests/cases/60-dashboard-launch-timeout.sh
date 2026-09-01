@@ -36,15 +36,16 @@ JSON
 # No sandbox guard here: we want the launch to actually run the (hanging) shim.
 # The surrounding Codex session may set CODEX_SANDBOX_NETWORK_DISABLED=1; clear
 # it for this child so the dashboard launch guard does not mask timeout behavior.
-env -u CODEX_SANDBOX_NETWORK_DISABLED brain-dashboard serve --port 19990 &
+port=$(pick_free_port)
+env -u CODEX_SANDBOX_NETWORK_DISABLED brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true; rm -rf "$shim_dir"' EXIT
-sleep 1
+wait_dashboard_port "$port"
 
 start=$(date +%s)
 http_code=$(curl -s --noproxy '*' -o /tmp/brain-timeout-body.json -w '%{http_code}' \
   -H "X-Brain-Confirm: 1" -X POST \
-  "http://127.0.0.1:19990/api/queue-proposals/qp-hang/launch?dry_run=0")
+  "http://127.0.0.1:$port/api/queue-proposals/qp-hang/launch?dry_run=0")
 elapsed=$(( $(date +%s) - start ))
 
 [ "$http_code" = "504" ] || { echo "FAILED: expected 504, got $http_code; body=$(cat /tmp/brain-timeout-body.json)"; exit 1; }

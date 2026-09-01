@@ -46,13 +46,14 @@ grep -q "data-kb-proposal='qp-test-cli'" "$HTML" || { echo "FAILED: proposal not
 grep -q 'class="launch-client"' "$HTML" || { echo "FAILED: missing launch client selector"; exit 1; }
 echo "OK: предложение привязано к карточке, выбор клиента доступен"
 
-brain-dashboard serve --port 19992 &
+port=$(pick_free_port)
+brain-dashboard serve --port "$port" &
 srv_pid=$!
 trap 'kill $srv_pid 2>/dev/null || true' EXIT
-sleep 1
+wait_dashboard_port "$port"
 
 # (b) Client override honored (dry-run).
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19992/api/queue-proposals/qp-test-cli/launch?dry_run=1&client=gemini" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/queue-proposals/qp-test-cli/launch?dry_run=1&client=gemini" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is True, f'override launch should succeed: {d}'
@@ -61,7 +62,7 @@ print('OK: client override honored')
 " || { echo "FAILED: client override"; exit 1; }
 
 # (c) Invalid client override rejected.
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19992/api/queue-proposals/qp-test-cli/launch?dry_run=1&client=badcli" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/queue-proposals/qp-test-cli/launch?dry_run=1&client=badcli" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is False, f'bad client should fail: {d}'
@@ -70,7 +71,7 @@ print('OK: invalid client rejected')
 " || { echo "FAILED: bad client not rejected"; exit 1; }
 
 # (d) No override -> proposal default client.
-curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:19992/api/queue-proposals/qp-test-cli/launch?dry_run=1" | python3 -c "
+curl -s --noproxy '*' -H "X-Brain-Confirm: 1" -X POST "http://127.0.0.1:$port/api/queue-proposals/qp-test-cli/launch?dry_run=1" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is True, f'default launch should succeed: {d}'
