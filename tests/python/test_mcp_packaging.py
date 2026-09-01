@@ -187,6 +187,59 @@ def test_brain_status_reports_missing_optional_mcp_parity(tmp_path):
     assert "install-brain-mcp.sh" in parity["remediation"]
 
 
+def _run_brain_status_mcp_parity(tmp_path: Path, install_root: Path, launcher: Path) -> dict:
+    brain = tmp_path / "brain"
+    for rel in ("wiki", "tasks", "council", "raw"):
+        (brain / rel).mkdir(parents=True, exist_ok=True)
+    (brain / "tasks" / "active.md").write_text("# Active\n", encoding="utf-8")
+    (brain / "tasks" / "done.md").write_text("# Done\n", encoding="utf-8")
+    (brain / "wiki" / "index.md").write_text("# Index\n", encoding="utf-8")
+    (brain / "wiki" / "log.md").write_text("# Log\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["BRAIN_PATH"] = str(brain)
+    env["BRAIN_SYSTEM_PATH"] = str(PROJECT_ROOT)
+    env["BRAIN_MCP_DIR"] = str(install_root)
+    env["BRAIN_MCP_LAUNCHER"] = str(launcher)
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "runtime" / "lib")
+
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "runtime" / "bin" / "brain-status"), "--json"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["mcp_parity"]
+
+
+def test_brain_status_matched_counts_manifest_files_not_launcher(tmp_path):
+    """A missing launcher is its own diagnostic (launcher_present + drift_count).
+    It must not make the runtime tree read one manifest file short."""
+    install_root = tmp_path / "brain-mcp"
+    packaging.install_tree(PROJECT_ROOT, install_root)
+    file_count = packaging.source_manifest(PROJECT_ROOT)["file_count"]
+
+    launcher = tmp_path / "bin" / "brain-mcp"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    clean = _run_brain_status_mcp_parity(tmp_path, install_root, launcher)
+    assert clean["status"] == "ok"
+    assert clean["launcher_present"] is True
+    assert clean["matched"] == file_count
+    assert clean["drift_count"] == 0
+
+    launcher.unlink()
+    no_launcher = _run_brain_status_mcp_parity(tmp_path, install_root, launcher)
+    assert no_launcher["status"] == "drift"
+    assert no_launcher["launcher_present"] is False
+    # tree is intact — matched still covers every manifest file
+    assert no_launcher["matched"] == file_count
+    # the only drift is the launcher
+    assert no_launcher["drift_count"] == 1
+    assert {item["path"] for item in no_launcher["missing"]} == {"launcher"}
+
+
 # ---------------------------------------------------------------------------
 # t-2026-08-14-mcp-package-atomic-refresh-sta:
 # install больше не сносит установленное дерево до копирования нового.
