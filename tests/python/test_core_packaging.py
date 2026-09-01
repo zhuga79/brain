@@ -69,6 +69,25 @@ def test_setup_removes_stale_copies():
     assert "brain-runtime.pth" in text, "нужен запасной путь: pip отказывает при PEP 668"
 
 
+def test_setup_rewrites_runtime_pth_after_pip():
+    """Stale .pth from another checkout stays on sys.path if we write it only on pip failure."""
+    text = (REPO / "setup-brain-v2.sh").read_text(encoding="utf-8")
+    after_pip = text.split("pip install --user -e", 1)[1]
+    fi_idx = after_pip.find("\nfi\n")
+    assert fi_idx != -1, "не нашли закрытие ветки pip install"
+    assert "brain-runtime.pth" in after_pip[fi_idx:], (
+        "перезапись .pth должна идти после if pip, иначе чужой чекаут остаётся в sys.path"
+    )
+
+
+def test_setup_pth_writer_does_not_resolve_checkout():
+    """resolve() превращает symlink-чекаут в Документы/Brain/files — status врёт про чужую копию."""
+    text = (REPO / "setup-brain-v2.sh").read_text(encoding="utf-8")
+    after_pip = text.split("pip install --user -e", 1)[1]
+    assert "root = Path(sys.argv[1]).resolve()" not in after_pip
+    assert "root = Path(sys.argv[1])" in after_pip
+
+
 def test_cli_install_runs_after_pip_editable():
     """Обёртки из runtime/bin обязаны пережить console-скрипты pip.
 
@@ -115,6 +134,22 @@ def test_core_version_module():
     assert isinstance(core_version(), str) and core_version()
     loc = Path(core_location())
     assert loc.is_dir() or loc.suffix == ".pth"
+
+
+def test_core_location_is_the_import_path():
+    """resolve() превращает ~/brain в Документы/Brain/files и status врёт про чужую копию."""
+    import brain_core.version as ver
+
+    src = (REPO / "runtime" / "lib" / "brain_core" / "version.py").read_text(encoding="utf-8")
+    assert "Path(__file__).resolve()" not in src
+    assert ver._import_root() == Path(ver.__file__).parent.parent
+
+
+def test_pyproject_does_not_set_pytest_pythonpath():
+    """PYTHONPATH задают CI, хук и смоук; pythonpath в pyproject маскирует unpackaged."""
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    section = text.split("[tool.pytest.ini_options]", 1)[1].split("\n[", 1)[0]
+    assert "pythonpath" not in section
 
 
 def test_embedded_python_heredocs_are_valid():
