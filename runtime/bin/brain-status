@@ -263,11 +263,15 @@ def detect_mcp_parity(brain: Path) -> dict[str, Any]:
     verify["install_root"] = str(install_root)
     verify["launcher"] = str(launcher)
     verify["launcher_present"] = launcher_present
+    # matched counts manifest files that verified OK — a fact about the tree.
+    # Compute it before the launcher note is folded into `missing`, so a stale
+    # launcher (its own diagnostic, carried by launcher_present + drift_count)
+    # never makes the runtime tree look one file short.
+    verify["matched"] = verify.get("file_count", 0) - len(verify.get("missing", [])) - len(verify.get("mismatches", []))
     if not launcher_present:
         verify["status"] = "drift"
         verify["missing"] = [{"path": "launcher"}] + verify.get("missing", [])
         verify["drift_count"] = verify.get("drift_count", 0) + 1
-    verify["matched"] = verify.get("file_count", 0) - len(verify.get("missing", [])) - len(verify.get("mismatches", []))
     if verify.get("status") == "ok":
         verify["remediation"] = ""
     else:

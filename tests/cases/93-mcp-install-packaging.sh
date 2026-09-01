@@ -160,4 +160,31 @@ python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$PROJECT_
   fail_case "diverted install disturbed the default MCP tree"
 }
 
+# -----------------------------------------------------------------------------
+# BRAIN_MCP_SKIP_PIP=1 запрещает pip и на свежем venv (не только на существующем)
+# -----------------------------------------------------------------------------
+echo ">>> Verifying BRAIN_MCP_SKIP_PIP=1 skips pip for a brand-new venv"
+fresh_dir="$HOME/fresh-brain-mcp"
+fresh_launcher="$HOME/fresh-bin/brain-mcp"
+[ ! -e "$fresh_dir/.venv" ] || fail_case "fresh install dir already has a venv"
+env BRAIN_MCP_DIR="$fresh_dir" BRAIN_MCP_LAUNCHER="$fresh_launcher" BRAIN_MCP_SKIP_PIP=1 \
+  bash "$PROJECT_ROOT/install-brain-mcp.sh" >/tmp/mcp-fresh.out 2>/tmp/mcp-fresh.err || {
+  cat /tmp/mcp-fresh.out
+  cat /tmp/mcp-fresh.err
+  fail_case "install-brain-mcp.sh failed on a fresh venv with BRAIN_MCP_SKIP_PIP=1"
+}
+grep -q "Создаю venv" /tmp/mcp-fresh.out || fail_case "fresh install did not create a venv"
+grep -q "Пропускаю pip install" /tmp/mcp-fresh.out || fail_case "SKIP_PIP not acknowledged"
+grep -q "Устанавливаю fastmcp" /tmp/mcp-fresh.out && fail_case "pip ran despite BRAIN_MCP_SKIP_PIP=1 on a fresh venv"
+grep -q "Smoke пропущен" /tmp/mcp-fresh.out || fail_case "installer did not report missing MCP prerequisites"
+grep -q "pip.*install.*mcp" /tmp/mcp-fresh.out || fail_case "skip message does not name the exact pip command"
+assert_file_exists "$fresh_dir/manifest.json"
+assert_file_exists "$fresh_dir/runtime/mcp/server.py"
+assert_file_exists "$fresh_launcher"
+assert_file_exists "$fresh_dir/.venv/bin/python"
+"$fresh_dir/.venv/bin/python" -c "import mcp" >/dev/null 2>&1 && fail_case "MCP deps present though pip was skipped"
+python3 "$PROJECT_ROOT/runtime/mcp/packaging.py" verify --system-root "$PROJECT_ROOT" --install-root "$fresh_dir" >/dev/null || {
+  fail_case "fresh SKIP_PIP install drifted from source"
+}
+
 echo ">>> MCP installer packaging checks passed"

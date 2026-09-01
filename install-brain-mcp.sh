@@ -32,6 +32,7 @@ mkdir -p "$(dirname "$LAUNCHER_PATH")"
 # Python venv + FastMCP
 # =============================================================================
 need_pip=0
+pip_skipped=0
 if [ ! -d "$MCP_DIR/.venv" ]; then
   echo ">>> Создаю venv в $MCP_DIR/.venv"
   python3 -m venv "$MCP_DIR/.venv"
@@ -40,6 +41,10 @@ fi
 
 if [ "${BRAIN_MCP_SKIP_PIP:-0}" = "1" ]; then
   echo ">>> Пропускаю pip install (BRAIN_MCP_SKIP_PIP=1)"
+  # SKIP_PIP запрещает pip безусловно, включая только что созданный venv —
+  # иначе флаг бесполезен ровно там, где он нужен: на чистой установке.
+  need_pip=0
+  pip_skipped=1
 elif [ "${BRAIN_MCP_FORCE_PIP:-0}" = "1" ]; then
   need_pip=1
 fi
@@ -56,7 +61,7 @@ if [ "$need_pip" -eq 1 ]; then
     env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NO_PROXY -u no_proxy \
       -u ALL_PROXY -u all_proxy "$MCP_DIR/.venv/bin/pip" install --quiet "mcp>=1.0.0"
   }
-else
+elif [ "$pip_skipped" -eq 0 ]; then
   echo ">>> Использую существующие MCP dependencies (.venv уже есть)"
 fi
 
@@ -79,10 +84,20 @@ install -m 755 "$LAUNCHER_SRC" "$LAUNCHER_PATH"
 # =============================================================================
 # Smoke test
 # =============================================================================
+# Дерево и launcher уже на месте — это структурная установка, она удалась.
+# Импорт server и `--help` нужны MCP-зависимости в venv. Если pip был пропущен
+# (BRAIN_MCP_SKIP_PIP) и зависимостей нет — smoke не выполняем, но говорим об
+# этом точно: чего не хватает и как доустановить. Если pip отработал, а import
+# всё равно падает — это настоящий отказ.
+deps_ok=0
+if "$MCP_DIR/.venv/bin/python" -c "import mcp" >/dev/null 2>&1; then
+  deps_ok=1
+fi
 
 echo
-echo ">>> Smoke test: импорт и --help"
-"$MCP_DIR/.venv/bin/python" -c "
+if [ "$deps_ok" -eq 1 ]; then
+  echo ">>> Smoke test: импорт и --help"
+  "$MCP_DIR/.venv/bin/python" -c "
 import sys, asyncio
 sys.path.insert(0, '$MCP_DIR/runtime/lib')
 sys.path.insert(0, '$MCP_DIR/runtime/mcp')
@@ -91,8 +106,18 @@ names = [getattr(tool, '__name__', 'tool') for tool in getattr(server.mcp, '_too
 print(f'  ✓ Импорт ОК. tools зарегистрированы: {len(names)}')
 print('  Примеры:', names[:8])
 " 2>&1
-"$LAUNCHER_PATH" --help >/dev/null
-echo "  ✓ Launcher --help ОК"
+  "$LAUNCHER_PATH" --help >/dev/null
+  echo "  ✓ Launcher --help ОК"
+elif [ "$pip_skipped" -eq 1 ]; then
+  echo ">>> Smoke пропущен: в $MCP_DIR/.venv нет MCP-зависимостей (BRAIN_MCP_SKIP_PIP=1)"
+  echo "    Дерево и launcher установлены. Перед использованием сервера:"
+  echo "      '$MCP_DIR/.venv/bin/pip' install 'mcp>=1.0.0' 'fastmcp>=0.4.0'"
+  echo "    или переустановить без BRAIN_MCP_SKIP_PIP."
+else
+  echo "!!! MCP-зависимости не установились: 'import mcp' падает после pip." >&2
+  echo "    venv: $MCP_DIR/.venv" >&2
+  exit 1
+fi
 
 echo
 echo "==============================================================="
