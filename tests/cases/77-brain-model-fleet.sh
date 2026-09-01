@@ -14,7 +14,7 @@ printf '# Active Tasks\n' > "$BRAIN_PATH/tasks/active.md"
 printf '# Done\n' > "$BRAIN_PATH/tasks/done.md"
 printf '# Log\n' > "$BRAIN_PATH/wiki/log.md"
 
-registry="$BRAIN_PATH/config/model-fleet.json"
+registry="$BRAIN_PATH/.model-fleet.json"
 report="$BRAIN_PATH/wiki/model-fleet-report.md"
 
 # Mock brain-provider ('probe' ok / 'status' emits $MOCK_STATUS) and CLI clients
@@ -82,6 +82,9 @@ PY
 grep -q "Model Fleet Report" "$report" || { echo "FAILED: report not regenerated"; exit 1; }
 grep -q "OK - registry updated" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: healthy not logged"; exit 1; }
 grep -q "source: model-fleet:refresh-failure" "$BRAIN_PATH/tasks/active.md" && { echo "FAILED: corrective while healthy"; exit 1; }
+# Реестр — корневой dotfile, не config/: config/ эксклюзивно системный и под
+# split-root brain-validate его в дереве данных запрещает.
+[ ! -d "$BRAIN_PATH/config" ] || { echo "FAILED: cycle recreated the system config/ dir under \$BRAIN"; exit 1; }
 echo "OK: healthy path"
 
 # (c) broken probe -> --apply exits non-zero, appends well-formed corrective, output preserved

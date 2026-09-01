@@ -188,7 +188,7 @@ def model_fleet_issues(brain: Path) -> list[Issue]:
     или отсутствующий реестр — сигнал, что имя модели может быть устаревшим:
     восстановить его — `brain-model-fleet --apply`.
     """
-    path = brain / "config" / "model-fleet.json"
+    path = brain / ".model-fleet.json"
     rel = str(path.relative_to(brain))
     if not path.exists():
         return [Issue("WARN", rel, "model fleet registry missing — run brain-model-fleet --apply")]

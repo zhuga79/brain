@@ -63,6 +63,24 @@ def test_enabled_clients_falls_back() -> None:
     assert model_fleet.enabled_clients(matrix) == ["claude"]
 
 
+def test_write_registry_is_a_root_dotfile_not_a_system_dir(tmp_path) -> None:
+    """Реестр — корневой dotfile ($BRAIN/.model-fleet.json), как .provider-health.json.
+
+    config/ входит в EXCLUSIVE_SYSTEM_DIRS: под split-root его появление в дереве
+    данных — ERROR brain-validate. Цикл не должен туда писать.
+    """
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    registry = model_fleet.build_registry({}, {}, policy="p")
+    path = model_fleet.write_registry(brain, registry)
+
+    assert path == brain / ".model-fleet.json"
+    assert path.is_file()
+    assert not (brain / "config").exists()
+    # временный файл убран
+    assert list(brain.iterdir()) == [path]
+
+
 def test_unit_spec_valid_and_daily() -> None:
     import argparse
 
@@ -80,7 +98,8 @@ def test_model_fleet_issues_flag_missing_and_stale(tmp_path) -> None:
     from brain_wiki.writers import model_fleet_issues
 
     brain = tmp_path / "brain"
-    (brain / "config").mkdir(parents=True)
+    brain.mkdir(parents=True)
+    registry = brain / ".model-fleet.json"
     issue = model_fleet_issues(brain)
     assert len(issue) == 1 and issue[0].severity == "WARN"
     assert "run brain-model-fleet --apply" in issue[0].message
@@ -89,7 +108,7 @@ def test_model_fleet_issues_flag_missing_and_stale(tmp_path) -> None:
     from brain_core import clock
     import json
 
-    (brain / "config" / "model-fleet.json").write_text(json.dumps({
+    registry.write_text(json.dumps({
         "version": 1,
         "updated_utc": clock.utc_now(),
         "stale_after_hours": 24,
@@ -98,7 +117,7 @@ def test_model_fleet_issues_flag_missing_and_stale(tmp_path) -> None:
     assert model_fleet_issues(brain) == []
 
     # протухший реестр — WARN stale
-    (brain / "config" / "model-fleet.json").write_text(json.dumps({
+    registry.write_text(json.dumps({
         "version": 1,
         "updated_utc": "2020-01-01T00:00:00Z",
         "stale_after_hours": 24,
