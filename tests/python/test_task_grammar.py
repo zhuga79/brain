@@ -297,3 +297,40 @@ def test_count_field_starts_unmatched_backtick_masks_nothing():
     line = "      acceptance: note ` alone   role: developer   depends_on: [task-a]"
     assert count_field_starts(line, "depends_on") == 1
     assert count_field_starts(line, "role") == 1
+
+
+def test_parse_fields_inner_mixed_run_does_not_mask_later_real_field():
+    from brain_core.grammar import parse_fields
+
+    # A ``code`` span wraps a single-backtick run inside it. That inner run is
+    # content, not a delimiter: it must never pair with the later lone backtick
+    # after the real depends_on. If it did, the whole ``depends_on: [x]`` span
+    # would be blanked and the field vanish entirely.
+    line = "a `` ` b``   depends_on: [x]   `tail"
+    got = parse_fields(line)
+    assert "depends_on" in got
+
+
+def test_parse_fields_inner_mixed_run_and_later_single_span():
+    from brain_core.grammar import count_field_starts, parse_fields
+
+    # A ``code`` span swallows an inner lone backtick; a separate later `code`
+    # span must still mask its own body without the inner run stealing its
+    # opener. The real depends_on in between survives and is counted once.
+    line = "a `` ` b``   depends_on: [x]   `tail"
+    got = parse_fields(line)
+    assert got["depends_on"].startswith("[x]")
+    assert count_field_starts(line, "depends_on") == 1
+    assert count_field_starts(line, "role") == 0
+
+
+def test_count_field_starts_inner_mixed_run_does_not_mask_later_real_field():
+    from brain_core.grammar import count_field_starts
+
+    # Exact regression: ``a ` b`` then a real depends_on, then a single trailing
+    # backtick. The inner run (inside the first span) and the trailing lone
+    # backtick are both unmatched for each other's length, so the real
+    # depends_on must survive and be counted exactly once.
+    line = "a `` ` b``   depends_on: [x] `tail"
+    assert count_field_starts(line, "depends_on") == 1
+    assert count_field_starts(line, "role") == 0

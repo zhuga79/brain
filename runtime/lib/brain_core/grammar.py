@@ -104,19 +104,68 @@ _FIELD_START = re.compile(rf"(?:^|(?<=\s\s))({_FIELD_ALT}):")
 def _mask_inline_code(line: str) -> str:
     """Blank the bodies of Markdown inline code spans, preserving offsets.
 
-    Returns a copy with every character strictly between a pair of backticks
-    replaced by a space, so the lengths and positions of *line* are unchanged.
-    Consecutive backticks pair up greedily; an unpaired trailing backtick (odd
-    count) is treated as literal text and masks nothing. Characters outside
-    code spans are left as-is, so real field boundaries keep their offsets.
+    Returns a copy with every character strictly between a pair of backtick
+    delimiter runs replaced by a space, so the lengths and positions of *line*
+    are unchanged. A code span is opened by a run of N consecutive backticks
+    and closed by a later run of exactly N backticks; the characters between
+    them are masked. Runs of a different length, and runs with no later
+    same-length closer, are treated as literal text and mask nothing, so a
+    stray or mismatched backtick never hides a real field start. Every
+    delimiter run strictly inside a matched span is content and is consumed
+    with its span, so it can never pair with a later run outside. Characters
+    outside code spans are left as-is, so real field boundaries keep their
+    offsets.
     """
     out = list(line)
-    ticks = [i for i, ch in enumerate(line) if ch == "`"]
-    for k in range(0, len(ticks) - 1, 2):
-        for i in range(ticks[k] + 1, ticks[k + 1]):
+    runs = _backtick_runs(line)
+    consumed: set[int] = set()
+    for idx, (start, length) in enumerate(runs):
+        if idx in consumed:
+            continue
+        closer = _next_closer(runs, idx, consumed)
+        if closer is None:
+            continue
+        cstart, _ = runs[closer]
+        for i in range(start + length, cstart):
             if out[i] != "\n":
                 out[i] = " "
+        for k in range(idx, closer + 1):
+            consumed.add(k)
     return "".join(out)
+
+
+def _backtick_runs(line: str) -> list[tuple[int, int]]:
+    """Contiguous runs of backticks in *line* as ``(start, length)`` pairs."""
+    runs: list[tuple[int, int]] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        runs.append((i, j - i))
+        i = j
+    return runs
+
+
+def _next_closer(
+    runs: list[tuple[int, int]], opener: int, consumed: set[int]
+) -> int | None:
+    """Index of the next later run with the same length as ``runs[opener]``.
+
+    Returns None when no same-length closer follows, so an unmatched opener is
+    left literal.
+    """
+    _, length = runs[opener]
+    for j in range(opener + 1, len(runs)):
+        if j in consumed:
+            continue
+        if runs[j][1] == length:
+            return j
+    return None
 
 
 def _field_starts(line: str) -> list[tuple[int, int, str]]:
