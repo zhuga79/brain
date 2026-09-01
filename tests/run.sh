@@ -20,6 +20,10 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 CASES_DIR="$SCRIPT_DIR/cases"
 
+# Second line of defence for hook isolation: drop every GIT_* by prefix.
+# A named denylist leaks new git variables into nested git-using cases.
+. "$SCRIPT_DIR/lib/drop-git-env.sh"
+
 PATTERN="${1:-}"
 TOTAL_START=$(date +%s%N)
 PASSED=0
