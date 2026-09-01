@@ -5,6 +5,12 @@ set -e
 source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
 mkdir -p "$LOCKS"
 
+_LIBPATH="$(dirname "${BASH_SOURCE[0]}")/../lib"
+_py() {
+  PYTHONPATH="${_LIBPATH}:${HOME}/.local/lib/brain:${HOME}/.local/share/brain/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -m "$@"
+}
+
 cmd="${1:-}"; shift || true
 id=""; agent=""
 # Keep in sync with brain_core.taskfile.LOCK_TTL_DEFAULT (1h: typical agent work ~40 min).
@@ -38,6 +44,16 @@ case "$cmd" in
   acquire)
     [ -z "$id" ] && { echo "task id required"; exit 2; }
     [ -z "$agent" ] && { echo "--as <agent-id> required"; exit 2; }
+    # Synced `[~]` with another node's id is a remote lock: `.locks/` is local
+    # and would otherwise let us mkdir over work that is still fresh elsewhere.
+    json_flag=()
+    $json_out && json_flag=(--json)
+    remote_rc=0
+    remote_out="$(_py brain_federation.remote_lock check --active "$A" --task "$id" "${json_flag[@]}")" || remote_rc=$?
+    if [ "$remote_rc" -ne 0 ]; then
+      [ -n "$remote_out" ] && echo "$remote_out"
+      exit 1
+    fi
     dir="$LOCKS/$id"
     if mkdir "$dir" 2>/dev/null; then
       printf "%s|%s|%s\n" "$agent" "$(now_epoch)" "$ttl" > "$dir/owner"

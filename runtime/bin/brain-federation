@@ -35,10 +35,10 @@ def cmd_support(args: argparse.Namespace) -> int:
         "brain-federation support [--json]",
         "brain-federation preflight [--repo <path>] [--brain <path>] [--json]",
         "brain-federation tasks-check --active <path> [--done <path>] [--json]",
-        "brain-federation plan --repo <path> [--brain <path>] [--json] [--out <plan.json>]",
-        "brain-federation import-tasks --plan <plan.json> --as <agent-id> [--yes] [--json]",
+        "brain-federation plan --repo <path> [--brain <path>] [--json] [--out <plan.json>] [--review-downgrade]",
+        "brain-federation import-tasks --plan <plan.json> --as <agent-id> [--yes] [--json] [--review-downgrade]",
         "brain-federation write-wiki-proposals --plan <plan.json> --as <agent-id> [--yes] [--json]",
-        "brain-federation sync [--repo <path>] [--json]",
+        "brain-federation sync [--repo <path>] [--brain <path>] [--json]",
         "brain-federation merge-tasks --base <path> --local <path> --remote <path> [--out <path>]",
     ]
     data["read_only"] = True
@@ -103,6 +103,11 @@ def main() -> int:
     plan.add_argument("--brain", default=None, help="Brain path (default: $BRAIN_PATH or ~/brain)")
     plan.add_argument("--json", action="store_true")
     plan.add_argument("--out", default="", help="Write plan JSON to this exact file")
+    plan.add_argument(
+        "--review-downgrade",
+        action="store_true",
+        help="Import remote [~] tasks as open after explicit review; default is a block finding",
+    )
     plan.set_defaults(func=cmd_plan)
 
     import_tasks = sub.add_parser("import-tasks", help="Import open tasks from a federation plan")
@@ -112,6 +117,11 @@ def main() -> int:
     import_tasks.add_argument("--allow-stale", action="store_true", help="Override stale source fingerprints")
     import_tasks.add_argument("--allow-drift", action="store_true", help="Override repo-side drift fingerprints")
     import_tasks.add_argument("--json", action="store_true")
+    import_tasks.add_argument(
+        "--review-downgrade",
+        action="store_true",
+        help="Downgrade remote [~] skipped tasks to open after explicit review",
+    )
     import_tasks.set_defaults(func=cmd_import_tasks)
 
     wiki_proposals = sub.add_parser("write-wiki-proposals", help="Write proposal artifacts for planned wiki changes")
@@ -132,6 +142,7 @@ def main() -> int:
 
     sync = sub.add_parser("sync", help="Pull (rebase) and push the federation repository")
     sync.add_argument("--repo", default=None, help="Repository path (default: current directory)")
+    sync.add_argument("--brain", default=None, help="Brain path (default: repo path — vault root)")
     sync.add_argument("--json", action="store_true")
     sync.set_defaults(func=cmd_sync)
 

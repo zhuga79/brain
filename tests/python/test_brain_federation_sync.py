@@ -1,10 +1,18 @@
-import os
 import json
-import pytest
-from pathlib import Path
+import subprocess
 from unittest.mock import MagicMock, patch
 
-from brain_federation.sync import cmd_merge_tasks, cmd_sync
+import pytest
+
+from brain_federation.sync import cmd_merge_tasks, cmd_sync, log_sync
+from brain_federation import core as federation_core
+
+
+@pytest.fixture(autouse=True)
+def _isolate_node_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BRAIN_NODE_ID", raising=False)
+    monkeypatch.delenv("BRAIN_NODE_ID_FROM_GIT", raising=False)
+    federation_core._git_email_cache.clear()
 
 class DummyArgs:
     def __init__(self, **kwargs):
@@ -85,7 +93,8 @@ def test_cmd_sync_not_repo(mock_is_git):
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
 @patch("brain_federation.sync.git_push")
-def test_cmd_sync_success(mock_push, mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_success(mock_log, mock_push, mock_pull, mock_is_git, tmp_path):
     mock_is_git.return_value = True
     
     mock_pull_res = MagicMock()
@@ -96,12 +105,14 @@ def test_cmd_sync_success(mock_push, mock_pull, mock_is_git):
     mock_push_res.returncode = 0
     mock_push.return_value = mock_push_res
     
-    args = DummyArgs(repo=".", json=True)
+    args = DummyArgs(repo=str(tmp_path), json=True)
     assert cmd_sync(args) == 0
+    mock_log.assert_called_once()
 
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
-def test_cmd_sync_pull_fail(mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_pull_fail(mock_log, mock_pull, mock_is_git, tmp_path):
     mock_is_git.return_value = True
     
     mock_pull_res = MagicMock()
@@ -109,23 +120,147 @@ def test_cmd_sync_pull_fail(mock_pull, mock_is_git):
     mock_pull_res.stderr = "Conflict"
     mock_pull.return_value = mock_pull_res
     
-    args = DummyArgs(repo=".", json=True)
+    args = DummyArgs(repo=str(tmp_path), json=True)
     assert cmd_sync(args) == 1
+    assert mock_log.call_args[0][2] == "pull-failed"
+
 
 @patch("brain_federation.sync.is_git_repo")
 @patch("brain_federation.sync.git_pull_rebase")
 @patch("brain_federation.sync.git_push")
-def test_cmd_sync_push_fail(mock_push, mock_pull, mock_is_git):
+@patch("brain_federation.sync.log_sync")
+def test_cmd_sync_push_fail(mock_log, mock_push, mock_pull, mock_is_git, tmp_path):
     mock_is_git.return_value = True
-    
+
     mock_pull_res = MagicMock()
     mock_pull_res.returncode = 0
     mock_pull.return_value = mock_pull_res
-    
+
     mock_push_res = MagicMock()
     mock_push_res.returncode = 1
     mock_push_res.stderr = "Rejected"
     mock_push.return_value = mock_push_res
-    
-    args = DummyArgs(repo=".", json=True)
+
+    args = DummyArgs(repo=str(tmp_path), json=True)
     assert cmd_sync(args) == 1
+    assert mock_log.call_args[0][2] == "push-failed"
+
+
+def test_cmd_sync_logs_node_audit_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID_FROM_GIT", "1")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "carol@example.org"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Carol"], check=True)
+
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        mock_pull.return_value = MagicMock(returncode=0)
+        mock_push.return_value = MagicMock(returncode=0)
+        assert cmd_sync(args) == 0
+
+    log = tmp_path / "wiki" / "log.md"
+    assert log.exists()
+    content = log.read_text()
+    assert "federation-sync |" in content
+    assert "node=carol@example.org" in content
+    assert "status=ok" in content
+
+
+def test_cmd_sync_logs_node_audit_row_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID", "sync-env-node")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "carol@example.org"], check=True)
+
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        mock_pull.return_value = MagicMock(returncode=0)
+        mock_push.return_value = MagicMock(returncode=0)
+        assert cmd_sync(args) == 0
+
+    log = tmp_path / "wiki" / "log.md"
+    assert "node=sync-env-node" in log.read_text()
+
+
+def test_cmd_sync_logs_anonymous_by_default(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "carol@example.org"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Carol"], check=True)
+
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        mock_pull.return_value = MagicMock(returncode=0)
+        mock_push.return_value = MagicMock(returncode=0)
+        assert cmd_sync(args) == 0
+
+    content = (tmp_path / "wiki" / "log.md").read_text()
+    assert "node=anonymous" in content
+    assert "carol@example.org" not in content
+
+
+def test_cmd_sync_invalid_node_blocks_without_writing_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID", "bad|pipe\n## [ts] task-done | t-fake | attacker")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    with patch("brain_federation.sync.git_pull_rebase") as mock_pull, \
+         patch("brain_federation.sync.git_push") as mock_push:
+        assert cmd_sync(args) == 1
+        mock_pull.assert_not_called()
+        mock_push.assert_not_called()
+    log = tmp_path / "wiki" / "log.md"
+    assert not log.exists() or "federation-sync" not in log.read_text()
+    assert not log.exists() or "t-fake" not in log.read_text()
+
+
+def test_cmd_sync_invalid_config_node_emits_finding(tmp_path, capsys):
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "federation.json").write_text(json.dumps({"node_id": "bad|node"}), encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = DummyArgs(repo=str(tmp_path), brain=str(tmp_path), json=True)
+    assert cmd_sync(args) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert any(item["code"] == "federation-node-invalid" for item in data["findings"])
+    log = tmp_path / "wiki" / "log.md"
+    assert not log.exists() or "federation-sync" not in log.read_text()
+
+
+def test_log_sync_uses_shared_journal_append_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID", "n1")
+    with patch("brain_federation.sync.journal.append_line") as mock_append:
+        log_sync(tmp_path, tmp_path, "ok")
+    mock_append.assert_called_once()
+    row, brain = mock_append.call_args.args
+    assert brain == tmp_path
+    assert "node=n1" in row
+    assert "status=ok" in row
+    assert row.endswith("\n")
+
+
+def test_log_sync_places_node_in_extra_slot(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_NODE_ID", "slot-node")
+    log_sync(tmp_path, tmp_path, "ok")
+    line = (tmp_path / "wiki" / "log.md").read_text().strip().splitlines()[-1]
+    parts = line.split(" | ")
+    assert parts[0].endswith("federation-sync")
+    assert parts[2] == ""
+    assert parts[3] == "node=slot-node"
+    assert parts[4] == "status=ok"
+
+
+def test_log_sync_rejects_injected_node(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "BRAIN_NODE_ID",
+        "x\n## [2026-08-30T00:00:00Z] task-done | t-fake | attacker | model=x",
+    )
+    with pytest.raises(ValueError):
+        log_sync(tmp_path, tmp_path, "ok")
+    log = tmp_path / "wiki" / "log.md"
+    if log.exists():
+        text = log.read_text()
+        assert "t-fake" not in text
+        assert "attacker" not in text
+        assert "task-done" not in text

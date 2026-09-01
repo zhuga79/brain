@@ -12,17 +12,20 @@ import time
 from pathlib import Path
 from typing import Any
 
-from brain_core import taskfile
+from brain_core import journal, taskfile
 
 from .core import (
     AGENT_ID_RE,
     SCHEMA_VERSION,
     TASK_ID_RE,
+    FEDERATION_CONFIG_FILE,
     Finding,
     brain_path,
     emit,
     exit_code,
     has_block,
+    node_id,
+    node_audit_extra,
     result,
 )
 from .checks import (
@@ -81,10 +84,26 @@ def task_refs(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return refs
 
 
+def _in_progress_finding(task: dict[str, Any], severity: str, hint: str) -> Finding:
+    node = str(task.get("node") or "").strip()
+    node_bit = f" on node {node}" if node else ""
+    return Finding(
+        "task-imported-in-progress",
+        severity,
+        f"{task.get('path', '')}:{task.get('line', 0)}",
+        f"task {task['id']} is imported as in-progress{node_bit}",
+        hint,
+    )
+
+
 def plan_task_imports(
-    repo: Path, brain: Path
+    repo: Path, brain: Path, *, review_downgrade: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[Finding]]:
-    repo_active, findings = parse_task_file_optional(repo / "tasks" / "active.md", "repo-active")
+    repo_active, findings = parse_task_file_optional(
+        repo / "tasks" / "active.md",
+        "repo-active",
+        flag_in_progress=not review_downgrade,
+    )
     repo_done, repo_done_findings = parse_task_file_optional(repo / "tasks" / "done.md", "repo-done")
     brain_active, brain_active_findings = parse_task_file_optional(
         brain / "tasks" / "active.md",
@@ -130,6 +149,16 @@ def plan_task_imports(
             continue
         seen_remote.add(task_id)
         if task["state"] != " ":
+            if review_downgrade and task["state"] == "~":
+                findings.append(
+                    _in_progress_finding(
+                        task,
+                        "review",
+                        "downgraded to open because --review-downgrade",
+                    )
+                )
+                imports.append({**item, "state": "open"})
+                continue
             skipped.append({**item, "reason": f"state-{task['state'].strip() or 'open'}"})
             continue
         if task_id in local_active:
@@ -210,9 +239,13 @@ def required_confirmations(findings: list[Finding]) -> list[str]:
     return sorted({finding.code for finding in findings if finding.severity == "review"})
 
 
-def build_plan(repo: Path, brain: Path) -> tuple[dict[str, Any], list[Finding]]:
+def build_plan(
+    repo: Path, brain: Path, *, review_downgrade: bool = False
+) -> tuple[dict[str, Any], list[Finding]]:
     preflight_data, preflight_findings, changed_paths = collect_preflight(repo, brain)
-    task_imports, skipped_tasks, task_findings = plan_task_imports(repo, brain)
+    task_imports, skipped_tasks, task_findings = plan_task_imports(
+        repo, brain, review_downgrade=review_downgrade
+    )
     findings = preflight_findings + task_findings
     wiki_proposals, skipped_wiki = plan_wiki_changes(repo, brain, changed_paths, findings)
     data = result("plan", repo, brain, findings)
@@ -466,17 +499,27 @@ def log_imports(
     plan: dict[str, Any],
     imports: list[dict[str, Any]],
 ) -> None:
-    log_path = brain / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     plan_ref = plan.get("plan_id", str(plan_path))
-    with log_path.open("a", encoding="utf-8") as handle:
-        for task in imports:
-            handle.write(
-                f"## [{utc_now()}] federation-import-task | {task['id']} | {agent} | plan={plan_ref}\n"
-            )
-        handle.write(
-            f"## [{utc_now()}] federation-import-summary | import-tasks | {agent} | count={len(imports)} plan={plan_ref}\n"
+    node = node_id(brain)
+    for task in imports:
+        journal.append_line(
+            journal.format_entry(
+                "federation-import-task",
+                task["id"],
+                agent,
+                node_audit_extra(node, f"plan={plan_ref}"),
+            ),
+            brain,
         )
+    journal.append_line(
+        journal.format_entry(
+            "federation-import-summary",
+            "import-tasks",
+            agent,
+            node_audit_extra(node, f"count={len(imports)} plan={plan_ref}"),
+        ),
+        brain,
+    )
 
 
 def import_result(
@@ -682,13 +725,18 @@ def write_proposal_artifacts(
     (proposal_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    log_path = brain / "wiki" / "log.md"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"## [{utc_now()}] federation-proposal-batch | write-wiki-proposals | {agent}"
-            f" | count={len(written)} plan={plan.get('plan_id', str(plan_path))}\n"
-        )
+    journal.append_line(
+        journal.format_entry(
+            "federation-proposal-batch",
+            "write-wiki-proposals",
+            agent,
+            node_audit_extra(
+                node_id(brain),
+                f"count={len(written)} plan={plan.get('plan_id', str(plan_path))}",
+            ),
+        ),
+        brain,
+    )
     return proposal_dir, written, findings
 
 
@@ -701,7 +749,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     repo = Path(args.repo or os.getcwd()).expanduser()
     brain = brain_path(args.brain)
     try:
-        data, findings = build_plan(repo, brain)
+        data, findings = build_plan(
+            repo, brain, review_downgrade=bool(getattr(args, "review_downgrade", False))
+        )
     except FileNotFoundError as exc:
         print(f"brain-federation plan: unreadable repo path: {exc}", file=sys.stderr)
         return 2
@@ -736,12 +786,38 @@ def cmd_import_tasks(args: argparse.Namespace) -> int:
     if plan is None:
         emit(import_result(None, plan_path, args.agent, dry_run, findings), args.json)
         return rc
-    imports = plan.get("task_imports", [])
+    review_downgrade = bool(getattr(args, "review_downgrade", False))
+    imports = list(plan.get("task_imports") or [])
+    if review_downgrade:
+        for item in plan.get("skipped_tasks") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("reason", "")).startswith("state-~"):
+                promoted = dict(item)
+                promoted["state"] = "open"
+                promoted.pop("reason", None)
+                imports.append(promoted)
+        plan["task_imports"] = imports
     findings.extend(task_import_validation(imports))
     if plan.get("summary", {}).get("block", 0):
-        findings.append(
-            Finding("plan-block-findings", "block", str(plan_path), "plan contains blocking findings")
-        )
+        leftover_blocks = [
+            finding
+            for finding in plan.get("findings") or []
+            if isinstance(finding, dict)
+            and str(finding.get("severity", "")) == "block"
+            and str(finding.get("code", "")) != "task-imported-in-progress"
+        ]
+        # `--review-downgrade` lets a reviewer import remote `[~]` as open.
+        # Any other plan block still refuses the write.
+        if leftover_blocks or not review_downgrade:
+            findings.append(
+                Finding(
+                    "plan-block-findings",
+                    "block",
+                    str(plan_path),
+                    "plan contains blocking findings",
+                )
+            )
     if os.environ.get("BRAIN_FEDERATION_IMPORT_DISABLED") == "1":
         findings.append(
             Finding("task-import-disabled", "block", str(plan_path), "task import is disabled by environment")
@@ -753,6 +829,18 @@ def cmd_import_tasks(args: argparse.Namespace) -> int:
         if not has_block(findings):
             findings.extend(live_task_conflicts(brain, imports))
         data = import_result(plan, plan_path, args.agent, True, findings)
+        emit(data, args.json)
+        return exit_code(findings)
+
+    try:
+        node_id(brain)
+    except ValueError as exc:
+        findings.append(Finding(
+            "federation-node-invalid", "block", FEDERATION_CONFIG_FILE,
+            str(exc),
+            "fix the node identity (or $BRAIN_NODE_ID) to a charset-safe value",
+        ))
+        data = import_result(plan, plan_path, args.agent, False, findings, [])
         emit(data, args.json)
         return exit_code(findings)
 
@@ -803,6 +891,18 @@ def cmd_write_wiki_proposals(args: argparse.Namespace) -> int:
 
     if dry_run:
         data = proposal_result(plan, plan_path, args.agent, True, findings)
+        emit(data, args.json)
+        return exit_code(findings)
+
+    try:
+        node_id(brain)
+    except ValueError as exc:
+        findings.append(Finding(
+            "federation-node-invalid", "block", FEDERATION_CONFIG_FILE,
+            str(exc),
+            "fix the node identity (or $BRAIN_NODE_ID) to a charset-safe value",
+        ))
+        data = proposal_result(plan, plan_path, args.agent, False, findings, None, [])
         emit(data, args.json)
         return exit_code(findings)
 

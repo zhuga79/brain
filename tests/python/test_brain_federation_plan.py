@@ -545,10 +545,23 @@ def test_log_imports(tmp_path):
     brain = tmp_path
     (brain / "wiki").mkdir()
     log = brain / "wiki" / "log.md"
-    
+
+    with patch("brain_federation.plan.node_id", return_value="node-alpha"):
+        log_imports(brain, "agent", Path("plan.json"), {"plan_id": "p1"}, [{"id": "t1"}])
+    content = log.read_text()
+    assert "federation-import-task | t1 | agent | node=node-alpha | plan=p1" in content
+    assert "federation-import-summary | import-tasks | agent | node=node-alpha | count=1 plan=p1" in content
+
+
+def test_log_imports_writes_resolved_node(tmp_path, monkeypatch):
+    brain = tmp_path
+    (brain / "wiki").mkdir()
+    log = brain / "wiki" / "log.md"
+    monkeypatch.setenv("BRAIN_NODE_ID", "env-node")
+
     log_imports(brain, "agent", Path("plan.json"), {"plan_id": "p1"}, [{"id": "t1"}])
     content = log.read_text()
-    assert "federation-import-task | t1 | agent | plan=p1" in content
+    assert "node=env-node | plan=p1" in content
 
 def test_write_proposal_artifacts(tmp_path):
     brain = tmp_path

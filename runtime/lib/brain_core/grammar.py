@@ -72,7 +72,7 @@ def head_re_for(task_id: str, state: str = _STATE) -> re.Pattern:
 FIELDS = (
     "role", "mode", "surface", "gate", "council", "depends_on", "deps",
     "parent", "client", "project", "acceptance", "by", "started", "due",
-    "model", "ref", "tags",
+    "model", "ref", "tags", "node", "ttl",
 )
 """Имена полей строк продолжения. Нужны, чтобы отличить следующее поле от текста."""
 
