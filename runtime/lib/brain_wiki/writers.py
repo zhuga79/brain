@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from pathlib import Path
 from typing import Any
 
+from brain_core import clock
 from brain_core.paths import system_asset_rel
 
 from .frontmatter import format_frontmatter, parse_frontmatter, validate_date
@@ -178,6 +180,34 @@ def render_index(brain_value: "str | Path") -> Path:
     return path
 
 
+def model_fleet_issues(brain: Path) -> list[Issue]:
+    """Реестр живых моделей обязан существовать и быть свежим.
+
+    t-2026-08-30-cyclical-model-list-actualizat: агент, предлагающий модель,
+    должен опираться на канонический список, а не на свою память. Протухший
+    или отсутствующий реестр — сигнал, что имя модели может быть устаревшим:
+    восстановить его — `brain-model-fleet --apply`.
+    """
+    path = brain / "config" / "model-fleet.json"
+    rel = str(path.relative_to(brain))
+    if not path.exists():
+        return [Issue("WARN", rel, "model fleet registry missing — run brain-model-fleet --apply")]
+    try:
+        registry = json.loads(read_text(path))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [Issue("ERROR", rel, f"model fleet registry unreadable: {exc}")]
+    updated = registry.get("updated_utc") or ""
+    stale_after = float(registry.get("stale_after_hours") or 24)
+    try:
+        ts = clock.parse(updated)
+        age_hours = (clock.now() - ts).total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return [Issue("ERROR", rel, f"model fleet registry has invalid updated_utc: {updated!r}")]
+    if age_hours > stale_after:
+        return [Issue("WARN", rel, f"model fleet registry is stale ({age_hours:.1f}h > {stale_after:g}h) — run brain-model-fleet --apply")]
+    return []
+
+
 def lock_issues(brain: Path) -> list[Issue]:
     locks = brain / ".locks"
     if not locks.exists():
@@ -251,6 +281,7 @@ def lint_wiki(brain_value: "str | Path | None" = None) -> list[Issue]:
     issues.extend(validate_task_refs(brain, brain / "tasks" / "done.md", slugs))
     issues.extend(validate_uiux_stale_references(brain))
     issues.extend(lock_issues(brain))
+    issues.extend(model_fleet_issues(brain))
     return issues
 
 
