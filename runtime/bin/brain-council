@@ -87,6 +87,7 @@ TEMPLATE
       fi
     done
     log_op "council-start" "$id" "roles=$roles"
+    git_commit "council-start: $id" "council/$id" "wiki/log.md"
     echo "council started for $id"
     echo "roles: $roles"
     echo "directory: $COUNCIL/$id"
@@ -215,6 +216,7 @@ inputs: [$(ls "$d"/*.md | grep -v synthesis | xargs -n1 basename | tr '\n' ',' |
 ## Follow-up tasks
 TEMPLATE
     log_op "council-synth" "$id" "skeleton-created"
+    git_commit "council-synth: $id" "council/$id" "wiki/log.md"
     echo "skeleton: $d/synthesis.md"
     echo "Запусти arbiter:"
     echo "  brain-run --role arbiter --task $id --council  | <CLI>"

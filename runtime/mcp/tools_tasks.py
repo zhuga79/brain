@@ -60,7 +60,7 @@ def add_task(text: str, role: str = "developer", mode: str = "solo",
         council=council, depends_on=depends_on, acceptance=acceptance,
     )
     append_log("task-add", task_id, "", f"role={role} mode={mode} prio={priority}")
-    git_commit(f"task-add: {task_id}")
+    git_commit(f"task-add: {task_id}", "tasks/active.md", "wiki/log.md")
     return {"id": task_id, "status": "added"}
 
 
@@ -75,7 +75,7 @@ def block_task(task_id: str, reason: str, agent_id: str = "") -> dict:
     except Exception as exc:
         return error(str(exc) or "task not found")
     append_log("task-block", task_id, agent, reason)
-    git_commit(f"task-block: {task_id} ({reason})")
+    git_commit(f"task-block: {task_id} ({reason})", "tasks/active.md", "wiki/log.md")
     return ok()
 
 

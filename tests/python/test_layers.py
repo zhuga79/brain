@@ -69,15 +69,18 @@ def test_autocommit_stages_only_data_layer():
 
 
 def test_mcp_git_commit_stages_only_data_layer():
-    """MCP-копия git_commit() — тот же контракт, что и у shell-хелпера."""
+    """MCP-копия git_commit() — тот же контракт, что и у shell-хелпера:
+    коммит скоупится названными файлами (по умолчанию — очередь), системный
+    слой не трогается, а лишние данные операция не заметает."""
     text = (REPO / "runtime" / "mcp" / "common.py").read_text(encoding="utf-8")
     body = text.split("def git_commit", 1)[1].split("\ndef ", 1)[0]
-    for system in ('"roles/"', '"doctrine/"', '"teams/"', '"MEMORY.md"'):
+    default = text.split("_DEFAULT_COMMIT_PATHS", 1)[1].split("\n", 1)[0]
+    for system in ("roles/", "doctrine/", "teams/", "MEMORY.md", "runtime/", "config/"):
         assert system not in body, f"MCP git_commit still stages {system}"
-    for data in ('"tasks/"', '"wiki/"', '"council/"', '"raw/"', '"prd/"'):
-        assert data in body or "DATA_PATHS" in body, (
-            f"MCP git_commit dropped data path {data}"
-        )
+        assert system not in default, f"default commit paths include system path {system}"
+    # scoped partial commit: git commit -- <pathspec>, not a bare data-tree add
+    assert '"--"' in body and "--cached" in body
+    assert "tasks/active.md" in default and "wiki/log.md" in default
 
 
 def test_guard_hook_exists_and_is_wired():

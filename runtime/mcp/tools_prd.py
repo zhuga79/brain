@@ -31,7 +31,7 @@ def init_prd(task_id: str) -> dict:
     
     f.write_text(content)
     append_log("prd-init", task_id)
-    git_commit(f"prd-init: {task_id}")
+    git_commit(f"prd-init: {task_id}", f"prd/{task_id}.md", "wiki/log.md")
     return ok(path=str(f.relative_to(BRAIN)))
 
 @mcp.tool()
@@ -50,7 +50,10 @@ def commit_prd(task_id: str) -> dict:
     except prdfile.PRDError as exc:
         return error(str(exc))
 
-    git_commit(f"prd-commit: {task_id}")
+    git_commit(
+        f"prd-commit: {task_id}",
+        f"prd/{task_id}.md", "tasks/active.md", "tasks/done.md", "wiki/log.md",
+    )
 
     return ok(
         parent_id=task_id,

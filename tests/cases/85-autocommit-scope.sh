@@ -42,6 +42,20 @@ if [ -n "$(git status --porcelain tasks/active.md)" ]; then
 fi
 echo "OK: tasks/ закоммичены"
 
+# ── 1b. Автокоммит операции не заметает несвязанную правку данных ──
+# Коммит eddb2dc унёс в тему «task-add: …» 69 чужих строк active.md.
+printf '\n<!-- ручная незакоммиченная правка -->\n' >> "$BRAIN_PATH/tasks/done.md"
+brain-task add "Ещё одна задача" --role developer >/dev/null 2>&1
+subject_files="$(git show --name-only --format= HEAD)"
+grep -q 'tasks/done.md' <<< "$subject_files" \
+  && { echo "FAILED: автокоммит task-add унёс чужую правку done.md"; git show --stat HEAD; exit 1; }
+grep -q 'tasks/active.md' <<< "$subject_files" \
+  || { echo "FAILED: автокоммит task-add не зафиксировал active.md"; exit 1; }
+[ -n "$(git status --porcelain tasks/done.md)" ] \
+  || { echo "FAILED: чужая правка done.md исчезла — её всё-таки закоммитили"; exit 1; }
+git checkout -- tasks/done.md
+echo "OK: автокоммит держится файлов операции"
+
 # ── 2. Список стажируемых путей — из brain_core.layers ──
 paths="$(python3 -c 'from brain_core.layers import DATA_PATHS; print(" ".join(DATA_PATHS))')"
 for p in roles/ doctrine/ teams/ MEMORY.md runtime/ config/; do

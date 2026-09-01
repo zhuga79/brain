@@ -244,7 +244,7 @@ def take_task(task_id: str, agent_id: str, ttl: int = LOCK_TTL_DEFAULT) -> dict:
         release_lock(task_id, agent)
         return error(str(exc) or f"task {task_id} not found in active.md")
     append_log("task-start", task_id, agent_id)
-    git_commit(f"task-start: {task_id} by {agent_id}")
+    git_commit(f"task-start: {task_id} by {agent_id}", "tasks/active.md", "wiki/log.md")
     return ok(id=task_id, owner=agent_id)
 
 @mcp.tool()
@@ -261,7 +261,7 @@ def release_task(task_id: str, agent_id: str = "") -> dict:
     if lock_result.get("status") == "error":
         return lock_result
     append_log("task-release", task_id, agent_id)
-    git_commit(f"task-release: {task_id}")
+    git_commit(f"task-release: {task_id}", "tasks/active.md", "wiki/log.md")
     return ok()
 
 @mcp.tool()
@@ -302,7 +302,7 @@ def complete_task(
     except Exception as _e:
         import sys as _sys
         _sys.stderr.write(f"warning: webhook failed: {_e}\n")
-    git_commit(f"task-done: {task_id} by {agent_id or 'unknown'}")
+    git_commit(f"task-done: {task_id} by {agent_id or 'unknown'}", "tasks/active.md", "tasks/done.md", "wiki/log.md")
     return ok(id=task_id)
 
 @mcp.tool()
