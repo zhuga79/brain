@@ -52,8 +52,8 @@ brain-status  # должно показать stale count = 0
 
 **Предотвращение:**
 - Всегда вызывать `brain-task complete` или `brain-lock release` при завершении
-- Использовать `--ttl 600` (default) — локи автоочищаются через 10 минут
-- Для длинных задач: `brain-lock refresh <id> --as <agent>` каждые 5 минут
+- Использовать `--ttl 3600` (default, 1 ч) — локи автоочищаются после часа без refresh
+- Для многочасовых задач: `brain-lock refresh <id> --as <agent>` до истечения TTL
 
 ---
 

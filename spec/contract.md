@@ -280,14 +280,15 @@ t-YYYY-MM-DD-<slug>                   # обычная задача
 ### Операции
 
 ```bash
-brain-lock acquire <id> --as <agent> [--ttl 600]
+brain-lock acquire <id> --as <agent> [--ttl 3600]
 # → "ok" | "locked by: <agent> (age Xs, ttl Yms)"
 # Если TTL истёк → автоматически перехватывает stale lock.
+# Владелец может complete/release после expiry, пока лок ещё его.
 
 brain-lock release <id> [--as <agent>]
 # Если --as передан, проверяется владение.
 
-brain-lock refresh <id> --as <agent> [--ttl 600]
+brain-lock refresh <id> --as <agent> [--ttl 3600]
 # Только владелец может продлить.
 
 brain-lock status [<id>]

@@ -61,6 +61,15 @@ def temp_locks(tmp_path, monkeypatch):
 
 
 class TestAcquireLock:
+    def test_default_ttl_covers_typical_agent_task(self, temp_locks):
+        from brain_core.taskfile import LOCK_TTL_DEFAULT
+
+        res = temp_locks.acquire_lock("t-default-ttl", "agent-1")
+        assert res["status"] == "ok"
+        raw = (temp_locks.LOCKS / "t-default-ttl" / "owner").read_text()
+        assert int(raw.strip().split("|")[2]) == LOCK_TTL_DEFAULT
+        assert LOCK_TTL_DEFAULT >= 3600
+
     def test_acquire_fresh(self, temp_locks):
         res = temp_locks.acquire_lock("t-test", "agent-1", ttl=60)
         assert res["status"] == "ok"

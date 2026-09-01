@@ -6,7 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/brain-common"
 mkdir -p "$LOCKS"
 
 cmd="${1:-}"; shift || true
-id=""; agent=""; ttl=600; json_out=false; force=false
+id=""; agent=""
+# Keep in sync with brain_core.taskfile.LOCK_TTL_DEFAULT (1h: typical agent work ~40 min).
+ttl=3600; json_out=false; force=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --as)   agent="$2"; shift 2;;
@@ -261,9 +263,9 @@ case "$cmd" in
     cat <<USAGE
 brain-lock — атомарные блокировки задач
 
-  brain-lock acquire <id> --as <agent-id> [--ttl 600] [--json]
+  brain-lock acquire <id> --as <agent-id> [--ttl 3600] [--json]
   brain-lock release <id> [--as <agent-id>] [--json]
-  brain-lock refresh <id> --as <agent-id> [--ttl 600] [--json]
+  brain-lock refresh <id> --as <agent-id> [--ttl 3600] [--json]
   brain-lock status  [<id>] [--json]
   brain-lock cleanup [--json]
 USAGE
