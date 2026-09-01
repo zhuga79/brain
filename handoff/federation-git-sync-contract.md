@@ -109,6 +109,13 @@ injection policy; federation must not increase injected context automatically.
 Append-only interleaving is acceptable. If duplicate operation lines appear,
 dedupe only when timestamp, operation, task id and agent are identical.
 
+Conflict workflow: `brain-federation merge-log` (or the git merge driver
+`brain-log`) interleaves both sides by timestamp and drops rows whose
+`(ts, operation, task-id, agent/node)` identity plus extra slot match.
+`brain-federation sync` installs the driver into `.git/info/attributes` +
+`merge.brain-log.driver` before `git pull --rebase`, and finishes a rebase
+stopped only on `wiki/log.md` without a human merge.
+
 ## Lock Ownership
 
 Locks are local runtime state. `.locks/` must never be synced. A remote agent's

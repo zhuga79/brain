@@ -47,7 +47,16 @@ from .git_ops import (
     git_name_status,
     git_show,
     git_head,
+    git_path,
     frontmatter,
+)
+from .journal_merge import (
+    GIT_DRIVER_NAME,
+    LOG_RELPATH,
+    merge_journal,
+    install_log_merge_driver,
+    resolve_log_conflict,
+    cmd_merge_log,
 )
 from .preflight import (
     parse_task_file_optional,
@@ -117,7 +126,15 @@ __all__ = [
     "git_name_status",
     "git_show",
     "git_head",
+    "git_path",
     "frontmatter",
+    # journal merge
+    "GIT_DRIVER_NAME",
+    "LOG_RELPATH",
+    "merge_journal",
+    "install_log_merge_driver",
+    "resolve_log_conflict",
+    "cmd_merge_log",
     # checks
     "comparable",
     "check_duplicates",
