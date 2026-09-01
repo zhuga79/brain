@@ -96,7 +96,7 @@ def write_wiki_page(slug: str, content: str, page_type: str = "concept",
     except (ValueError, FileNotFoundError, PermissionError) as exc:
         return error(str(exc))
     append_log("wiki-update", "", "", f"page={slug}")
-    git_commit(f"wiki: {slug}")
+    git_commit(f"wiki: {slug}", f"wiki/{slug}.md", "wiki/index.md", "wiki/log.md")
     return ok(path=str(p.relative_to(BRAIN)))
 
 @mcp.tool()
@@ -124,7 +124,7 @@ def lint_wiki(fix_index: bool = False) -> dict:
     if fix_index:
         index_path = str(brain_wiki.render_index(BRAIN).relative_to(BRAIN))
         append_log("lint", "", "", "fix-index")
-        git_commit("wiki: regenerate index")
+        git_commit("wiki: regenerate index", "wiki/index.md", "wiki/log.md")
     issues = brain_wiki.lint_wiki(BRAIN)
     return {
         "status": "error" if any(i.severity == "ERROR" for i in issues) else "ok",
@@ -139,5 +139,5 @@ def regenerate_wiki_index() -> dict:
     """Regenerate wiki/index.md from wiki page frontmatter."""
     path = brain_wiki.render_index(BRAIN)
     append_log("lint", "", "", "fix-index")
-    git_commit("wiki: regenerate index")
+    git_commit("wiki: regenerate index", "wiki/index.md", "wiki/log.md")
     return ok(path=str(path.relative_to(BRAIN)))

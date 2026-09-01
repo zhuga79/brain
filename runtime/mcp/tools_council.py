@@ -36,7 +36,7 @@ written: TODO
 """)
             created.append(r)
     append_log("council-start", task_id, "", f"roles={','.join(roles)}")
-    git_commit(f"council-start: {task_id}")
+    git_commit(f"council-start: {task_id}", f"council/{task_id}", "wiki/log.md")
     return ok(roles=roles, created=created, directory=str(cdir))
 
 @mcp.tool()
@@ -85,7 +85,7 @@ written: {ts()}
 """
     f.write_text(content)
     append_log("council-opinion", task_id, agent_id, f"role={role}")
-    git_commit(f"council-opinion: {task_id} by {role}/{agent_id}")
+    git_commit(f"council-opinion: {task_id} by {role}/{agent_id}", f"council/{task_id}", "wiki/log.md")
     return ok(file=str(f))
 
 @mcp.tool()
@@ -153,5 +153,5 @@ inputs: [{', '.join(inputs)}]
 """
     (cdir / "synthesis.md").write_text(content)
     append_log("council-synth", task_id, arbiter_agent)
-    git_commit(f"council-synth: {task_id}")
+    git_commit(f"council-synth: {task_id}", f"council/{task_id}", "wiki/log.md")
     return ok(file=str(cdir / "synthesis.md"))

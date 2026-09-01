@@ -15,7 +15,7 @@ def add_raw_source(slug: str, content: str, title: str = "",
     except (FileExistsError, ValueError) as exc:
         return error(str(exc))
     append_log("ingest", "", "", f"raw/{normalized}.md")
-    git_commit(f"raw: {normalized}")
+    git_commit(f"raw: {normalized}", f"raw/{normalized}.md", "wiki/log.md")
     return ok(path=str(p.relative_to(BRAIN)))
 
 @mcp.tool()
@@ -53,7 +53,10 @@ def ingest_source(slug: str, content: str, title: str = "",
         brain_wiki.render_index(BRAIN)
 
     append_log("ingest", "", "", f"summary=wiki/{summary_slug}.md")
-    git_commit(f"ingest: {normalized}")
+    git_commit(
+        f"ingest: {normalized}",
+        f"raw/{normalized}.md", f"wiki/{summary_slug}.md", "wiki/index.md", "wiki/log.md",
+    )
     return ok(
         raw_path=raw_result["path"],
         summary_path=str(summary_path.relative_to(BRAIN)),
@@ -67,7 +70,7 @@ def rebuild_index(with_obsidian: bool = False) -> dict:
         manifest = brain_index.rebuild_index(BRAIN, with_obsidian=with_obsidian)
         append_log("index-rebuild", "", "", f"pages={manifest.get('page_count')}")
         if with_obsidian:
-            git_commit("index: export obsidian views")
+            git_commit("index: export obsidian views", "wiki/_views")
         return ok(manifest=manifest)
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -18,6 +18,7 @@ case "$cmd" in
     sed "s/<task-id>/$id/; s/<ts>/$(ts)/; s/<Title>/$title/" \
         "$PRD_DIR/_TEMPLATE.md" > "$f"
     log_op "prd-init" "$id" ""
+    git_commit "prd-init: $id" "prd/$id.md" "wiki/log.md"
     echo "created: $f"
     echo "Заполни PRD и запусти: brain-prd commit $id"
     ;;
@@ -189,6 +190,7 @@ PY
     )
     echo "$_result"
     if [ "$_do_commit" -eq 1 ]; then
+      git_commit "prd-decompose: $id" "prd/$id.md" "tasks/active.md" "wiki/log.md"
       "$(dirname "${BASH_SOURCE[0]}")/brain-index" rebuild >/dev/null 2>&1 &
     fi
     ;;
@@ -291,6 +293,7 @@ print(
 for item in result.subtasks:
     print(f"  [{item.prio}] {item.task_id} — {item.title}")
 PY
+    git_commit "prd-commit: $id" "prd/$id.md" "tasks/active.md" "tasks/done.md" "wiki/log.md"
     "$(dirname "${BASH_SOURCE[0]}")/brain-index" rebuild >/dev/null 2>&1 &
     ;;
   status)

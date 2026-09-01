@@ -235,30 +235,31 @@ log_op() {
   printf "## [%s] %s | %s | %s | %s\n" "$(ts)" "$op" "$id" "$agent" "$extra" >> "$LOG"
 }
 
-# Границу слоёв держит brain_core.layers. Значение по умолчанию продублировано
-# здесь на случай, если библиотека недоступна: автокоммит не должен падать.
-BRAIN_DATA_PATHS="${BRAIN_DATA_PATHS:-$(python3 -c 'from brain_core.layers import DATA_PATHS; print(" ".join(DATA_PATHS))' 2>/dev/null || echo "tasks/ wiki/ council/ raw/ prd/")}"
-
 git_commit() {
-  local msg="$1"
+  local msg="$1"; shift
+  # Остальные аргументы — конкретные файлы, затронутые операцией. Без них
+  # берётся канонический набор очереди. Автокоммит операции фиксирует ТОЛЬКО
+  # её файлы: несвязанные незакоммиченные правки в tasks/ или wiki/ не должны
+  # уезжать в коммит с темой «task-add: …» (коммит eddb2dc унёс 69 чужих строк).
+  local targets=("$@")
+  [ ${#targets[@]} -gt 0 ] || targets=(tasks/active.md tasks/done.md wiki/log.md)
   if [ -d "$BRAIN/.git" ]; then
     (
       cd "$BRAIN"
-      # roles/, doctrine/, teams/ и MEMORY.md сюда больше не попадают: правка
-      # системы тонула в коммите «автозаписи журнала», а после раздела
-      # репозиториев уезжала бы в публичный репозиторий без ревью.
-      # Добавляем только существующие пути: git add прерывается целиком на
-      # первом отсутствующем спецификаторе, и один пустой каталог (например,
-      # prd/ на свежей установке) отменял автокоммит вместе с очередью.
+      # roles/, doctrine/, teams/ и MEMORY.md сюда не попадают — границу слоёв
+      # держит brain_core.layers.DATA_PATHS. Добавляем только существующие
+      # пути: git add прерывается целиком на первом отсутствующем спецификаторе.
       local existing=()
       local p
-      for p in $BRAIN_DATA_PATHS; do
+      for p in "${targets[@]}"; do
         [ -e "$p" ] && existing+=("$p")
       done
       [ ${#existing[@]} -gt 0 ] || exit 0
-      git add "${existing[@]}" 2>/dev/null || true
-      git diff --cached --quiet 2>/dev/null && exit 0
-      git commit -m "$msg" --quiet 2>/dev/null || true
+      git add -- "${existing[@]}" 2>/dev/null || true
+      git diff --cached --quiet -- "${existing[@]}" 2>/dev/null && exit 0
+      # -- <pathspec>: частичный коммит поверх любого другого staged-состояния,
+      # чужие изменения остаются в индексе нетронутыми.
+      git commit -m "$msg" --quiet -- "${existing[@]}" 2>/dev/null || true
     )
   fi
 }

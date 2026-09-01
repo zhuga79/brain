@@ -42,27 +42,39 @@ def append_log(op: str, task_id: str = "", agent: str = "", message: str = ""):
     with LOG.open("a") as f:
         f.write(f"## [{ts()}] {op} | {task_id} | {agent} | {message}\n")
 
-def git_commit(msg: str):
-    """Auto-commit if BRAIN is a git repo."""
+_DEFAULT_COMMIT_PATHS = ("tasks/active.md", "tasks/done.md", "wiki/log.md")
+
+def git_commit(msg: str, *paths: str):
+    """Auto-commit only this operation's files if BRAIN is a git repo.
+
+    ``paths`` names the files the caller touched; without it the canonical
+    queue set is used. The commit is scoped to those paths
+    (``git commit -- <pathspec>``), so an unrelated uncommitted edit
+    elsewhere in the data layer never rides along under a ``task-add:`` /
+    ``prd-commit:`` subject (commit eddb2dc folded in 69 foreign lines).
+    """
     if not (BRAIN / ".git").exists():
         return
     try:
-        try:
-            from brain_core.layers import DATA_PATHS
-        except ImportError:
-            DATA_PATHS = ("tasks/", "wiki/", "council/", "raw/", "prd/")
-        existing = [p for p in DATA_PATHS if (BRAIN / p).exists()]
+        targets = list(paths) or list(_DEFAULT_COMMIT_PATHS)
+        existing = [p for p in targets if (BRAIN / p).exists()]
         if not existing:
             return
         add = subprocess.run(
-            ["git", "-C", str(BRAIN), "add", *existing],
+            ["git", "-C", str(BRAIN), "add", "--", *existing],
             check=False, capture_output=True, text=True,
         )
         if add.returncode != 0 and add.stderr.strip():
             sys.stderr.write(f"warning: git add failed: {add.stderr.strip()[:200]}\n")
             return
+        diff = subprocess.run(
+            ["git", "-C", str(BRAIN), "diff", "--cached", "--quiet", "--", *existing],
+            check=False,
+        )
+        if diff.returncode == 0:
+            return
         commit = subprocess.run(
-            ["git", "-C", str(BRAIN), "commit", "-m", msg, "--quiet"],
+            ["git", "-C", str(BRAIN), "commit", "-m", msg, "--quiet", "--", *existing],
             check=False, capture_output=True, text=True,
         )
         if commit.returncode != 0:
