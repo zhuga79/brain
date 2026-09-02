@@ -58,6 +58,15 @@ from .journal_merge import (
     resolve_log_conflict,
     cmd_merge_log,
 )
+from .queue_merge import (
+    ACTIVE_RELPATH,
+    DONE_RELPATH,
+    QueueConflict,
+    QueueMergeResult,
+    merge_queue,
+    resolve_queue_conflict,
+    finish_rebase_auto_resolve,
+)
 from .preflight import (
     parse_task_file_optional,
     collect_preflight,
@@ -135,6 +144,14 @@ __all__ = [
     "install_log_merge_driver",
     "resolve_log_conflict",
     "cmd_merge_log",
+    # queue merge
+    "ACTIVE_RELPATH",
+    "DONE_RELPATH",
+    "QueueConflict",
+    "QueueMergeResult",
+    "merge_queue",
+    "resolve_queue_conflict",
+    "finish_rebase_auto_resolve",
     # checks
     "comparable",
     "check_duplicates",

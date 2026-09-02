@@ -14,7 +14,8 @@ from .core import (
     node_audit_extra,
     FEDERATION_CONFIG_FILE,
 )
-from .journal_merge import finish_rebase_resolving_log, install_log_merge_driver
+from .journal_merge import install_log_merge_driver
+from .queue_merge import finish_rebase_auto_resolve
 from .merger import merge_blocks
 from brain_core import journal
 import brain_task_parser
@@ -115,11 +116,25 @@ def cmd_sync(args: argparse.Namespace) -> int:
     install_log_merge_driver(repo)
 
     # 1. Pull --rebase. wiki/log.md conflicts are resolved by the brain-log
-    # driver when it fires; otherwise the helper finishes the rebase.
+    # driver when it fires; otherwise finish_rebase_auto_resolve merges the
+    # journal and the task queue (by task id) and continues the rebase. A real
+    # task divergence (see queue_merge) aborts the rebase and blocks the sync.
     res_pull = git_pull_rebase(repo)
     if res_pull.returncode != 0:
-        if finish_rebase_resolving_log(repo):
-            print("Pull/Rebase OK (wiki/log.md merged)")
+        ok, queue_conflicts = finish_rebase_auto_resolve(repo)
+        if ok:
+            print("Pull/Rebase OK (auto-merged journal + task queue)")
+        elif queue_conflicts:
+            for conflict in queue_conflicts:
+                findings.append(Finding(
+                    "federation-sync-queue-conflict", "block", "tasks/",
+                    f"{conflict.task_id}: {conflict.kind} — {conflict.detail}",
+                    "resolve the divergence by hand, then re-run brain-federation sync",
+                ))
+            log_sync(brain, repo, "queue-conflict")
+            data = result("sync", repo, brain, findings)
+            emit(data, args.json)
+            return exit_code(findings)
         else:
             print(f"Pull failed:\n{res_pull.stderr}", file=sys.stderr)
             findings.append(Finding(
