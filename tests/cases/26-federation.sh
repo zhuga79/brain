@@ -141,9 +141,15 @@ GITIGNORE
 git -C "$repo" add .
 git -C "$repo" commit -q -m initial
 
+# A runtime file that a peer would actually receive: force-staged into the
+# index despite .gitignore (the accidental-commit case preflight must catch).
 cat >"$repo/.provider-health.json" <<'JSON'
 {"version": 1}
 JSON
+git -C "$repo" add -f .provider-health.json
+# A runtime dir that only sits on disk, still ignored — must stay silent.
+mkdir -p "$repo/.locks/t-x"
+: >"$repo/.locks/t-x/owner"
 cat >"$repo/raw/source.md" <<'RAW'
 changed source
 RAW
@@ -175,7 +181,9 @@ python3 - <<'PYEOF'
 import json
 data = json.load(open("/tmp/brain_federation_preflight.json"))
 codes = {finding["code"] for finding in data["findings"]}
-assert "runtime-file-included" in codes, data
+runtime_paths = {f["path"] for f in data["findings"] if f["code"] == "runtime-file-included"}
+assert runtime_paths == {".provider-health.json"}, data
+assert ".locks" not in runtime_paths, data
 assert "raw-rewrite" in codes, data
 assert "protected-wiki-edit" in codes, data
 assert "human-curated-wiki-edit" in codes, data

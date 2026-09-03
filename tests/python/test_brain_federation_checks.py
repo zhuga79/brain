@@ -195,6 +195,63 @@ def test_check_runtime_paths_reported(tmp_path):
         findings = check_runtime_paths(tmp_path, {".locks/"})
         assert len(findings) == 1
 
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True,
+                   capture_output=True, text=True)
+
+
+def _init_repo(tmp_path):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@test")
+    _git(tmp_path, "config", "user.name", "t")
+
+
+def test_check_runtime_paths_ignores_untracked_gitignored_dir(tmp_path):
+    """A gitignored .locks/ that only exists on disk must not block preflight —
+    every real vault has one."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".locks/\n.provider-health.json\n")
+    (tmp_path / "keep.md").write_text("x\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    (tmp_path / ".locks" / "t-x").mkdir(parents=True)
+    (tmp_path / ".locks" / "t-x" / "owner").write_text("agent\n")
+
+    assert check_runtime_paths(tmp_path, set()) == []
+
+    # ...but once it is staged for the sync, it is flagged again
+    findings = check_runtime_paths(tmp_path, {".locks/t-x/owner"})
+    assert [f.code for f in findings] == ["runtime-file-included"]
+
+
+def test_check_runtime_paths_flags_tracked_runtime_file(tmp_path):
+    """A runtime file force-committed despite .gitignore would reach a peer."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".provider-health.json\n")
+    (tmp_path / ".provider-health.json").write_text("{}\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "add", "-f", ".provider-health.json")
+    _git(tmp_path, "commit", "-qm", "oops")
+
+    findings = check_runtime_paths(tmp_path, set())
+    assert [f.code for f in findings] == ["runtime-file-included"]
+    assert findings[0].path == ".provider-health.json"
+
+
+def test_check_runtime_paths_flags_present_and_unignored(tmp_path):
+    """Present on disk and NOT covered by .gitignore — a non-git import
+    (rsync/tarball) would carry it."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".locks/\n")  # note: no .provider-health.json
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    (tmp_path / ".provider-health.json").write_text("{}\n")
+
+    findings = check_runtime_paths(tmp_path, set())
+    assert [f.code for f in findings] == ["runtime-file-included"]
+    assert findings[0].path == ".provider-health.json"
+
 def test_check_wiki_curation_no_fm(tmp_path):
     wiki = tmp_path / "wiki"
     wiki.mkdir()
