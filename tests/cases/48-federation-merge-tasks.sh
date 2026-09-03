@@ -10,6 +10,7 @@ echo ">>> Verifying brain-federation merge-tasks"
 
 brain_factory
 export PATH="$PROJECT_ROOT/runtime/bin:$PATH"
+cd "$BRAIN_FACTORY_TMP"   # the base/local/remote/merged files below are relative
 
 # 1. Setup base file
 cat << 'EOF' > base.md
