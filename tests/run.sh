@@ -18,7 +18,20 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-CASES_DIR="$SCRIPT_DIR/cases"
+# BRAIN_SMOKE_CASES_DIR overrides the case directory — only the timeout
+# self-test (99-runner-case-timeout) uses it, to run throwaway stub cases
+# through a nested runner without touching tests/cases/.
+CASES_DIR="${BRAIN_SMOKE_CASES_DIR:-$SCRIPT_DIR/cases}"
+
+# Per-case wall-clock ceiling. A hung case — e.g. a watch loop waiting on a
+# task completion that never comes (t-2026-09-01-smoke-per-case-timeout-context,
+# where 14-e2e-launch-live spun ~10 min after brain-task complete started
+# failing) — otherwise stalls the whole suite and keeps the run lock held.
+# `timeout` in its default (non-foreground) mode signals the case's whole
+# process group, so a `brain-dashboard serve` the case backgrounded is torn
+# down with it instead of leaking past the suite.
+CASE_TIMEOUT="${BRAIN_SMOKE_CASE_TIMEOUT:-180}"
+CASE_KILL_GRACE="${BRAIN_SMOKE_CASE_KILL_GRACE:-10}"
 
 # Second line of defence for hook isolation: drop every GIT_* by prefix.
 # A named denylist leaks new git variables into nested git-using cases.
@@ -107,6 +120,12 @@ export BRAIN_TEST_SANDBOX_MARKER
 STUB_BIN=$(make_provider_stubs "$TMP_HOME/.provider-stubs")
 export PATH="$STUB_BIN:$PATH"
 
+# BRAIN_SMOKE_SKIP_BOOTSTRAP: skip the one-time setup + source verification.
+# Only the timeout self-test (99-runner-case-timeout) sets it, to keep its
+# nested runner fast; a real run always bootstraps.
+if [ -n "${BRAIN_SMOKE_SKIP_BOOTSTRAP:-}" ]; then
+    echo ">>> [bootstrap] skipped (BRAIN_SMOKE_SKIP_BOOTSTRAP)"
+else
 echo ">>> [bootstrap] Running setup scripts"
 scripts=(
     setup-brain-v2.sh
@@ -151,6 +170,7 @@ grep -q "from tools_prd import" "$PROJECT_ROOT/runtime/mcp/server.py"
 grep -q "@mcp.tool()" "$PROJECT_ROOT/runtime/mcp/tools_prd.py"
 grep -q "def init_prd" "$PROJECT_ROOT/runtime/mcp/tools_prd.py"
 grep -q "def commit_prd" "$PROJECT_ROOT/runtime/mcp/tools_prd.py"
+fi
 
 # Run case files
 for case_file in "$CASES_DIR"/*.sh; do
@@ -171,14 +191,19 @@ for case_file in "$CASES_DIR"/*.sh; do
     # exec 9>&- : кейс и его фоновые серверы не наследуют fd лока.
     # Иначе переживший suite `brain-dashboard serve` держал бы flock после
     # выхода раннера — второй прогон отказывал бы в пустоту.
-    if (export PROJECT_ROOT HOME BRAIN_PATH PATH; exec 9>&-; bash "$case_file" 2>&1); then
-        case_end=$(date +%s%N)
-        elapsed_ms=$(( (case_end - case_start) / 1000000 ))
+    case_rc=0
+    (export PROJECT_ROOT HOME BRAIN_PATH PATH; exec 9>&-; \
+     exec timeout -k "$CASE_KILL_GRACE" "$CASE_TIMEOUT" bash "$case_file" 2>&1) || case_rc=$?
+    case_end=$(date +%s%N)
+    elapsed_ms=$(( (case_end - case_start) / 1000000 ))
+    if [ "$case_rc" -eq 0 ]; then
         echo ">>> [case: $case_name] PASSED (${elapsed_ms}ms)"
         PASSED=$((PASSED + 1))
+    elif [ "$case_rc" -eq 124 ] || [ "$case_rc" -eq 137 ]; then
+        # 124: timeout sent SIGTERM. 137: -k had to follow up with SIGKILL.
+        echo ">>> [case: $case_name] FAILED (timeout ${CASE_TIMEOUT}s)"
+        FAILED=$((FAILED + 1))
     else
-        case_end=$(date +%s%N)
-        elapsed_ms=$(( (case_end - case_start) / 1000000 ))
         echo ">>> [case: $case_name] FAILED (${elapsed_ms}ms)"
         FAILED=$((FAILED + 1))
     fi
