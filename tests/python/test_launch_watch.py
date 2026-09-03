@@ -681,6 +681,70 @@ class TestReleaseReturnsTheTask:
         assert calls[-1] == ["brain-lock", "release", "t-x", "--as", "agent-1"]
 
 
+class TestDefaultFedSyncTargetsTheWatchedTree:
+    """t-2026-09-02-wiki-log-md: `brain-federation sync` resolves --repo from
+    cwd, not $BRAIN_PATH, so the watch loop must name the tree explicitly.
+    An unqualified call synced the system checkout during the smoke suite."""
+
+    def test_default_fed_sync_passes_repo_and_brain(self, tmp_path, monkeypatch):
+        calls = []
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _Result()
+
+        monkeypatch.setattr(brain_launch_watch.subprocess, "run", _fake_run)
+        brain_launch_watch._default_fed_sync(str(tmp_path), env={})
+        assert calls == [[
+            "brain-federation", "sync",
+            "--repo", str(tmp_path), "--brain", str(tmp_path),
+        ]]
+
+    def test_watch_loop_sync_names_the_brain_path(self, tmp_path, monkeypatch):
+        (tmp_path / "tasks").mkdir()
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "tasks" / "active.md").write_text("# Active\n")
+        (tmp_path / "tasks" / "done.md").write_text("# Done\n")
+        (tmp_path / "wiki" / "log.md").write_text("# Log\n")
+        calls = []
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(
+            brain_launch_watch.subprocess, "run",
+            lambda cmd, **kw: (calls.append(cmd), _Result())[1],
+        )
+        run_watch_loop(
+            brain_path=str(tmp_path),
+            agent_id="watch-agent",
+            interval=1,
+            sync_interval=1,
+            ops_interval=0,
+            exit_on_empty=True,
+            next_task_fn=lambda r: None,
+            take_task_fn=lambda t, a: True,
+            launch_task_fn=lambda t: 0,
+            done_checker_fn=lambda t: True,
+            in_progress_count_fn=lambda a: 0,
+            ops_refresh_fn=lambda: None,
+            log_op_fn=lambda *a: None,
+            print_fn=lambda *a: None,
+            sleep_fn=lambda s: None,
+        )
+        sync_calls = [c for c in calls if c[:2] == ["brain-federation", "sync"]]
+        assert sync_calls, "watch loop never called federation sync"
+        assert "--repo" in sync_calls[0]
+        assert sync_calls[0][sync_calls[0].index("--repo") + 1] == str(tmp_path)
+
+
 class TestRoleFilter:
     """Verify role filter is passed to next_task_fn."""
 

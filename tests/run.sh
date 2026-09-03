@@ -172,6 +172,16 @@ grep -q "def init_prd" "$PROJECT_ROOT/runtime/mcp/tools_prd.py"
 grep -q "def commit_prd" "$PROJECT_ROOT/runtime/mcp/tools_prd.py"
 fi
 
+# A case must not write into the project checkout — everything it touches
+# belongs under its brain_factory tmpdir. Federation cases used to drop
+# base.md/merged.md at the root, and `brain-launch --watch` synced the
+# checkout itself (t-2026-09-02-wiki-log-md). --ignored catches a path a
+# .gitignore entry would otherwise hide.
+_checkout_state() {
+    git -C "$PROJECT_ROOT" status --porcelain --ignored 2>/dev/null | LC_ALL=C sort
+}
+CHECKOUT_BASELINE=$(_checkout_state)
+
 # Run case files
 for case_file in "$CASES_DIR"/*.sh; do
     [ -f "$case_file" ] || continue
@@ -196,7 +206,22 @@ for case_file in "$CASES_DIR"/*.sh; do
      exec timeout -k "$CASE_KILL_GRACE" "$CASE_TIMEOUT" bash "$case_file" 2>&1) || case_rc=$?
     case_end=$(date +%s%N)
     elapsed_ms=$(( (case_end - case_start) / 1000000 ))
-    if [ "$case_rc" -eq 0 ]; then
+
+    checkout_now=$(_checkout_state)
+    polluted=""
+    if [ "$checkout_now" != "$CHECKOUT_BASELINE" ]; then
+        polluted=$(LC_ALL=C comm -13 \
+            <(printf '%s\n' "$CHECKOUT_BASELINE") \
+            <(printf '%s\n' "$checkout_now") | grep -v '^$' || true)
+        # advance the baseline so only the offending case is flagged
+        CHECKOUT_BASELINE=$checkout_now
+    fi
+
+    if [ -n "$polluted" ]; then
+        echo ">>> [case: $case_name] FAILED (wrote into the checkout — everything belongs under brain_factory):"
+        printf '%s\n' "$polluted" | sed 's/^/       /'
+        FAILED=$((FAILED + 1))
+    elif [ "$case_rc" -eq 0 ]; then
         echo ">>> [case: $case_name] PASSED (${elapsed_ms}ms)"
         PASSED=$((PASSED + 1))
     elif [ "$case_rc" -eq 124 ] || [ "$case_rc" -eq 137 ]; then

@@ -163,9 +163,16 @@ def _default_log_op(op: str, task_id: str, agent_id: str, extra: str, log_path: 
         pass
 
 
-def _default_fed_sync(env=None) -> None:
-    """Call 'brain-federation sync' (best-effort)."""
-    cmd = ["brain-federation", "sync"]
+def _default_fed_sync(brain_path, env=None) -> None:
+    """Call 'brain-federation sync' (best-effort).
+
+    ``brain-federation sync`` resolves ``--repo`` from the current working
+    directory, not $BRAIN_PATH, so it must be named explicitly: an unqualified
+    call syncs whatever tree the watch loop happens to run in (the system
+    checkout, during the smoke suite) and appends a federation-sync row to
+    *its* wiki/log.md.
+    """
+    cmd = ["brain-federation", "sync", "--repo", str(brain_path), "--brain", str(brain_path)]
     try:
         subprocess.run(cmd, capture_output=True, text=True, env=env)
     except Exception:
@@ -326,7 +333,7 @@ def run_watch_loop(
         in_progress_count_fn if in_progress_count_fn is not None
         else (lambda aid: _default_in_progress_count(aid, active_path))
     )
-    _fed_sync = fed_sync_fn if fed_sync_fn is not None else (lambda: _default_fed_sync(env))
+    _fed_sync = fed_sync_fn if fed_sync_fn is not None else (lambda: _default_fed_sync(brain_path, env))
     _ops_refresh = ops_refresh_fn if ops_refresh_fn is not None else (lambda: _default_ops_refresh(env))
     _log = log_op_fn if log_op_fn is not None else (lambda op, tid, aid, extra: _default_log_op(op, tid, aid, extra, log_path))
     _print = print_fn if print_fn is not None else print

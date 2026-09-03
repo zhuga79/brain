@@ -37,10 +37,6 @@ learning/
 
 # Local scratch artifacts
 .worktrees/
-base.md
-local.md
-remote.md
-merged.md
 coverage_report.txt
 test-limit.json
 test-limit.md
