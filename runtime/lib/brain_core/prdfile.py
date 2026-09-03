@@ -87,10 +87,16 @@ def _write_prd(path: Path, text: str) -> None:
 
 
 def _extract_subtasks(prd_text: str) -> str:
-    match = SUBTASKS_RE.search(prd_text)
-    if not match:
+    # A PRD can end up with more than one "## Subtasks" heading — `brain-prd
+    # init` seeds one from the template and a caller may append their own
+    # (tests/cases/08 does exactly this). Read every such section, not just
+    # the first: otherwise commit normalises the template placeholder and
+    # silently drops the real subtasks, and the leftover section makes the
+    # next commit trip "duplicate normalized PRD subtask ids".
+    sections = SUBTASKS_RE.findall(prd_text)
+    if not sections:
         raise PRDError("no ## Subtasks section in PRD")
-    return match.group(1)
+    return "\n".join(sections)
 
 
 def normalize_subtasks(parent_id: str, sub_text: str) -> list[NormalizedSubtask]:
@@ -157,7 +163,20 @@ def normalize_subtasks(parent_id: str, sub_text: str) -> list[NormalizedSubtask]
 def replace_subtasks_section(prd_text: str, blocks: list[str], *, status: str | None = None) -> str:
     replacement = "## Subtasks\n\n" + "\n\n".join(blocks)
     if SUBTASKS_RE.search(prd_text):
-        updated = SUBTASKS_RE.sub(replacement, prd_text, count=1)
+        # Collapse every "## Subtasks" section into one — the first carries the
+        # committed set, any others are dropped — so the next commit reads a
+        # single well-formed section instead of tripping on leftovers.
+        seen = False
+
+        def _swap(_match: "re.Match[str]") -> str:
+            nonlocal seen
+            if seen:
+                return ""
+            seen = True
+            # function replacement: used verbatim, no backslash/group escaping
+            return replacement + "\n"
+
+        updated = re.sub(r"\n{3,}", "\n\n", SUBTASKS_RE.sub(_swap, prd_text))
     else:
         tail = "" if prd_text.endswith("\n") else "\n"
         updated = prd_text + tail + "\n" + replacement
