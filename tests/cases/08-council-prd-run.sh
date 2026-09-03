@@ -254,6 +254,16 @@ audit_count=$(grep -cE "^## \[[^]]*\] prd-commit \| $pid \|" "$BRAIN_PATH/wiki/l
 [ "$audit_count" = "1" ] || { echo "FAILED: prd-commit not audited exactly once (got $audit_count)"; cat "$BRAIN_PATH/wiki/log.md"; exit 1; }
 grep -qE "^## \[[^]]*\] prd-commit \| $pid \|.* sig=[0-9a-f]+$" "$BRAIN_PATH/wiki/log.md" || { echo "FAILED: prd-commit audit line missing sig"; exit 1; }
 
+# t-2026-09-01-brain-prd-commit-id-cli-duplic: the PRD carries the template's
+# "## Subtasks" heading plus the one appended above. A second `commit` must be
+# an idempotent no-op, not fail on "duplicate normalized PRD subtask ids".
+commit2=$(brain-prd commit "$pid" 2>&1) || { echo "FAILED: second brain-prd commit errored: $commit2"; exit 1; }
+echo "$commit2" | grep -q "appended=0" || { echo "FAILED: second commit re-appended subtasks: $commit2"; exit 1; }
+[ "$(grep -c "^- \[ \] \[P1\] $pid-s1 —" "$BRAIN_PATH/tasks/active.md")" = "1" ] || { echo "FAILED: $pid-s1 duplicated in active.md after re-commit"; exit 1; }
+[ "$(grep -c '^## Subtasks' "$BRAIN_PATH/prd/$pid.md")" = "1" ] || { echo "FAILED: PRD left with more than one ## Subtasks section"; exit 1; }
+audit_count2=$(grep -cE "^## \[[^]]*\] prd-commit \| $pid \|" "$BRAIN_PATH/wiki/log.md" || true)
+[ "$audit_count2" = "1" ] || { echo "FAILED: re-commit wrote a second audit line (got $audit_count2)"; exit 1; }
+
 echo ">>> Verifying brain-run for tax-advisor includes doctrine"
 brain_run_out=$(brain-run --role tax-advisor --task "$pid-s1")
 grep -Eq "4 этапа|4-stage doctrine|этап \\(1.?4\\)" <<< "$brain_run_out" || { echo "FAILED: Doctrine not found in brain-run output"; exit 1; }

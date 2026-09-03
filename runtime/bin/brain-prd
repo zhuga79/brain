@@ -204,11 +204,13 @@ import sys, re, pathlib
 import brain_task_parser
 prd_path, parent_id = sys.argv[1:3]
 prd_text = pathlib.Path(prd_path).read_text()
-m = re.search(r"^## Subtasks\s*$(.+?)(?=^## |\Z)", prd_text, re.S | re.M)
-if not m:
+# every "## Subtasks" section, not just the first — matches prdfile.commit,
+# so `dry-run` and `commit` never disagree about what gets committed
+_sections = re.findall(r"^## Subtasks\s*$(.+?)(?=^## |\Z)", prd_text, re.S | re.M)
+if not _sections:
     print("no ## Subtasks section in PRD")
     sys.exit(1)
-sub_text = m.group(1)
+sub_text = "\n".join(_sections)
 blocks = brain_task_parser.find_blocks(sub_text)
 if not blocks:
     print("no subtasks found")

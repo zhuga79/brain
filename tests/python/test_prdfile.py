@@ -97,6 +97,75 @@ def test_commit_recovers_when_prd_is_committed_but_queue_is_missing(tmp_path: Pa
     assert active_text.count("- [ ] [P2] t-parent-s2 — Second") == 1
 
 
+_TWO_SECTION_PRD = """---
+id: t-parent
+status: draft
+---
+## Subtasks
+
+<!-- placeholder left by `brain-prd init` — no real rows here -->
+
+## Notes
+
+anything
+
+## Subtasks
+
+- [ ] [P1] s1 — Real first
+      role: developer
+      acceptance: ok
+
+- [ ] [P2] s2 — Real second
+      role: developer
+      acceptance: ok
+      depends_on: [s1]
+"""
+
+
+def test_extract_subtasks_reads_every_section(tmp_path: Path):
+    # `brain-prd init` seeds a "## Subtasks" section; a caller may append their
+    # own. _extract_subtasks must see the real rows, not just the first heading.
+    text = prdfile._extract_subtasks(_TWO_SECTION_PRD)
+    ids = [s.task_id for s in prdfile.normalize_subtasks("t-parent", text)]
+    assert ids == ["t-parent-s1", "t-parent-s2"]
+
+
+def test_commit_twice_on_a_two_section_prd_is_idempotent(tmp_path: Path):
+    # The bug: the leftover section made the second commit trip
+    # "duplicate normalized PRD subtask ids".
+    prd_path, active, done = _setup_brain(tmp_path)
+    prd_path.write_text(_TWO_SECTION_PRD, encoding="utf-8")
+
+    first = prdfile.commit(prd_path, active, done, "t-parent")
+    second = prdfile.commit(prd_path, active, done, "t-parent")
+
+    assert first.appended_ids == ["t-parent-s1", "t-parent-s2"]
+    assert second.appended_ids == []
+    prd_after = prd_path.read_text(encoding="utf-8")
+    assert prd_after.count("## Subtasks") == 1
+    assert "Real first" in prd_after and "Real second" in prd_after
+    active_text = active.read_text(encoding="utf-8")
+    assert active_text.count("- [ ] [P1] t-parent-s1 — Real first") == 1
+    assert active_text.count("- [ ] [P2] t-parent-s2 — Real second") == 1
+
+
+def test_commit_collapses_sections_without_gluing_headings(tmp_path: Path):
+    prd_path, active, done = _setup_brain(tmp_path)
+    prd_path.write_text(_TWO_SECTION_PRD, encoding="utf-8")
+
+    prdfile.commit(prd_path, active, done, "t-parent")
+
+    prd_after = prd_path.read_text(encoding="utf-8")
+    # no "…text## Subtasks" run, and the surviving section still parses
+    assert "\n## Subtasks\n" in prd_after
+    assert re.search(r"[^\n]## Subtasks", prd_after) is None
+    leftover = prdfile._extract_subtasks(prd_after)
+    assert [s.task_id for s in prdfile.normalize_subtasks("t-parent", leftover)] == [
+        "t-parent-s1",
+        "t-parent-s2",
+    ]
+
+
 def test_concurrent_add_complete_and_prd_commit_preserve_all_mutations(tmp_path: Path):
     prd_path, active, done = _setup_brain(tmp_path)
     barrier = threading.Barrier(3)

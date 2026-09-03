@@ -46,61 +46,13 @@ mkdir -p "$BRAIN/prd"
 # здесь разошлась с первой: в одной были depends_on и mode:prd, в другой —
 # client и project, и какая доедет до пользователя, решал порядок запуска.
 
-# Шаблон PRD-файла
-cat > "$BRAIN/prd/_TEMPLATE.md" <<'EOF'
----
-parent: <task-id>
-created: <ts>
-status: draft
----
-
-# PRD: <Title>
-
-## Goal
-<Что должно быть сделано в одном абзаце. Какой результат>
-
-## Why
-<Зачем. Какая проблема решается. Какая гипотеза.>
-
-## Scope
-### In scope
--
-### Out of scope (non-goals)
--
-
-## Constraints
-<Технические, временные, бюджетные ограничения>
-
-## Decomposition rationale
-<Почему именно такая декомпозиция. Какие альтернативы рассмотрены.>
-
-## Acceptance for parent task
-<Когда родительская PRD-задача считается выполненной — обычно после того,
-как все сабтаски выполнены и интеграционные acceptance работают>
-
-## Subtasks
-
-> Формат: каждый сабтаск — markdown-чекбокс с метаданными.
-> ID автогенерится на основе parent: <parent>-s1, <parent>-s2, ... либо
-> можно задать явно после "—".
-> depends_on: ссылается на ранее перечисленные id или на другие задачи.
-
-- [ ] [P1] s1 — Название первого сабтаска
-      role: developer
-      depends_on: []
-      acceptance: что считается готовым
-      ref: [[wiki/...]]
-
-- [ ] [P1] s2 — Название второго
-      role: developer
-      depends_on: [s1]
-      acceptance: ...
-
-- [ ] [P2] s3 — Документация
-      role: researcher
-      depends_on: [s2]
-      acceptance: ...
-EOF
+# Шаблон PRD-файла — канонический prd/_TEMPLATE.md из чекаута, не вторая
+# копия. Прежняя встроенная копия молча расходилась с первой и несла примеры
+# сабтасок прямо в секции "## Subtasks": после дописанной секции `brain-prd
+# commit` нормализовал их вместо настоящих, а остаток ронял следующий commit
+# на "duplicate normalized PRD subtask ids"
+# (t-2026-09-01-brain-prd-commit-id-cli-duplic).
+cp "$SCRIPT_DIR/prd/_TEMPLATE.md" "$BRAIN/prd/_TEMPLATE.md"
 
 # brain-prd CLI
 
