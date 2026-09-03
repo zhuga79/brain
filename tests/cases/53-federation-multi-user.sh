@@ -111,7 +111,12 @@ grep -q "federated-lock-warning" "$BRAIN_FACTORY_TMP/preflight-b.json" \
   || { echo "FAILED: preflight did not warn about the held lock"; cat "$BRAIN_FACTORY_TMP/preflight-b.json"; exit 1; }
 grep -q "t-shared is locked locally" "$BRAIN_FACTORY_TMP/preflight-b.json" \
   || { echo "FAILED: lock warning did not name t-shared"; cat "$BRAIN_FACTORY_TMP/preflight-b.json"; exit 1; }
-echo "OK: preflight surfaces the federated lock conflict (s2)"
+# a gitignored .locks/ that only exists on disk must not block preflight
+grep -q '"runtime-file-included"' "$BRAIN_FACTORY_TMP/preflight-b.json" \
+  && { echo "FAILED: gitignored .locks/ tripped runtime-file-included"; cat "$BRAIN_FACTORY_TMP/preflight-b.json"; exit 1; }
+grep -q '"ok": true' "$BRAIN_FACTORY_TMP/preflight-b.json" \
+  || { echo "FAILED: preflight not ok for a normal vault with a held lock"; cat "$BRAIN_FACTORY_TMP/preflight-b.json"; exit 1; }
+echo "OK: preflight surfaces the federated lock conflict without a false block (s2)"
 
 git -C "$VB" commit -aqm "b: take t-b-owned + file t-b-new"
 

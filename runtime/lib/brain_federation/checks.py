@@ -94,24 +94,44 @@ def path_matches(path: str, pattern: str) -> bool:
     return path == pattern
 
 
+def _tracked_paths(repo: Path) -> set[str]:
+    res = git_run(repo, "ls-files", "-z")
+    if res.returncode != 0:
+        return set()
+    return {entry for entry in res.stdout.split("\0") if entry}
+
+
+def _is_git_ignored(repo: Path, rel: str) -> bool:
+    # `git check-ignore -q` exits 0 when the path is ignored, 1 when it is not,
+    # and >1 on error (outside a work tree). "Not a repo" therefore reads as
+    # "not ignored", which is the behaviour we want for a non-git import.
+    return git_run(repo, "check-ignore", "-q", rel).returncode == 0
+
+
 def check_runtime_paths(repo: Path, changed_paths: set[str]) -> list[Finding]:
     findings: list[Finding] = []
     reported: set[str] = set()
+    tracked = _tracked_paths(repo)
     for pattern in RUNTIME_PATHS:
-        target = repo / pattern.rstrip("/")
-        exists = target.exists()
+        rel = pattern.rstrip("/")
+        # A runtime path is a sync risk only when a peer would actually receive
+        # it: tracked in the index, staged/changed for this sync, or — for a
+        # non-git transport (import/rsync) — present on disk and not ignored.
+        # A gitignored .locks/ that merely exists (every vault has one) is not
+        # a risk and must not block preflight.
+        is_tracked = any(path_matches(path, pattern) for path in tracked)
         changed = any(path_matches(path, pattern) for path in changed_paths)
-        if not exists and not changed:
+        present_risk = (repo / rel).exists() and not _is_git_ignored(repo, rel)
+        if not (is_tracked or changed or present_risk):
             continue
-        path = pattern.rstrip("/")
-        if path in reported:
+        if rel in reported:
             continue
-        reported.add(path)
+        reported.add(rel)
         findings.append(
             Finding(
                 "runtime-file-included",
                 "block",
-                path,
+                rel,
                 "runtime-local/generated Brain file must not be synced",
                 "remove from commit/import and keep it ignored",
             )
