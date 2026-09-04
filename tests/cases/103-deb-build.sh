@@ -40,9 +40,14 @@ case "$(fld Depends)" in
   *"python3 (>= 3.10)"*", git"*", jq"*) : ;;
   *) echo "FAILED: Depends = $(fld Depends)"; exit 1 ;;
 esac
-echo "$(fld Depends)" | grep -q 'misc:Depends' && { echo "FAILED: unresolved \${misc:Depends} in control"; exit 1; }
+grep -q 'misc:Depends' <<< "$(fld Depends)" && { echo "FAILED: unresolved \${misc:Depends} in control"; exit 1; }
 
 # --- FHS payload layout ---
+# `dpkg-deb --contents` is captured once; every check reads it via a herestring
+# (`<<<`), never `echo "$contents" | grep`. The pipe form is a pipefail race:
+# `grep -q` closes its read end on the first match, `echo` gets EPIPE on the
+# next write and exits non-zero, and pipefail then fails the whole case even
+# though the pattern matched (tests/_lib.sh::capture_output).
 contents="$(dpkg-deb --contents "$deb")"
 for want in \
   './usr/bin/brain-task' \
@@ -59,13 +64,13 @@ for want in \
   './usr/share/brain/teams/pm.md' \
   './usr/share/brain/config/routing.json' \
   './usr/share/brain/spec/' ; do
-  echo "$contents" | grep -qE " ${want}\$| ${want} -> " \
-    || { echo "FAILED: $want not in the package"; echo "$contents" | head -50; exit 1; }
+  grep -qE " ${want}\$| ${want} -> " <<< "$contents" \
+    || { echo "FAILED: $want not in the package"; head -50 <<< "$contents"; exit 1; }
 done
 # brain-common is a sourced library, never a /usr/bin entry point
-echo "$contents" | grep -qE ' \./usr/bin/brain-common$' && { echo "FAILED: brain-common got a /usr/bin wrapper"; exit 1; }
+grep -qE ' \./usr/bin/brain-common$' <<< "$contents" && { echo "FAILED: brain-common got a /usr/bin wrapper"; exit 1; }
 # the importable library lives only in dist-packages, not under /usr/share
-echo "$contents" | grep -qE ' \./usr/share/brain/runtime/lib/' && { echo "FAILED: runtime/lib duplicated under /usr/share/brain"; exit 1; }
+grep -qE ' \./usr/share/brain/runtime/lib/' <<< "$contents" && { echo "FAILED: runtime/lib duplicated under /usr/share/brain"; exit 1; }
 
 # --- wrapper shape ---
 dpkg-deb -x "$deb" "$work/x"
@@ -78,7 +83,7 @@ grep -q 'exec "/usr/share/brain/runtime/bin/brain-task"' "$wrapper" \
 share="$work/x/usr/share/brain"
 export PYTHONPATH="$work/x/usr/lib/python3/dist-packages:$share/runtime/mcp"
 out="$(bash "$share/runtime/bin/brain-task" --help 2>&1 || true)"
-echo "$out" | grep -q "brain-task" || { echo "FAILED: packaged brain-task --help produced no help"; echo "$out"; exit 1; }
+grep -q "brain-task" <<< "$out" || { echo "FAILED: packaged brain-task --help produced no help"; printf '%s\n' "$out"; exit 1; }
 
 # --- the packaged tree bootstraps a vault that brain-validate accepts.
 #     This is the no-container half of s7's check: setup-brain-v2 seeds
@@ -91,8 +96,8 @@ HOME="$work/fakehome" BRAIN_PATH="$vault" bash "$share/setup-brain-v2.sh" \
   --module pm-finance,design-negotiator,teams,power-features,tax-boundaries,doctrine \
   > "$work/setup.log" 2>&1 || { echo "FAILED: setup-brain-v2 from the package failed"; tail -20 "$work/setup.log"; exit 1; }
 vout="$(python3 "$share/runtime/bin/brain-validate" --brain "$vault" 2>&1 || true)"
-echo "$vout" | grep -qE '^ERROR:' && { echo "FAILED: packaged vault has validation errors"; echo "$vout" | grep -E '^(ERROR|WARN):'; exit 1; }
-echo "$vout" | grep -q "Brain validation passed" || { echo "FAILED: brain-validate did not pass on the packaged vault"; echo "$vout" | tail -20; exit 1; }
+grep -qE '^ERROR:' <<< "$vout" && { echo "FAILED: packaged vault has validation errors"; grep -E '^(ERROR|WARN):' <<< "$vout"; exit 1; }
+grep -q "Brain validation passed" <<< "$vout" || { echo "FAILED: brain-validate did not pass on the packaged vault"; tail -20 <<< "$vout"; exit 1; }
 
 # --- changelog / pyproject version drift is a hard error ---
 mkdir -p "$work/repo"
@@ -104,4 +109,4 @@ if bash "$work/repo/runtime/packaging/build-deb.sh" --out-dir "$work/dist2" >/de
   echo "FAILED: build-deb.sh did not reject changelog/pyproject version drift"; exit 1
 fi
 
-echo "deb-build OK (brain-runtime ${version}, $(echo "$contents" | wc -l) entries)"
+echo "deb-build OK (brain-runtime ${version}, $(wc -l <<< "$contents") entries)"
