@@ -21,7 +21,7 @@ grep -qE '^\s*deb-install:' "$wf" || { echo "FAILED: deb-install job missing fro
 # The smoke suite never pulls container images itself — the real run is the
 # deb-install CI job. Exercise the harness's SKIP path only.
 out="$(BRAIN_SKIP_DEB_CONTAINER_TEST=1 bash "$script" 2>&1 || true)"
-echo "$out" | grep -q '^SKIP:' \
+grep -q '^SKIP:' <<< "$out" \
   || { echo "FAILED: harness did not honour BRAIN_SKIP_DEB_CONTAINER_TEST: $out"; exit 1; }
 
 echo "deb-install-verify OK (harness wired into CI; containers run there)"
