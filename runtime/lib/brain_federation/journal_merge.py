@@ -172,6 +172,20 @@ def merge_journal(local: str, remote: str, base: str = "") -> str:
     return _render(preamble, merged)
 
 
+def _covers(inputs: list[JournalRow], merged: list[JournalRow]) -> bool:
+    """Every row identity on either side must survive the merge.
+
+    The journal is append-only and the merge is a union, so this holds by
+    construction for :func:`merge_journal`. It can fail only when the merge
+    lost history — an input that read back empty mid-rebase, a stale
+    installed ``brain_federation`` behind the driver command. The driver
+    checks it and refuses (t-2026-09-04-brain-sync-cycle-wiki-log-md-g)
+    rather than write a journal that dropped rows.
+    """
+    have = {row.identity for row in merged}
+    return all(row.identity in have for row in inputs)
+
+
 def _read_journal_file(path: str | Path) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -191,9 +205,23 @@ def merge_journal_files(base: str | Path, local: str | Path, remote: str | Path)
 
 
 def git_driver(base: str, local: str, remote: str) -> int:
-    """Git merge driver: write the merged journal onto ``local`` (%A)."""
+    """Git merge driver: write the merged journal onto ``local`` (%A).
+
+    Append-only: the result must carry every row from both sides. If it
+    does not, refuse (return 1) — git leaves the conflict for
+    ``brain-federation`` or a human instead of committing a journal that
+    lost history (t-2026-09-04-brain-sync-cycle-wiki-log-md-g).
+    """
     try:
-        merged = merge_journal_files(base, local, remote)
+        local_text = _read_journal_file(local)
+        remote_text = _read_journal_file(remote)
+        merged = merge_journal(local_text, remote_text, _read_journal_file(base))
+        _, local_rows = parse_journal(local_text)
+        _, remote_rows = parse_journal(remote_text)
+        _, merged_rows = parse_journal(merged)
+        if not _covers([*local_rows, *remote_rows], merged_rows):
+            sys.stderr.write("brain-log: refusing a merge that drops journal rows\n")
+            return 1
         Path(local).write_text(merged, encoding="utf-8")
     except OSError:
         return 1
@@ -285,11 +313,14 @@ def resolve_log_conflict(repo: Path) -> bool:
     paths = unmerged_paths(repo)
     if LOG_RELPATH not in paths:
         return False
-    merged = merge_journal(
-        _stage_text(repo, 2, LOG_RELPATH),
-        _stage_text(repo, 3, LOG_RELPATH),
-        _stage_text(repo, 1, LOG_RELPATH),
-    )
+    ours = _stage_text(repo, 2, LOG_RELPATH)
+    theirs = _stage_text(repo, 3, LOG_RELPATH)
+    merged = merge_journal(ours, theirs, _stage_text(repo, 1, LOG_RELPATH))
+    _, ours_rows = parse_journal(ours)
+    _, theirs_rows = parse_journal(theirs)
+    _, merged_rows = parse_journal(merged)
+    if not _covers([*ours_rows, *theirs_rows], merged_rows):
+        return False
     dest = repo / LOG_RELPATH
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(merged, encoding="utf-8")

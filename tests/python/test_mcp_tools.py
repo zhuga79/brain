@@ -158,3 +158,47 @@ def test_coverage_shutil(mock_brain):
     assert tools_wiki.get_doctrine()["doctrines"] == []
     shutil.rmtree(brain / "wiki")
     assert tools_wiki.search_wiki("q")["results"] == []
+
+
+def _git_init(path):
+    import subprocess
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "t@brain.local"],
+        ["config", "user.name", "t"],
+        ["config", "commit.gpgsign", "false"],
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=True)
+
+
+def test_append_log_restores_a_deleted_journal_from_head(mock_brain):
+    """The journal file is gone but git HEAD still carries it — a bad merge,
+    a stray checkout. append_log must restore the history, not stub over it:
+    that stub is what brain-sync committed twice on 2026-09-04, losing ~3400
+    rows (t-2026-09-04-brain-sync-cycle-wiki-log-md-g)."""
+    import subprocess
+    brain, common, tools_tasks, tools_wiki = mock_brain
+    _git_init(brain)
+    full = "# Log\n\n" + "".join(
+        f"## [2026-08-{d:02d}T00:00:00Z] op | t-{d} | a | x\n" for d in range(1, 21)
+    )
+    common.LOG.write_text(full)
+    subprocess.run(["git", "-C", str(brain), "add", "wiki/log.md"], check=True)
+    subprocess.run(["git", "-C", str(brain), "commit", "-qm", "journal"], check=True)
+
+    common.LOG.unlink()
+    common.append_log("task-start", "t-99", "agent", "back again")
+
+    text = common.LOG.read_text()
+    assert full.rstrip("\n") in text
+    assert text.count("## [") == 21
+    assert text.endswith("back again\n")
+
+
+def test_append_log_stubs_a_genuinely_new_journal(mock_brain):
+    brain, common, tools_tasks, tools_wiki = mock_brain
+    assert not common.LOG.exists()
+    common.append_log("op", "t-1", "a", "m")
+    text = common.LOG.read_text()
+    assert text.startswith("# Log\n\n")
+    assert text.rstrip("\n").endswith("op | t-1 | a | m")

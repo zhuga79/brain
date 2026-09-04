@@ -463,6 +463,50 @@ def test_git_driver_positional_overwrites_local(tmp_path):
     assert _ids(local.read_text(encoding="utf-8")) == ["t-base", "t-mid", "t-late"]
 
 
+def test_git_driver_refuses_a_merge_that_drops_rows(tmp_path, monkeypatch):
+    """A stale/broken merge_journal that loses history must not be written.
+
+    The driver reparses its own output and refuses (rc 1, %A untouched) so
+    git leaves the conflict instead of committing a truncated journal
+    (t-2026-09-04-brain-sync-cycle-wiki-log-md-g).
+    """
+    from brain_federation import journal_merge as jm
+
+    base = tmp_path / "O"
+    local = tmp_path / "A"
+    remote = tmp_path / "B"
+    base.write_text("", encoding="utf-8")
+    intact = _log(_row(T0, task_id="t-a"), _row(T1, task_id="t-b"))
+    local.write_text(intact, encoding="utf-8")
+    remote.write_text(_log(_row(T2, task_id="t-c", agent="bob")), encoding="utf-8")
+
+    monkeypatch.setattr(jm, "merge_journal", lambda *a, **k: "# Log\n")
+
+    assert jm.git_driver(str(base), str(local), str(remote)) == 1
+    assert local.read_text(encoding="utf-8") == intact
+
+
+def test_resolve_log_conflict_refuses_a_lossy_merge(tmp_path, monkeypatch):
+    from brain_federation import journal_merge as jm
+
+    repo = _init_repo(tmp_path / "repo")
+    log = repo / LOG_RELPATH
+    log.parent.mkdir(parents=True)
+    log.write_text(_log(_row(T0, task_id="t-base")), encoding="utf-8")
+    _git(repo, "add", LOG_RELPATH)
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-qb", "other")
+    log.write_text(_log(_row(T0, task_id="t-base"), _row(T2, task_id="t-remote", agent="bob")), encoding="utf-8")
+    _git(repo, "commit", "-qam", "remote")
+    _git(repo, "checkout", "-q", "main")
+    log.write_text(_log(_row(T0, task_id="t-base"), _row(T1, task_id="t-local")), encoding="utf-8")
+    _git(repo, "commit", "-qam", "local")
+    assert _git(repo, "merge", "other", check=False).returncode != 0  # real conflict staged
+
+    monkeypatch.setattr(jm, "merge_journal", lambda *a, **k: "")
+    assert resolve_log_conflict(repo) is False
+
+
 def test_cmd_merge_log_missing_file_exits_2(tmp_path):
     from brain_federation.journal_merge import cmd_merge_log
 
