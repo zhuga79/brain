@@ -132,8 +132,62 @@ def test_core_version_module():
     from brain_core.version import core_location, core_version
 
     assert isinstance(core_version(), str) and core_version()
-    loc = Path(core_location())
-    assert loc.is_dir() or loc.suffix == ".pth"
+    loc = core_location()
+    assert Path(loc).is_dir() or loc.endswith(".pth") or loc.startswith("dpkg:")
+
+
+class _Run:
+    def __init__(self, rc, out=""):
+        self.returncode, self.stdout, self.stderr = rc, out, ""
+
+
+def test_core_version_falls_back_to_dpkg_when_metadata_is_blank(monkeypatch):
+    """t-2026-08-16-...-s6: the .deb has no dist-info, so dpkg-query answers."""
+    import brain_core.version as ver
+
+    monkeypatch.setattr(ver.metadata, "version",
+                        lambda _d: (_ for _ in ()).throw(ver.metadata.PackageNotFoundError()))
+    monkeypatch.setattr(ver, "_matching_pth", lambda _r: None)
+    monkeypatch.setattr(ver, "_distribution_dir", lambda: None)
+    monkeypatch.setattr(ver.shutil, "which", lambda _c: "/usr/bin/" + _c)
+
+    calls = []
+
+    def fake_run(cmd, **_kw):
+        calls.append(cmd)
+        if cmd[:2] == ["dpkg", "-S"]:
+            return _Run(0, f"brain-runtime: {cmd[2]}\n")
+        if cmd[:2] == ["dpkg-query", "-W"]:
+            return _Run(0, "0.2.0")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(ver.subprocess, "run", fake_run)
+    assert ver.core_version() == "0.2.0"
+    assert ver.core_location() == "dpkg:brain-runtime"
+    assert ["dpkg", "-S"] == calls[0][:2]
+
+
+def test_core_version_dpkg_fallback_ignores_a_file_dpkg_does_not_own(monkeypatch):
+    import brain_core.version as ver
+
+    monkeypatch.setattr(ver.metadata, "version",
+                        lambda _d: (_ for _ in ()).throw(ver.metadata.PackageNotFoundError()))
+    monkeypatch.setattr(ver, "_matching_pth", lambda _r: None)
+    monkeypatch.setattr(ver.shutil, "which", lambda _c: "/usr/bin/" + _c)
+    # dpkg -S: file belongs to no package
+    monkeypatch.setattr(ver.subprocess, "run",
+                        lambda cmd, **_k: _Run(1, "dpkg-query: no path found matching\n"))
+    assert ver.core_version() == "unpackaged"
+
+
+def test_core_version_dpkg_fallback_noop_without_dpkg(monkeypatch):
+    import brain_core.version as ver
+
+    monkeypatch.setattr(ver.metadata, "version",
+                        lambda _d: (_ for _ in ()).throw(ver.metadata.PackageNotFoundError()))
+    monkeypatch.setattr(ver, "_matching_pth", lambda _r: None)
+    monkeypatch.setattr(ver.shutil, "which", lambda _c: None)
+    assert ver.core_version() == "unpackaged"
 
 
 def test_core_location_is_the_import_path():
