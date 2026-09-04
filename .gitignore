@@ -37,6 +37,11 @@ learning/
 
 # Local scratch artifacts
 .worktrees/
+dist/
+debian/brain-runtime/
+debian/files
+debian/.debhelper/
+debian/*.substvars
 coverage_report.txt
 test-limit.json
 test-limit.md
