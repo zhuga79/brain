@@ -14,12 +14,17 @@ runtime/mcp                  usr/share/brain/runtime
 runtime/schemas              usr/share/brain/runtime
 runtime/templates            usr/share/brain/runtime
 
-# spec, role personas, the PRD template and the bootstrap scripts.
-# setup-brain-v2.sh seeds a vault's roles/ from $SCRIPT_DIR/roles (v2/roles
-# does not exist), so the package must carry it or a fresh vault has no roles
-# and brain-validate fails on the escalation matrix.
+# spec, the curated seed set and the bootstrap scripts. setup-brain-v2.sh
+# prefers $SCRIPT_DIR/{roles,teams,doctrine,skills} and
+# $SCRIPT_DIR/config/routing.json over the sparser runtime/templates/v2 copies;
+# the package must carry them or a fresh vault is missing role personas and the
+# doctrine files the personas reference, and brain-validate errors.
 spec                         usr/share/brain
 roles                        usr/share/brain
+teams                        usr/share/brain
+doctrine                     usr/share/brain
+skills                       usr/share/brain
+config                       usr/share/brain
 prd/_TEMPLATE.md             usr/share/brain/prd
 setup-brain-v2.sh            usr/share/brain
 add-teams-brain.sh           usr/share/brain
