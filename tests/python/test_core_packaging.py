@@ -166,3 +166,49 @@ def test_embedded_python_heredocs_are_valid():
             except SyntaxError as exc:
                 broken.append(f"{path.relative_to(REPO)}: {exc}")
     assert broken == [], broken
+
+
+# --- t-2026-08-16-multi-user-federation-readines-s5: debian packaging ---
+
+def _control_field(name: str) -> str:
+    text = (REPO / "debian" / "control").read_text(encoding="utf-8")
+    m = re.search(rf"(?m)^{re.escape(name)}:[ \t]*(.*(?:\n[ \t]+.*)*)", text)
+    return m.group(1).strip() if m else ""
+
+
+def test_debian_skeleton_files_present():
+    for rel in ("control", "changelog", "compat", "copyright", "rules",
+                "install", "source/format"):
+        assert (REPO / "debian" / rel).is_file(), f"debian/{rel} missing"
+    assert (REPO / "debian" / "rules").stat().st_mode & 0o111, "debian/rules not executable"
+    assert (REPO / "runtime" / "packaging" / "build-deb.sh").stat().st_mode & 0o111
+
+
+def test_debian_control_declares_arch_all_and_runtime_deps():
+    assert _control_field("Package") == "brain-runtime"
+    assert _control_field("Architecture") == "all"
+    depends = _control_field("Depends")
+    assert "python3 (>= 3.10)" in depends
+    assert re.search(r"\bgit\b", depends) and re.search(r"\bjq\b", depends)
+
+
+def test_debian_changelog_version_matches_pyproject():
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
+    top = (REPO / "debian" / "changelog").read_text(encoding="utf-8").splitlines()[0]
+    m = re.match(r"brain-runtime \(([^)]+)\)", top)
+    assert m and m.group(1) == version, f"changelog {top!r} != pyproject {version}"
+
+
+def test_debian_install_lists_only_existing_paths():
+    for line in (REPO / "debian" / "install").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        src = line.split()[0]
+        assert (REPO / src).exists(), f"debian/install names missing {src}"
+
+
+def test_build_deb_script_does_not_touch_an_installed_tree():
+    text = (REPO / "runtime" / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    assert ".local/" not in text and "$HOME/.local" not in text

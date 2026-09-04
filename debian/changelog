@@ -1,0 +1,9 @@
+brain-runtime (0.2.0) unstable; urgency=medium
+
+  * Initial Debian packaging: CLI + Python library under /usr/lib/brain-runtime,
+    thin wrappers in /usr/bin. Built from the canonical source tree by
+    runtime/packaging/build-deb.sh (dpkg-deb, no fpm/debhelper toolchain).
+  * Federation multi-user readiness (node identity, lock-conflict guard,
+    deterministic wiki/log.md and task-queue merge on sync).
+
+ -- Brain Runtime <noreply@brain.local>  Wed, 03 Sep 2026 00:00:00 +0000

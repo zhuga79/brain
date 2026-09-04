@@ -1,0 +1,19 @@
+Source: brain-runtime
+Section: utils
+Priority: optional
+Maintainer: Brain Runtime <noreply@brain.local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/Blqd/brain
+
+Package: brain-runtime
+Architecture: all
+Depends: python3 (>= 3.10), git, jq, ${misc:Depends}
+Description: Multi-agent knowledge base runtime
+ Brain is a file-based knowledge base with a role-based task queue, curated
+ wiki, council mode and git federation for small teams on one LAN repository.
+ .
+ This package installs the CLI (brain-task, brain-validate, brain-federation,
+ ...) and the Python library under /usr/lib/brain-runtime. Bootstrap a vault
+ with `setup-brain-v2.sh` after installing.

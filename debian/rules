@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+# The reproducible, toolchain-free build path is
+# runtime/packaging/build-deb.sh — it stages the tree and calls dpkg-deb
+# directly (no debhelper, no fpm, no ruby). This debhelper rules file exists
+# so `dpkg-buildpackage -us -uc` also works on a full Debian build host; it
+# defers the staging to the same script to keep one source of truth.
+export DEB_BUILD_OPTIONS += nocheck
+
+%:
+	dh $@
+
+override_dh_auto_build:
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	bash runtime/packaging/build-deb.sh --stage-only --stage-dir debian/brain-runtime
