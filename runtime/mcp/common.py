@@ -35,10 +35,31 @@ mcp = FastMCP("brain")
 def ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def _seed_missing_log() -> None:
+    """wiki/log.md is gone. If git HEAD still carries it, the file was
+    deleted out from under us — a bad journal merge, a stray checkout, a
+    stale sync helper — so restore its history from HEAD rather than start
+    a fresh two-line stub. Appending to that stub and letting brain-sync
+    commit it is how ~3400 rows were lost twice on 2026-09-04
+    (t-2026-09-04-brain-sync-cycle-wiki-log-md-g). Only fall back to the
+    stub when the journal is genuinely new (untracked).
+    """
+    if (BRAIN / ".git").exists():
+        head = subprocess.run(
+            ["git", "-C", str(BRAIN), "show", "HEAD:wiki/log.md"],
+            check=False, capture_output=True, text=True,
+        )
+        if head.returncode == 0 and head.stdout.strip():
+            body = head.stdout if head.stdout.endswith("\n") else head.stdout + "\n"
+            LOG.write_text(body)
+            return
+    LOG.write_text("# Log\n\n")
+
+
 def append_log(op: str, task_id: str = "", agent: str = "", message: str = ""):
     LOG.parent.mkdir(parents=True, exist_ok=True)
     if not LOG.exists():
-        LOG.write_text("# Log\n\n")
+        _seed_missing_log()
     with LOG.open("a") as f:
         f.write(f"## [{ts()}] {op} | {task_id} | {agent} | {message}\n")
 
