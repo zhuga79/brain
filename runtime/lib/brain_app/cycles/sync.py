@@ -53,16 +53,38 @@ def matches_runtime(path: str) -> bool:
     return any(path_matches(path, pattern) for pattern in RUNTIME_PATHS)
 
 
+def _journal_is_append_only(repo: Path) -> bool:
+    """The working-tree journal must extend HEAD's, never shrink it.
+
+    wiki/log.md is append-only. A working copy that is shorter than, or does
+    not start with, the committed one is corruption (a stale sync helper
+    truncated it, a bad merge emptied it — t-2026-09-02-wiki-log-md), and
+    committing that would bake the loss into history. Refuse instead.
+    """
+    head = git_run(repo, "show", f"HEAD:{JOURNAL_PATH}")
+    if head.returncode != 0:
+        return True  # not tracked yet — nothing to lose
+    committed = head.stdout.rstrip("\n")
+    try:
+        working = (repo / JOURNAL_PATH).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return len(working) >= len(committed) and working.startswith(committed)
+
+
 def autocommit_journal(repo: Path) -> bool:
     """Автокоммит append-only журнала перед preflight.
 
     Пробы и циклы дописывают wiki/log.md без коммита, из-за чего каждый
     автоматический синк блокировался dirty-worktree. Журнал коммитим только
     когда он — единственная незакоммиченная durable-правка; любые другие
-    изменения по-прежнему требуют ручного коммита.
+    изменения по-прежнему требуют ручного коммита. Усечённый журнал не
+    коммитим — это порча, а не дозапись.
     """
     dirty_durable = sorted(path for path in status_paths(repo, include_untracked=False) if not matches_runtime(path))
     if dirty_durable != [JOURNAL_PATH]:
+        return False
+    if not _journal_is_append_only(repo):
         return False
     if git_run(repo, "add", "--", JOURNAL_PATH).returncode != 0:
         return False
@@ -112,11 +134,18 @@ def collect_findings(repo: Path) -> list[Finding]:
             "remove it from git and keep it ignored",
         ))
 
-    for path in sorted(path for path in status_paths(repo, include_untracked=False) if not matches_runtime(path)):
+    dirty_durable = sorted(path for path in status_paths(repo, include_untracked=False) if not matches_runtime(path))
+    for path in dirty_durable:
         findings.append(Finding(
             "dirty-worktree", "block", path,
             "tracked durable Brain file has uncommitted changes",
             "commit or resolve local changes before automatic sync",
+        ))
+    if JOURNAL_PATH in dirty_durable and not _journal_is_append_only(repo):
+        findings.append(Finding(
+            "journal-corrupted", "block", JOURNAL_PATH,
+            "wiki/log.md working copy is shorter than the committed one — it was truncated",
+            "restore it from git (git checkout wiki/log.md or the last full commit) before syncing",
         ))
     return findings
 
