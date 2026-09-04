@@ -2,7 +2,7 @@
 title: Decisions Log
 type: decision
 created: 2026-05-03
-updated: 2026-08-31
+updated: 2026-09-04
 curation: agent
 protected: false
 source_policy: advisory
@@ -28,5 +28,6 @@ visibility: public
 - [[decision-post-inversion-cycle]] — следующий цикл: живая инверсия двух корней, без новых продуктовых функций (2026-08-14)
 - [[decision-setup-runtime-pth-and-pytest-pythonpath]] — порт data-root: `.pth` всегда после pip; `pythonpath` в pyproject отклонён (2026-08-31)
 - [[decision-model-signature]] — единая политика подписи модели при complete: versioned обязательно, unsigned только явный hatch (2026-08-31)
+- [[decision-multi-user-federation]] — federation для команды (идентичность узла, конфликт лока, детерминированное слияние журнала и очередей) + сборка устанавливаемого .deb из канонического источника (2026-09-04)
 
 Связанные страницы: [[about-brain]], [[roles-overview]].
