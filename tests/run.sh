@@ -17,10 +17,13 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-# BRAIN_SMOKE_CASES_DIR overrides the case directory — only the timeout
-# self-test (99-runner-case-timeout) uses it, to run throwaway stub cases
-# through a nested runner without touching tests/cases/.
+# BRAIN_SMOKE_PROJECT_ROOT overrides the checkout the runner guards — only the
+# self-tests use it, to point a nested runner at a throwaway git repo instead
+# of the real checkout.
+PROJECT_ROOT="${BRAIN_SMOKE_PROJECT_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+# BRAIN_SMOKE_CASES_DIR overrides the case directory — only the self-tests use
+# it, to run throwaway stub cases through a nested runner without touching
+# tests/cases/.
 CASES_DIR="${BRAIN_SMOKE_CASES_DIR:-$SCRIPT_DIR/cases}"
 
 # Per-case wall-clock ceiling. A hung case — e.g. a watch loop waiting on a
@@ -176,9 +179,13 @@ fi
 # belongs under its brain_factory tmpdir. Federation cases used to drop
 # base.md/merged.md at the root, and `brain-launch --watch` synced the
 # checkout itself (t-2026-09-02-wiki-log-md). --ignored catches a path a
-# .gitignore entry would otherwise hide.
+# .gitignore entry would otherwise hide; python bytecode and tool caches
+# are filtered out — they appear on a fresh checkout (CI) as the suite
+# imports modules, and are not the kind of write this guard is for.
 _checkout_state() {
-    git -C "$PROJECT_ROOT" status --porcelain --ignored 2>/dev/null | LC_ALL=C sort
+    git -C "$PROJECT_ROOT" status --porcelain --ignored 2>/dev/null \
+        | { grep -vE '__pycache__/|\.(pytest|ruff|mypy)_cache/|\.py[cod]$|(^| )\.coverage$' || true; } \
+        | LC_ALL=C sort
 }
 CHECKOUT_BASELINE=$(_checkout_state)
 

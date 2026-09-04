@@ -49,6 +49,9 @@ GENERIC = {
 ALLOW = re.compile(
     r"example\.(com|org)|@example|noreply|localhost|\btest@|\bsmoke@|\byou@|"
     r"\bt@t\.com\b|user\.email|"
+    # почта на зарезервированный не-маршрутизируемый TLD (RFC 2606 / 6762) —
+    # синтетический адрес, не может принадлежать человеку: autosave@brain.local и т.п.
+    r"@[\w.-]+\.(?:local|test|invalid|example)\b|"
     r"ромашка|placeholder|<[a-z-]+>|xxx|0000000000",
     re.I,
 )

@@ -25,6 +25,9 @@ contact: you@example.com
 alt: t@t.com
 from: smoke@local.test
 noreply: noreply@localhost
+autosave: autosave@brain.local
+ci: runner@build.invalid
+doc: someone@service.example
 EOF
 git -C "$allow_repo" add fixtures.md
 git -C "$allow_repo" commit --quiet -m "fixture emails"
