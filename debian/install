@@ -14,8 +14,12 @@ runtime/mcp                  usr/share/brain/runtime
 runtime/schemas              usr/share/brain/runtime
 runtime/templates            usr/share/brain/runtime
 
-# spec, the PRD template and the bootstrap scripts.
+# spec, role personas, the PRD template and the bootstrap scripts.
+# setup-brain-v2.sh seeds a vault's roles/ from $SCRIPT_DIR/roles (v2/roles
+# does not exist), so the package must carry it or a fresh vault has no roles
+# and brain-validate fails on the escalation matrix.
 spec                         usr/share/brain
+roles                        usr/share/brain
 prd/_TEMPLATE.md             usr/share/brain/prd
 setup-brain-v2.sh            usr/share/brain
 add-teams-brain.sh           usr/share/brain

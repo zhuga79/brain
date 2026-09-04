@@ -433,7 +433,7 @@ cat <<INFO
   brain-run --role architect --task t-2026-05-01-bootstrap-wiki | claude -p
 
   # 2. Параллельно: разработчик и ревьюер на разных моделях
-  AGENT_DEV="dev-$(uuidgen | head -c4)"
+  AGENT_DEV="dev-$RANDOM"
   brain-task take t-... --as \$AGENT_DEV
   brain-run --role developer --task t-... --agent-id \$AGENT_DEV | claude
   # ... в другом терминале ...

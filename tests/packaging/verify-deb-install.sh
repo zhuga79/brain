@@ -4,8 +4,9 @@
 # on PATH, the reported Core version is not "unpackaged", a factory vault
 # bootstraps and brain-validate passes.
 #
-# Docker is required. Without it the script SKIPs (exit 0) so it is safe to
-# call from the smoke runner; CI runs it for real.
+# Docker is required. Without it (or with BRAIN_SKIP_DEB_CONTAINER_TEST set)
+# the script SKIPs (exit 0) so the smoke runner can call it cheaply; the
+# deb-install CI job runs it for real.
 #
 # Usage: bash tests/packaging/verify-deb-install.sh [image ...]
 set -euo pipefail
@@ -14,6 +15,10 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGES=("$@")
 [ "${#IMAGES[@]}" -gt 0 ] || IMAGES=(debian:stable ubuntu:latest)
 
+if [ -n "${BRAIN_SKIP_DEB_CONTAINER_TEST:-}" ]; then
+  echo "SKIP: BRAIN_SKIP_DEB_CONTAINER_TEST set"
+  exit 0
+fi
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "SKIP: docker not available — CI runs this for real"
   exit 0
@@ -50,7 +55,8 @@ python3 -c "import brain_core.version, brain_task_parser, brain_federation.core"
 git config --global user.email ci@brain.local
 git config --global user.name  ci
 export BRAIN_PATH=/tmp/vault
-bash /usr/share/brain/setup-brain-v2.sh >/dev/null
+bash /usr/share/brain/setup-brain-v2.sh \
+  --module pm-finance,design-negotiator,teams,power-features,tax-boundaries,doctrine >/dev/null
 
 core_line="$(brain-status --brain /tmp/vault 2>/dev/null | sed -n "s/^Core: //p" || true)"
 echo "Core line: ${core_line:-<none>}"
