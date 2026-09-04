@@ -55,6 +55,9 @@ for want in \
   './usr/share/brain/setup-brain-v2.sh' \
   './usr/share/brain/prd/_TEMPLATE.md' \
   './usr/share/brain/roles/developer.md' \
+  './usr/share/brain/doctrine/design-review-workflow.md' \
+  './usr/share/brain/teams/pm.md' \
+  './usr/share/brain/config/routing.json' \
   './usr/share/brain/spec/' ; do
   echo "$contents" | grep -qE " ${want}\$| ${want} -> " \
     || { echo "FAILED: $want not in the package"; echo "$contents" | head -50; exit 1; }
@@ -72,9 +75,24 @@ grep -q 'exec "/usr/share/brain/runtime/bin/brain-task"' "$wrapper" \
 
 # --- the packaged tree actually runs (dist-packages is on the default path
 #     in a real Debian install; simulate that here) ---
-out="$(PYTHONPATH="$work/x/usr/lib/python3/dist-packages:$work/x/usr/share/brain/runtime/mcp" \
-  bash "$work/x/usr/share/brain/runtime/bin/brain-task" --help 2>&1 || true)"
+share="$work/x/usr/share/brain"
+export PYTHONPATH="$work/x/usr/lib/python3/dist-packages:$share/runtime/mcp"
+out="$(bash "$share/runtime/bin/brain-task" --help 2>&1 || true)"
 echo "$out" | grep -q "brain-task" || { echo "FAILED: packaged brain-task --help produced no help"; echo "$out"; exit 1; }
+
+# --- the packaged tree bootstraps a vault that brain-validate accepts.
+#     This is the no-container half of s7's check: setup-brain-v2 seeds
+#     roles/teams/doctrine/skills from $SCRIPT_DIR, which the package must
+#     carry, or role personas reference doctrine files that are not there. ---
+vault="$work/vault"
+HOME="$work/fakehome" git config --global user.email t@brain.local 2>/dev/null || true
+HOME="$work/fakehome" git config --global user.name t 2>/dev/null || true
+HOME="$work/fakehome" BRAIN_PATH="$vault" bash "$share/setup-brain-v2.sh" \
+  --module pm-finance,design-negotiator,teams,power-features,tax-boundaries,doctrine \
+  > "$work/setup.log" 2>&1 || { echo "FAILED: setup-brain-v2 from the package failed"; tail -20 "$work/setup.log"; exit 1; }
+vout="$(python3 "$share/runtime/bin/brain-validate" --brain "$vault" 2>&1 || true)"
+echo "$vout" | grep -qE '^ERROR:' && { echo "FAILED: packaged vault has validation errors"; echo "$vout" | grep -E '^(ERROR|WARN):'; exit 1; }
+echo "$vout" | grep -q "Brain validation passed" || { echo "FAILED: brain-validate did not pass on the packaged vault"; echo "$vout" | tail -20; exit 1; }
 
 # --- changelog / pyproject version drift is a hard error ---
 mkdir -p "$work/repo"
