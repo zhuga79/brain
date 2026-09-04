@@ -559,6 +559,40 @@ def test_commit_journal_after_sync_leaves_unrelated_dirt(tmp_path):
     assert "wiki/log.md" in status
 
 
+def test_autocommit_journal_refuses_a_truncated_log(tmp_path):
+    """t-2026-09-02-wiki-log-md: a stale sync helper zeroed wiki/log.md and the
+    cycle committed the empty file, wiping ~3400 rows of history. The cycle
+    must refuse to commit a journal that is shorter than HEAD's, and flag it."""
+    repo = _cycle_repo(tmp_path)
+    full = "# Log\n" + "".join(f"## [2026-08-{d:02d}T00:00:00Z] op | t-{d} | a | x\n" for d in range(1, 25))
+    (repo / "wiki" / "log.md").write_text(full)
+    subprocess.run(["git", "-C", str(repo), "commit", "-aqm", "journal"], check=True)
+
+    (repo / "wiki" / "log.md").write_text("")  # truncated by a broken helper
+
+    assert sync.autocommit_journal(repo) is False
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "show", "HEAD:wiki/log.md"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert committed == full  # history intact in git
+
+    findings = sync.collect_findings(repo)
+    codes = {f.code for f in findings}
+    assert "journal-corrupted" in codes
+
+
+def test_autocommit_journal_accepts_a_genuine_append(tmp_path):
+    repo = _cycle_repo(tmp_path)
+    full = "# Log\n## [2026-08-30T00:00:00Z] op | t-1 | a | x\n"
+    (repo / "wiki" / "log.md").write_text(full)
+    subprocess.run(["git", "-C", str(repo), "commit", "-aqm", "journal"], check=True)
+
+    (repo / "wiki" / "log.md").write_text(full + "## [2026-08-31T00:00:00Z] op | t-2 | a | y\n")
+
+    assert sync.autocommit_journal(repo) is True
+
+
 @pytest.mark.parametrize(
     "module, required",
     [
