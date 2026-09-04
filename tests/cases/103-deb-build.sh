@@ -54,6 +54,7 @@ for want in \
   './usr/share/brain/runtime/templates/v2/MEMORY.md' \
   './usr/share/brain/setup-brain-v2.sh' \
   './usr/share/brain/prd/_TEMPLATE.md' \
+  './usr/share/brain/roles/developer.md' \
   './usr/share/brain/spec/' ; do
   echo "$contents" | grep -qE " ${want}\$| ${want} -> " \
     || { echo "FAILED: $want not in the package"; echo "$contents" | head -50; exit 1; }

@@ -18,14 +18,10 @@ wf="$PROJECT_ROOT/.github/workflows/tests.yml"
 grep -q 'verify-deb-install.sh' "$wf" || { echo "FAILED: no CI job runs verify-deb-install.sh"; exit 1; }
 grep -qE '^\s*deb-install:' "$wf" || { echo "FAILED: deb-install job missing from tests.yml"; exit 1; }
 
-# Without docker the harness SKIPs cleanly so the smoke runner can call it.
-out="$(bash "$script" 2>&1 || true)"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo "$out" | grep -qE 'deb install verified on|FAILED' \
-    || { echo "FAILED: docker present but harness produced no verdict"; echo "$out"; exit 1; }
-  echo "$out" | grep -q 'FAILED' && { echo "FAILED: container install verification failed"; echo "$out"; exit 1; }
-  echo "deb-install-verify OK (ran containers)"
-else
-  echo "$out" | grep -q '^SKIP:' || { echo "FAILED: no-docker run did not SKIP: $out"; exit 1; }
-  echo "deb-install-verify OK (SKIP without docker; CI runs it for real)"
-fi
+# The smoke suite never pulls container images itself — the real run is the
+# deb-install CI job. Exercise the harness's SKIP path only.
+out="$(BRAIN_SKIP_DEB_CONTAINER_TEST=1 bash "$script" 2>&1 || true)"
+echo "$out" | grep -q '^SKIP:' \
+  || { echo "FAILED: harness did not honour BRAIN_SKIP_DEB_CONTAINER_TEST: $out"; exit 1; }
+
+echo "deb-install-verify OK (harness wired into CI; containers run there)"
