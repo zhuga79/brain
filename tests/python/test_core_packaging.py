@@ -266,3 +266,21 @@ def test_debian_install_lists_only_existing_paths():
 def test_build_deb_script_does_not_touch_an_installed_tree():
     text = (REPO / "runtime" / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
     assert ".local/" not in text and "$HOME/.local" not in text
+
+
+def test_ci_has_a_blocking_deb_install_job():
+    wf = (REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^\s{2}deb-install:", wf), "no deb-install job in tests.yml"
+    assert "tests/packaging/verify-deb-install.sh" in wf
+    assert "continue-on-error" not in wf
+
+
+def test_verify_deb_install_script_present_and_executable():
+    script = REPO / "tests" / "packaging" / "verify-deb-install.sh"
+    assert script.is_file() and script.stat().st_mode & 0o111
+    text = script.read_text(encoding="utf-8")
+    # both target images named, and a clean SKIP path when docker is absent
+    assert "debian:stable" in text and "ubuntu:latest" in text
+    assert "SKIP:" in text
+    # the failure conditions the acceptance calls out
+    assert "not on PATH" in text and "unpackaged" in text

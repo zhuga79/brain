@@ -48,3 +48,19 @@ jobs:
       - name: Generic PII and secrets
         # --generic-only: named denylist stays off the runner.
         run: python3 runtime/bin/brain-guard tree --brain . --generic-only
+
+  deb-install:
+    name: deb-install
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fakeroot
+
+      - name: Build and install the .deb in clean debian/ubuntu containers
+        # Builds brain-runtime_<version>_all.deb from the tree, installs it into
+        # debian:stable and ubuntu:latest, checks the CLI is on PATH, the Core
+        # version is not "unpackaged", and a factory vault validates.
+        run: bash tests/packaging/verify-deb-install.sh
