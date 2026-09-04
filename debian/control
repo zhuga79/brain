@@ -15,5 +15,6 @@ Description: Multi-agent knowledge base runtime
  wiki, council mode and git federation for small teams on one LAN repository.
  .
  This package installs the CLI (brain-task, brain-validate, brain-federation,
- ...) and the Python library under /usr/lib/brain-runtime. Bootstrap a vault
- with `setup-brain-v2.sh` after installing.
+ ...) as /usr/bin wrappers, the Python library into python3 dist-packages and
+ the scripts and templates into /usr/share/brain. Bootstrap a vault with
+ `setup-brain-v2.sh` after installing.

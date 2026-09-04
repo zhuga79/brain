@@ -42,31 +42,37 @@ case "$(fld Depends)" in
 esac
 echo "$(fld Depends)" | grep -q 'misc:Depends' && { echo "FAILED: unresolved \${misc:Depends} in control"; exit 1; }
 
-# --- payload layout ---
+# --- FHS payload layout ---
 contents="$(dpkg-deb --contents "$deb")"
 for want in \
   './usr/bin/brain-task' \
   './usr/bin/brain-federation' \
-  './usr/lib/brain-runtime/runtime/bin/brain-common' \
-  './usr/lib/brain-runtime/runtime/lib/brain_core/version.py' \
-  './usr/lib/brain-runtime/runtime/mcp/server.py' \
-  './usr/lib/brain-runtime/setup-brain-v2.sh' \
-  './usr/lib/brain-runtime/spec/' ; do
+  './usr/lib/python3/dist-packages/brain_core/version.py' \
+  './usr/lib/python3/dist-packages/brain_task_parser.py' \
+  './usr/share/brain/runtime/bin/brain-common' \
+  './usr/share/brain/runtime/mcp/server.py' \
+  './usr/share/brain/runtime/templates/v2/MEMORY.md' \
+  './usr/share/brain/setup-brain-v2.sh' \
+  './usr/share/brain/prd/_TEMPLATE.md' \
+  './usr/share/brain/spec/' ; do
   echo "$contents" | grep -qE " ${want}\$| ${want} -> " \
-    || { echo "FAILED: $want not in the package"; echo "$contents" | head -40; exit 1; }
+    || { echo "FAILED: $want not in the package"; echo "$contents" | head -50; exit 1; }
 done
 # brain-common is a sourced library, never a /usr/bin entry point
 echo "$contents" | grep -qE ' \./usr/bin/brain-common$' && { echo "FAILED: brain-common got a /usr/bin wrapper"; exit 1; }
+# the importable library lives only in dist-packages, not under /usr/share
+echo "$contents" | grep -qE ' \./usr/share/brain/runtime/lib/' && { echo "FAILED: runtime/lib duplicated under /usr/share/brain"; exit 1; }
 
 # --- wrapper shape ---
 dpkg-deb -x "$deb" "$work/x"
 wrapper="$work/x/usr/bin/brain-task"
-grep -q 'exec "/usr/lib/brain-runtime/runtime/bin/brain-task"' "$wrapper" \
+grep -q 'exec "/usr/share/brain/runtime/bin/brain-task"' "$wrapper" \
   || { echo "FAILED: wrapper does not exec the real path"; cat "$wrapper"; exit 1; }
 
-# --- the packaged tree actually runs ---
-out="$(PYTHONPATH="$work/x/usr/lib/brain-runtime/runtime/lib:$work/x/usr/lib/brain-runtime/runtime/mcp" \
-  bash "$work/x/usr/lib/brain-runtime/runtime/bin/brain-task" --help 2>&1 || true)"
+# --- the packaged tree actually runs (dist-packages is on the default path
+#     in a real Debian install; simulate that here) ---
+out="$(PYTHONPATH="$work/x/usr/lib/python3/dist-packages:$work/x/usr/share/brain/runtime/mcp" \
+  bash "$work/x/usr/share/brain/runtime/bin/brain-task" --help 2>&1 || true)"
 echo "$out" | grep -q "brain-task" || { echo "FAILED: packaged brain-task --help produced no help"; echo "$out"; exit 1; }
 
 # --- changelog / pyproject version drift is a hard error ---
