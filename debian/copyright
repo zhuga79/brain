@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: brain-runtime
-Source: https://github.com/Blqd/brain
+Source: https://github.com/zhuga79/brain
 
 Files: *
 Copyright: 2026 Brain contributors

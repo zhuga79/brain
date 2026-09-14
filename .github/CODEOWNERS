@@ -3,11 +3,11 @@
 
 # Branch protection / rulesets (block direct push to master, require green CI
 # before merge) are unavailable on this private Free-plan repository.
-# GET /repos/Blqd/brain/branches/master/protection and /rulesets → 403
+# GET /repos/zhuga79/brain/branches/master/protection and /rulesets → 403
 # «Upgrade to GitHub Pro or make this repository public».
-# Do not make the repo public to unlock this. Re-apply after GitHub Pro,
-# or after the repo is public following a clean-history recreate.
-# If history rewrite recreates Blqd/brain, re-apply labels, merge settings
+# Do not make the repo public only to unlock this. Re-apply after GitHub Pro,
+# or after a deliberate public release from clean history.
+# If history rewrite recreates zhuga79/brain, re-apply labels, merge settings
 # (squash off; merge-commit and rebase on) and this .github/ tree.
 
 # Контракты системы: меняются только вместе с ADR.

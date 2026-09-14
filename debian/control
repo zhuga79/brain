@@ -5,7 +5,7 @@ Maintainer: Brain Runtime <noreply@brain.local>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
-Homepage: https://github.com/Blqd/brain
+Homepage: https://github.com/zhuga79/brain
 
 Package: brain-runtime
 Architecture: all
