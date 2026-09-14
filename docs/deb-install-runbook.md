@@ -50,7 +50,7 @@ brain-status | grep '^Core:'                             # Core: <version> (dpkg
 `/usr/share/brain`, `/usr/bin/brain-*` — обёртки, которые `exec`ают реальный
 скрипт (чтобы `dirname "$BASH_SOURCE"` внутри находил `brain-common` и `../`).
 
-## Развернуть вольт
+## Развернуть хранилище
 
 ```sh
 BRAIN_PATH=/path/to/vault bash /usr/share/brain/setup-brain-v2.sh
@@ -59,7 +59,7 @@ brain-validate --brain /path/to/vault
 
 ## Встречный sync двух узлов
 
-Оба вольта клонированы из общего bare-remote. На каждом задай идентичность
+Оба хранилища клонированы из общего bare-remote. На каждом задай идентичность
 (один раз):
 
 ```sh

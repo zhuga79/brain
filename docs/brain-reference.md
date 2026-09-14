@@ -55,15 +55,15 @@ $BRAIN_PATH/roles/developer.md
 Он затеняет одноимённый файл из системного корня. Остальные роли по-прежнему
 берутся из `$BRAIN_SYSTEM_PATH/roles/`.
 
-Для `teams/` правило нужно читать уже точнее: canonical system team catalog
-остаётся system-owned и не должен зеркалироваться в data root как вторая
-истина. При этом data-local и case team files допустимы; если нужный team file
+Для `teams/` правило нужно читать точнее: канонический системный каталог команд
+остаётся в системном корне и не должен зеркалироваться в корне данных как вторая
+истина. При этом локальные команды и команды отдельных дел допустимы; если нужный файл команды
 лежит в `$BRAIN/teams/`, он берётся раньше одноимённого файла из
 `$BRAIN_SYSTEM_PATH/teams/`.
 
 Для `doctrine/`, `skills/` и `.cli-mapping.sh` действует тот же технический
-резолв `data first -> system fallback`, но split-root contract не разрешает
-возвращать их в data root как вторую canonical копию системного слоя.
+резолв `data first -> system fallback`, но контракт двух корней не разрешает
+возвращать их в корень данных как вторую каноническую копию системного слоя.
 
 `brain-status` печатает оба пути (`Brain:` и `System:`).
 
@@ -80,8 +80,8 @@ $BRAIN_PATH/roles/developer.md
 - `brain-ingest [file|-] --slug <slug>` — загрузка Markdown/text источника в `raw/` с метаданными.
 - `brain-validate` — проверка целостности wiki и контрактов курации.
 - `brain-lint` — поиск логических ошибок, дублей и orphan-страниц.
-- `brain-index rebuild` — пересборка `.brain/index/` machine cache (pages/links/sources/search).
-- `brain-search "<query>"` — BM25-поиск по machine cache; если индекс stale, сначала `brain-index rebuild`.
+- `brain-index rebuild` — пересборка машинного кэша `.brain/index/` (pages/links/sources/search).
+- `brain-search "<query>"` — BM25-поиск по машинному кэшу; если индекс устарел, сначала `brain-index rebuild`.
 
 ## Optional Obsidian Skills
 

@@ -1,6 +1,6 @@
 # Brain
 
-[![tests](https://github.com/Blqd/brain/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/Blqd/brain/actions/workflows/tests.yml)
+[![tests](https://github.com/zhuga79/brain/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/zhuga79/brain/actions/workflows/tests.yml)
 
 File-backed memory and task orchestration for humans and LLM agents sharing
 one vault. Not a framework and not a service: a set of CLIs over plain
@@ -120,7 +120,7 @@ repo.
 
 | Repository | Contents | Location |
 |---|---|---|
-| System (this repo) | `runtime/`, `tests/`, `spec/`, `roles/`, `teams/`, `doctrine/`, `skills/`, ADR, root documents | `github.com/Blqd/brain` |
+| System (this repo) | `runtime/`, `tests/`, `spec/`, `roles/`, `teams/`, `doctrine/`, `skills/`, ADR, root documents | `github.com/zhuga79/brain` |
 | Data | layer: `wiki/`, `tasks/`, `raw/`, `council/`, `handoff/`, `prd/`, `.locks/` | `~/brain`, one per operator / shared per team |
 
 The system checkout is this repository. The data layer is the operator's
@@ -139,7 +139,7 @@ reject such staged files in the data tree. To apply to a live instance:
 ## Installation
 
 ```bash
-git clone https://github.com/Blqd/brain.git ~/src/brain
+git clone https://github.com/zhuga79/brain.git ~/src/brain
 cd ~/src/brain
 ./setup-brain-v2.sh
 export BRAIN_PATH="$HOME/brain"
@@ -253,7 +253,7 @@ changes. CLA is not used; inbound=outbound under Apache-2.0.
 ## Security
 
 See [SECURITY.md](SECURITY.md). Report vulnerabilities privately via
-[GitHub Security Advisories](https://github.com/Blqd/brain/security/advisories/new).
+[GitHub Security Advisories](https://github.com/zhuga79/brain/security/advisories/new).
 
 ---
 
